@@ -7,7 +7,8 @@ pub fn default_aikd_dir() -> PathBuf {
         .unwrap_or_else(|_| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("C:\\"))
-                .join("AppData").join("Roaming")
+                .join("AppData")
+                .join("Roaming")
         })
         .join("aikd")
 }

@@ -1,9 +1,9 @@
 pub mod mcp;
 pub mod rest;
 
+use aikd_core::Config;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use aikd_core::Config;
 
 #[derive(Clone)]
 pub struct AppState {

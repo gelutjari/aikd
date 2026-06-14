@@ -1,8 +1,8 @@
-use anyhow::Result;
-use rusqlite::Connection;
-use fastembed::{TextEmbedding, InitOptionsUserDefined, UserDefinedEmbeddingModel, TokenizerFiles};
-use std::path::Path;
 use aikd_core::ResourceProfile;
+use anyhow::Result;
+use fastembed::{InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
+use rusqlite::Connection;
+use std::path::Path;
 
 pub const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 pub const DIMENSIONS: usize = 384;
@@ -40,7 +40,9 @@ pub fn download_model(model_dir: &Path) -> Result<()> {
 }
 
 pub fn is_model_downloaded(model_dir: &Path) -> bool {
-    HF_MODEL_URLS.iter().all(|(f, _)| model_dir.join(f).exists())
+    HF_MODEL_URLS
+        .iter()
+        .all(|(f, _)| model_dir.join(f).exists())
 }
 
 pub fn create_model(model_dir: &Path) -> Result<TextEmbedding> {
@@ -53,7 +55,10 @@ pub fn create_model(model_dir: &Path) -> Result<TextEmbedding> {
             tokenizer_config_file: std::fs::read(model_dir.join("tokenizer_config.json"))?,
         };
         let user_model = UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files);
-        let model = TextEmbedding::try_new_from_user_defined(user_model, InitOptionsUserDefined::default())?;
+        let model = TextEmbedding::try_new_from_user_defined(
+            user_model,
+            InitOptionsUserDefined::default(),
+        )?;
         Ok(model)
     } else {
         anyhow::bail!("Model not found at {}. Download with: curl -L -o {}/model.onnx https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx", model_dir.display(), model_dir.display())
@@ -62,9 +67,12 @@ pub fn create_model(model_dir: &Path) -> Result<TextEmbedding> {
 
 pub fn embed_and_store(conn: &Connection, model_dir: &Path, batch_size: usize) -> Result<usize> {
     let mut stmt = conn.prepare("SELECT id, content FROM chunks WHERE id NOT IN (SELECT chunk_id FROM embeddings WHERE model = ?1)")?;
-    let rows: Vec<(String, String)> = stmt.query_map(rusqlite::params![MODEL_NAME], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?.filter_map(|r| r.ok()).collect();
+    let rows: Vec<(String, String)> = stmt
+        .query_map(rusqlite::params![MODEL_NAME], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     if rows.is_empty() {
         return Ok(0);
@@ -89,7 +97,11 @@ pub fn embed_and_store(conn: &Connection, model_dir: &Path, batch_size: usize) -
     Ok(total)
 }
 
-pub fn embed_and_store_with_profile(conn: &Connection, model_dir: &Path, profile: &ResourceProfile) -> Result<usize> {
+pub fn embed_and_store_with_profile(
+    conn: &Connection,
+    model_dir: &Path,
+    profile: &ResourceProfile,
+) -> Result<usize> {
     if !profile.embedding_enabled {
         log::info!("Embedding disabled (low resource mode)");
         return Ok(0);
@@ -98,7 +110,9 @@ pub fn embed_and_store_with_profile(conn: &Connection, model_dir: &Path, profile
 }
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() { return 0.0; }
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
     let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
     for i in 0..a.len() {
         dot += a[i] * b[i];
@@ -106,11 +120,20 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         nb += b[i] * b[i];
     }
     let d = na.sqrt() * nb.sqrt();
-    if d == 0.0 { 0.0 } else { dot / d }
+    if d == 0.0 {
+        0.0
+    } else {
+        dot / d
+    }
 }
 
-pub fn vector_search(query: &[f32], all: &[(String, Vec<f32>)], limit: usize) -> Vec<(String, f32)> {
-    let mut scored: Vec<(String, f32)> = all.iter()
+pub fn vector_search(
+    query: &[f32],
+    all: &[(String, Vec<f32>)],
+    limit: usize,
+) -> Vec<(String, f32)> {
+    let mut scored: Vec<(String, f32)> = all
+        .iter()
         .map(|(id, e)| (id.clone(), cosine_similarity(query, e)))
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -120,8 +143,12 @@ pub fn vector_search(query: &[f32], all: &[(String, Vec<f32>)], limit: usize) ->
 
 pub fn reciprocal_rank_fusion(kw: &[String], vec: &[String], k: u64) -> Vec<(String, f32)> {
     let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
-    for (r, id) in kw.iter().enumerate() { *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k as f32 + r as f32 + 1.0); }
-    for (r, id) in vec.iter().enumerate() { *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k as f32 + r as f32 + 1.0); }
+    for (r, id) in kw.iter().enumerate() {
+        *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k as f32 + r as f32 + 1.0);
+    }
+    for (r, id) in vec.iter().enumerate() {
+        *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k as f32 + r as f32 + 1.0);
+    }
     let mut fused: Vec<(String, f32)> = scores.into_iter().collect();
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     fused
@@ -145,7 +172,12 @@ pub fn store_embeddings(conn: &Connection, ids: &[String], embeddings: &[Vec<f32
         "INSERT OR REPLACE INTO embeddings (chunk_id, model, dimensions, vector) VALUES (?1, ?2, ?3, ?4)"
     )?;
     for (id, emb) in ids.iter().zip(embeddings.iter()) {
-        stmt.execute(rusqlite::params![id, MODEL_NAME, DIMENSIONS as i64, f32_to_bytes(emb)])?;
+        stmt.execute(rusqlite::params![
+            id,
+            MODEL_NAME,
+            DIMENSIONS as i64,
+            f32_to_bytes(emb)
+        ])?;
     }
     Ok(())
 }
@@ -161,16 +193,25 @@ pub fn delete_embeddings_for_file(conn: &Connection, file_id: i64) -> Result<()>
 pub fn import_embeddings_json(conn: &Connection, json_path: &str) -> Result<usize> {
     let content = std::fs::read_to_string(json_path)?;
     let data: serde_json::Value = serde_json::from_str(&content)?;
-    let arr = data.as_array().ok_or_else(|| anyhow::anyhow!("Expected JSON array"))?;
+    let arr = data
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Expected JSON array"))?;
 
     let mut imported = 0;
     for item in arr {
         let chunk_id = item["chunk_id"].as_str().unwrap_or_default().to_string();
-        let embedding: Vec<f32> = item["embedding"].as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+        let embedding: Vec<f32> = item["embedding"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        if chunk_id.is_empty() || embedding.is_empty() { continue; }
+        if chunk_id.is_empty() || embedding.is_empty() {
+            continue;
+        }
 
         conn.execute(
             "INSERT OR REPLACE INTO embeddings (chunk_id, model, dimensions, vector) VALUES (?1, ?2, ?3, ?4)",
@@ -200,12 +241,17 @@ pub fn export_chunks_for_embedding(conn: &Connection, output_path: &str) -> Resu
 
 pub fn f32_to_bytes(v: &[f32]) -> Vec<u8> {
     let mut b = Vec::with_capacity(v.len() * 4);
-    for &f in v { b.extend_from_slice(&f.to_le_bytes()); }
+    for &f in v {
+        b.extend_from_slice(&f.to_le_bytes());
+    }
     b
 }
 
 pub fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 pub struct EmbeddingCache {
@@ -236,7 +282,8 @@ impl EmbeddingCache {
 
     pub fn preload_for_ids(&self, chunk_ids: &[String], conn: &Connection) -> Result<()> {
         let mut cache = self.cache.lock();
-        let ids_to_load: Vec<&String> = chunk_ids.iter()
+        let ids_to_load: Vec<&String> = chunk_ids
+            .iter()
             .filter(|id| cache.get(id.as_str()).is_none())
             .collect();
 
@@ -245,7 +292,7 @@ impl EmbeddingCache {
         }
 
         let mut stmt = conn.prepare(
-            "SELECT chunk_id, vector FROM embeddings WHERE model = ?1 AND chunk_id = ?2"
+            "SELECT chunk_id, vector FROM embeddings WHERE model = ?1 AND chunk_id = ?2",
         )?;
 
         for id in ids_to_load {

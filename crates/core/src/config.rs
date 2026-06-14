@@ -1,6 +1,6 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use anyhow::Result;
 
 use crate::resource::ResourceMode;
 
@@ -108,20 +108,45 @@ pub struct ResourceConfig {
     pub mode: ResourceMode,
 }
 
-fn default_version() -> String { "1.1.0".to_string() }
-fn default_paths() -> Vec<String> { vec![".".to_string()] }
-fn default_extensions() -> Vec<String> {
-    vec!["md", "json", "yaml", "yml", "txt", "toml"].into_iter().map(String::from).collect()
+fn default_version() -> String {
+    "1.1.0".to_string()
 }
-fn default_max_chunk_tokens() -> usize { 1000 }
-fn default_min_chunk_tokens() -> usize { 100 }
-fn default_auto() -> String { "auto".to_string() }
-fn default_model() -> String { "all-MiniLM-L6-v2".to_string() }
-fn default_device() -> String { "cpu".to_string() }
-fn default_compute_threads() -> usize { 4 }
-fn default_db_path() -> String { "~/.aikd/aikd.db".to_string() }
-fn default_tantivy_path() -> String { "~/.aikd/tantivy_index".to_string() }
-fn default_cache_size_mb() -> usize { 512 }
+fn default_paths() -> Vec<String> {
+    vec![".".to_string()]
+}
+fn default_extensions() -> Vec<String> {
+    vec!["md", "json", "yaml", "yml", "txt", "toml"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+fn default_max_chunk_tokens() -> usize {
+    1000
+}
+fn default_min_chunk_tokens() -> usize {
+    100
+}
+fn default_auto() -> String {
+    "auto".to_string()
+}
+fn default_model() -> String {
+    "all-MiniLM-L6-v2".to_string()
+}
+fn default_device() -> String {
+    "cpu".to_string()
+}
+fn default_compute_threads() -> usize {
+    4
+}
+fn default_db_path() -> String {
+    "~/.aikd/aikd.db".to_string()
+}
+fn default_tantivy_path() -> String {
+    "~/.aikd/tantivy_index".to_string()
+}
+fn default_cache_size_mb() -> usize {
+    512
+}
 fn default_model_path() -> String {
     // Model terpisah dari config/DB agar tidak terhapus saat reset
     crate::platform::default_aikd_dir()
@@ -129,22 +154,42 @@ fn default_model_path() -> String {
         .to_string_lossy()
         .to_string()
 }
-fn default_true() -> bool { true }
-fn default_rest_port() -> u16 { 9090 }
-fn default_cors_origins() -> Vec<String> { vec!["*".to_string()] }
+fn default_true() -> bool {
+    true
+}
+fn default_rest_port() -> u16 {
+    9090
+}
+fn default_cors_origins() -> Vec<String> {
+    vec!["*".to_string()]
+}
 
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
             include_paths: default_paths(),
             exclude_paths: vec![
-                "node_modules", ".git", "__pycache__", ".cache", "target",
-                ".cargo", "dist", "build", ".next", ".venv",
-            ].into_iter().map(String::from).collect(),
+                "node_modules",
+                ".git",
+                "__pycache__",
+                ".cache",
+                "target",
+                ".cargo",
+                "dist",
+                "build",
+                ".next",
+                ".venv",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
             include_extensions: default_extensions(),
             exclude_extensions: Vec::new(),
             include_files: Vec::new(),
-            exclude_files: vec![".env", "*.bak", "*.tmp", "*.secret"].into_iter().map(String::from).collect(),
+            exclude_files: vec![".env", "*.bak", "*.tmp", "*.secret"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
             follow_symlinks: false,
         }
     }
@@ -207,7 +252,9 @@ impl Default for FilterConfig {
 
 impl Default for ResourceConfig {
     fn default() -> Self {
-        Self { mode: ResourceMode::Auto }
+        Self {
+            mode: ResourceMode::Auto,
+        }
     }
 }
 
@@ -272,11 +319,20 @@ impl Config {
 
     pub fn matches_filename_filter(&self, file_name: &str) -> bool {
         if !self.filter.filename_contains.is_empty()
-            && !self.filter.filename_contains.iter().any(|f| file_name.contains(f.as_str()))
+            && !self
+                .filter
+                .filename_contains
+                .iter()
+                .any(|f| file_name.contains(f.as_str()))
         {
             return false;
         }
-        if self.filter.filename_exclude.iter().any(|f| file_name.contains(f.as_str())) {
+        if self
+            .filter
+            .filename_exclude
+            .iter()
+            .any(|f| file_name.contains(f.as_str()))
+        {
             return false;
         }
         true
@@ -284,11 +340,20 @@ impl Config {
 
     pub fn matches_content_filter(&self, content: &str) -> bool {
         if !self.filter.content_contains.is_empty()
-            && !self.filter.content_contains.iter().any(|f| content.contains(f.as_str()))
+            && !self
+                .filter
+                .content_contains
+                .iter()
+                .any(|f| content.contains(f.as_str()))
         {
             return false;
         }
-        if self.filter.content_exclude.iter().any(|f| content.contains(f.as_str())) {
+        if self
+            .filter
+            .content_exclude
+            .iter()
+            .any(|f| content.contains(f.as_str()))
+        {
             return false;
         }
         true
@@ -312,26 +377,70 @@ pub fn generate_smart_config(project_root: &Path) -> Config {
 
     if project_root.join(".git").exists() {
         config.scan.exclude_paths.extend(
-            vec![".git", "target", "node_modules", "dist", "build", ".next", ".venv", "__pycache__", ".cache"]
-                .into_iter().map(String::from)
+            vec![
+                ".git",
+                "target",
+                "node_modules",
+                "dist",
+                "build",
+                ".next",
+                ".venv",
+                "__pycache__",
+                ".cache",
+            ]
+            .into_iter()
+            .map(String::from),
         );
     }
 
     if project_root.join("Cargo.toml").exists() {
         config.scan.include_extensions = vec!["rs", "md", "toml", "yaml", "yml", "txt"]
-            .into_iter().map(String::from).collect();
-        config.scan.exclude_paths.extend(vec!["target", ".cargo"].into_iter().map(String::from));
-    } else if project_root.join("package.json").exists() || project_root.join("tsconfig.json").exists() {
-        config.scan.include_extensions = vec!["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml"]
-            .into_iter().map(String::from).collect();
-        config.scan.exclude_paths.extend(vec!["node_modules", ".next", "dist", "build"].into_iter().map(String::from));
-    } else if project_root.join("pyproject.toml").exists() || project_root.join("requirements.txt").exists() {
-        config.scan.include_extensions = vec!["py", "md", "yaml", "yml", "json", "txt", "toml", "cfg", "ini"]
-            .into_iter().map(String::from).collect();
-        config.scan.exclude_paths.extend(vec![".venv", "venv", "__pycache__", ".mypy_cache", "dist", "build"].into_iter().map(String::from));
+            .into_iter()
+            .map(String::from)
+            .collect();
+        config
+            .scan
+            .exclude_paths
+            .extend(vec!["target", ".cargo"].into_iter().map(String::from));
+    } else if project_root.join("package.json").exists()
+        || project_root.join("tsconfig.json").exists()
+    {
+        config.scan.include_extensions =
+            vec!["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        config.scan.exclude_paths.extend(
+            vec!["node_modules", ".next", "dist", "build"]
+                .into_iter()
+                .map(String::from),
+        );
+    } else if project_root.join("pyproject.toml").exists()
+        || project_root.join("requirements.txt").exists()
+    {
+        config.scan.include_extensions = vec![
+            "py", "md", "yaml", "yml", "json", "txt", "toml", "cfg", "ini",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        config.scan.exclude_paths.extend(
+            vec![
+                ".venv",
+                "venv",
+                "__pycache__",
+                ".mypy_cache",
+                "dist",
+                "build",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
     } else if project_root.join("go.mod").exists() {
         config.scan.include_extensions = vec!["go", "md", "yaml", "yml", "json", "txt", "toml"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
     }
 
     config.filter.max_file_size = 1_048_576;

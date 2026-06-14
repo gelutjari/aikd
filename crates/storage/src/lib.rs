@@ -1,8 +1,8 @@
 pub mod schema;
 
-use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
+use std::path::Path;
 
 pub struct Database {
     conn: Connection,
@@ -14,7 +14,9 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(db_path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+        )?;
         let db = Self { conn };
         schema::run_migrations(&db.conn)?;
         Ok(db)

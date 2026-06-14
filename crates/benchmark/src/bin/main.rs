@@ -1,9 +1,6 @@
+use aikd_benchmark::{start_resource_monitor, BenchmarkRunner};
 use clap::Parser;
-use aikd_benchmark::{BenchmarkRunner, start_resource_monitor};
-use std::sync::{
-    Arc,
-    atomic::AtomicBool,
-};
+use std::sync::{atomic::AtomicBool, Arc};
 use tracing::info;
 
 #[derive(Parser)]
@@ -31,9 +28,7 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::EnvFilter::new("info")
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     start_resource_monitor(stop_flag.clone());
@@ -83,15 +78,17 @@ async fn main() -> anyhow::Result<()> {
     let final_status = runner.resource_status();
     println!(
         "  Peak:    CPU {:.1}%, RAM {:.1}% ({} MB)",
-        final_status.cpu_percent,
-        final_status.mem_percent,
-        final_status.mem_used_mb,
+        final_status.cpu_percent, final_status.mem_percent, final_status.mem_used_mb,
     );
 
     if failed > 0 {
         println!("\n  FAILED benchmarks:");
         for r in results.iter().filter(|r| !r.success) {
-            println!("    - {}: {}", r.name, r.error.as_deref().unwrap_or("unknown"));
+            println!(
+                "    - {}: {}",
+                r.name,
+                r.error.as_deref().unwrap_or("unknown")
+            );
         }
     }
 

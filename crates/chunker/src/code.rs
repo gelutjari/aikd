@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use serde_json::Value;
-use aikd_core::Chunk;
 use crate::ChunkConfig;
+use aikd_core::Chunk;
+use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SourceLanguage {
@@ -37,10 +37,53 @@ pub fn chunk_source_code(
 ) -> Vec<Chunk> {
     let lang = detect_language(file_path);
     match lang {
-        SourceLanguage::Rust => chunk_by_function(content, file_path, config, metadata, &["fn ", "struct ", "impl ", "trait ", "enum ", "pub fn ", "pub struct ", "pub trait ", "pub enum "]),
-        SourceLanguage::Python => chunk_by_function(content, file_path, config, metadata, &["def ", "class ", "async def "]),
-        SourceLanguage::TypeScript | SourceLanguage::JavaScript => chunk_by_function(content, file_path, config, metadata, &["function ", "export function ", "export default function ", "const ", "export const ", "class ", "export class ", "async function "]),
-        SourceLanguage::Go => chunk_by_function(content, file_path, config, metadata, &["func ", "type ", "func ("]),
+        SourceLanguage::Rust => chunk_by_function(
+            content,
+            file_path,
+            config,
+            metadata,
+            &[
+                "fn ",
+                "struct ",
+                "impl ",
+                "trait ",
+                "enum ",
+                "pub fn ",
+                "pub struct ",
+                "pub trait ",
+                "pub enum ",
+            ],
+        ),
+        SourceLanguage::Python => chunk_by_function(
+            content,
+            file_path,
+            config,
+            metadata,
+            &["def ", "class ", "async def "],
+        ),
+        SourceLanguage::TypeScript | SourceLanguage::JavaScript => chunk_by_function(
+            content,
+            file_path,
+            config,
+            metadata,
+            &[
+                "function ",
+                "export function ",
+                "export default function ",
+                "const ",
+                "export const ",
+                "class ",
+                "export class ",
+                "async function ",
+            ],
+        ),
+        SourceLanguage::Go => chunk_by_function(
+            content,
+            file_path,
+            config,
+            metadata,
+            &["func ", "type ", "func ("],
+        ),
         SourceLanguage::Unknown => chunk_by_lines(content, file_path, config, metadata),
     }
 }
@@ -67,8 +110,13 @@ fn chunk_by_function(
             let est = current_content.len() / 4;
             if est >= config.min_tokens {
                 chunks.push(make_code_chunk(
-                    file_path, chunk_index, &current_symbol,
-                    current_start + 1, i, &current_content, &metadata,
+                    file_path,
+                    chunk_index,
+                    &current_symbol,
+                    current_start + 1,
+                    i,
+                    &current_content,
+                    &metadata,
                 ));
                 chunk_index += 1;
             }
@@ -86,8 +134,13 @@ fn chunk_by_function(
         let est = current_content.len() / 4;
         if est >= config.max_tokens {
             chunks.push(make_code_chunk(
-                file_path, chunk_index, &current_symbol,
-                current_start + 1, i + 1, &current_content, &metadata,
+                file_path,
+                chunk_index,
+                &current_symbol,
+                current_start + 1,
+                i + 1,
+                &current_content,
+                &metadata,
             ));
             chunk_index += 1;
             current_content.clear();
@@ -98,15 +151,25 @@ fn chunk_by_function(
 
     if !current_content.trim().is_empty() {
         chunks.push(make_code_chunk(
-            file_path, chunk_index, &current_symbol,
-            current_start + 1, lines.len(), &current_content, &metadata,
+            file_path,
+            chunk_index,
+            &current_symbol,
+            current_start + 1,
+            lines.len(),
+            &current_content,
+            &metadata,
         ));
     }
 
     if chunks.is_empty() && !content.trim().is_empty() {
         chunks.push(make_code_chunk(
-            file_path, 0, "",
-            1, lines.len(), content, &metadata,
+            file_path,
+            0,
+            "",
+            1,
+            lines.len(),
+            content,
+            &metadata,
         ));
     }
 
@@ -132,8 +195,13 @@ fn chunk_by_lines(
         let est = current_content.len() / 4;
         if est >= config.max_tokens {
             chunks.push(make_code_chunk(
-                file_path, chunk_index, "",
-                line_start, line_num, &current_content, &metadata,
+                file_path,
+                chunk_index,
+                "",
+                line_start,
+                line_num,
+                &current_content,
+                &metadata,
             ));
             chunk_index += 1;
             current_content.clear();
@@ -143,8 +211,13 @@ fn chunk_by_lines(
 
     if !current_content.trim().is_empty() {
         chunks.push(make_code_chunk(
-            file_path, chunk_index, "",
-            line_start, content.lines().count(), &current_content, &metadata,
+            file_path,
+            chunk_index,
+            "",
+            line_start,
+            content.lines().count(),
+            &current_content,
+            &metadata,
         ));
     }
 
@@ -160,18 +233,31 @@ fn make_code_chunk(
     content: &str,
     metadata: &HashMap<String, Value>,
 ) -> Chunk {
-    let line_end = if line_end < line_start { line_start } else { line_end };
+    let line_end = if line_end < line_start {
+        line_start
+    } else {
+        line_end
+    };
     let heading = if symbol.is_empty() {
         String::new()
     } else {
-        symbol.split('{').next().unwrap_or(symbol).trim().to_string()
+        symbol
+            .split('{')
+            .next()
+            .unwrap_or(symbol)
+            .trim()
+            .to_string()
     };
 
     Chunk {
         id: uuid::Uuid::new_v4().to_string(),
         file_path: file_path.to_string(),
         chunk_index,
-        heading_hierarchy: if heading.is_empty() { vec![] } else { vec![heading.clone()] },
+        heading_hierarchy: if heading.is_empty() {
+            vec![]
+        } else {
+            vec![heading.clone()]
+        },
         heading_level: 0,
         heading_text: heading,
         line_start,

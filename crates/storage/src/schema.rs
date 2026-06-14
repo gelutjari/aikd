@@ -1,17 +1,21 @@
-use rusqlite::Connection;
 use anyhow::Result;
+use rusqlite::Connection;
 
 const SCHEMA_VERSION: i32 = 4;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER NOT NULL
         );
-    ")?;
+    ",
+    )?;
 
     let current: i32 = conn
-        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| row.get(0))
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .unwrap_or(0);
 
     if current < 1 {
@@ -36,7 +40,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 }
 
 fn migrate_v1(conn: &Connection) -> Result<()> {
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT NOT NULL UNIQUE,
@@ -67,28 +72,32 @@ fn migrate_v1(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_heading ON chunks(heading_text);
-    ")?;
+    ",
+    )?;
 
     log::info!("Migration v1 applied");
     Ok(())
 }
 
 fn migrate_v2(conn: &Connection) -> Result<()> {
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS embeddings (
             chunk_id TEXT PRIMARY KEY REFERENCES chunks(id),
             model TEXT NOT NULL,
             dimensions INTEGER NOT NULL,
             vector BLOB NOT NULL
         );
-    ")?;
+    ",
+    )?;
 
     log::info!("Migration v2 applied — embeddings table created");
     Ok(())
 }
 
 fn migrate_v3(conn: &Connection) -> Result<()> {
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -115,7 +124,8 @@ fn migrate_v3(conn: &Connection) -> Result<()> {
             dimensions INTEGER NOT NULL,
             vector BLOB NOT NULL
         );
-    ")?;
+    ",
+    )?;
 
     // Add blake3_hash column if missing (for databases upgraded from v1)
     let has_hash: bool = conn
@@ -135,7 +145,10 @@ fn migrate_v3(conn: &Connection) -> Result<()> {
         .unwrap_or(false);
 
     if !has_hash {
-        let _ = conn.execute("ALTER TABLE files ADD COLUMN blake3_hash TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute(
+            "ALTER TABLE files ADD COLUMN blake3_hash TEXT NOT NULL DEFAULT ''",
+            [],
+        );
     }
 
     log::info!("Migration v3 applied — sessions, conversations, conversation_embeddings created");
@@ -143,7 +156,8 @@ fn migrate_v3(conn: &Connection) -> Result<()> {
 }
 
 fn migrate_v4(conn: &Connection) -> Result<()> {
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE INDEX IF NOT EXISTS idx_chunks_heading_level ON chunks(heading_level);
         CREATE INDEX IF NOT EXISTS idx_chunks_line_range ON chunks(line_start, line_end);
         CREATE INDEX IF NOT EXISTS idx_files_modified ON files(modified_at);
@@ -168,7 +182,8 @@ fn migrate_v4(conn: &Connection) -> Result<()> {
             detail TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-    ")?;
+    ",
+    )?;
 
     log::info!("Migration v4 applied — code_symbols, audit_log, performance indexes");
     Ok(())
@@ -207,7 +222,9 @@ mod tests {
         run_migrations(&conn).unwrap();
 
         let version: i32 = conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
 
         assert_eq!(version, SCHEMA_VERSION);
@@ -220,7 +237,9 @@ mod tests {
         run_migrations(&conn).unwrap();
 
         let version: i32 = conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
     }
@@ -236,7 +255,9 @@ mod tests {
         ).unwrap();
 
         let name: String = conn
-            .query_row("SELECT name FROM sessions WHERE id='s1'", [], |row| row.get(0))
+            .query_row("SELECT name FROM sessions WHERE id='s1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(name, "Test Session");
     }
@@ -257,7 +278,11 @@ mod tests {
         ).unwrap();
 
         let content: String = conn
-            .query_row("SELECT content FROM conversations WHERE id='c1'", [], |row| row.get(0))
+            .query_row(
+                "SELECT content FROM conversations WHERE id='c1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(content, "Hello");
     }
@@ -273,7 +298,11 @@ mod tests {
         ).unwrap();
 
         let hash: String = conn
-            .query_row("SELECT blake3_hash FROM files WHERE path='/test.md'", [], |row| row.get(0))
+            .query_row(
+                "SELECT blake3_hash FROM files WHERE path='/test.md'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(hash, "abc123");
     }

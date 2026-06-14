@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use aikd_core::Chunk;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde_json::Value;
-use aikd_core::Chunk;
+use std::collections::HashMap;
 
 pub fn chunk_markdown(
     file_path: &str,
@@ -31,8 +31,13 @@ pub fn chunk_markdown(
                     let est = current_content.len() / 4;
                     if est >= min_tokens {
                         chunks.push(make_chunk(
-                            file_path, chunk_index, &heading_stack,
-                            section_start_line, line_counter, &current_content, &metadata,
+                            file_path,
+                            chunk_index,
+                            &heading_stack,
+                            section_start_line,
+                            line_counter,
+                            &current_content,
+                            &metadata,
                         ));
                         chunk_index += 1;
                     }
@@ -59,7 +64,9 @@ pub fn chunk_markdown(
                     current_content.push_str(&text);
                 }
                 for ch in text.chars() {
-                    if ch == '\n' { line_counter += 1; }
+                    if ch == '\n' {
+                        line_counter += 1;
+                    }
                 }
             }
             Event::Code(code) => {
@@ -90,8 +97,13 @@ pub fn chunk_markdown(
         let est = current_content.len() / 4;
         if est >= max_tokens {
             chunks.push(make_chunk(
-                file_path, chunk_index, &heading_stack,
-                section_start_line, line_counter, &current_content, &metadata,
+                file_path,
+                chunk_index,
+                &heading_stack,
+                section_start_line,
+                line_counter,
+                &current_content,
+                &metadata,
             ));
             chunk_index += 1;
             current_content.clear();
@@ -103,8 +115,13 @@ pub fn chunk_markdown(
         let est = current_content.len() / 4;
         if est >= min_tokens || chunks.is_empty() {
             chunks.push(make_chunk(
-                file_path, chunk_index, &heading_stack,
-                section_start_line, line_counter, &current_content, &metadata,
+                file_path,
+                chunk_index,
+                &heading_stack,
+                section_start_line,
+                line_counter,
+                &current_content,
+                &metadata,
             ));
         } else if let Some(last) = chunks.last_mut() {
             last.content.push_str("\n\n");
@@ -153,8 +170,14 @@ fn make_chunk(
 ) -> Chunk {
     let hierarchy: Vec<String> = heading_stack.iter().map(|(_, t)| t.clone()).collect();
     let heading_level = heading_stack.last().map_or(0, |(l, _)| *l);
-    let heading_text = heading_stack.last().map_or(String::new(), |(_, t)| t.clone());
-    let line_end = if line_end < line_start { line_start } else { line_end };
+    let heading_text = heading_stack
+        .last()
+        .map_or(String::new(), |(_, t)| t.clone());
+    let line_end = if line_end < line_start {
+        line_start
+    } else {
+        line_end
+    };
 
     Chunk {
         id: uuid::Uuid::new_v4().to_string(),

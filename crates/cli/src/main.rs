@@ -1,12 +1,12 @@
-use std::path::Path;
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
+use std::path::Path;
 
-use aikd_core::{Config, SearchFilters, ResourceProfile};
-use aikd_storage::Database;
-use aikd_indexer::TantivyEngine;
+use aikd_core::{Config, ResourceProfile, SearchFilters};
 use aikd_embedder as embedder;
+use aikd_indexer::TantivyEngine;
 use aikd_session as session;
+use aikd_storage::Database;
 
 #[derive(Parser)]
 #[command(name = "aikd")]
@@ -61,11 +61,16 @@ enum Commands {
     #[command(about = "[CLI] Search the knowledge base")]
     Query {
         query: String,
-        #[arg(short, long, default_value = "10")] limit: usize,
-        #[arg(short, long)] path: Option<String>,
-        #[arg(short = 'H', long)] heading: Option<String>,
-        #[arg(long)] json: bool,
-        #[arg(long)] hybrid: bool,
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+        #[arg(short, long)]
+        path: Option<String>,
+        #[arg(short = 'H', long)]
+        heading: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        hybrid: bool,
     },
     #[command(about = "[CLI] Show index statistics (JSON)")]
     Stats,
@@ -135,16 +140,38 @@ async fn main() -> Result<()> {
         Commands::Init { path } => cmd_init(&cli.config, path.as_deref()),
         Commands::Daemon { foreground } => cmd_daemon(&cli.config, foreground).await,
         Commands::Scan { path } => cmd_scan(&cli.config, path.as_deref()),
-        Commands::Query { query, limit, path, heading, json, hybrid } =>
-            cmd_query(&cli.config, &query, limit, path.as_deref(), heading.as_deref(), json || json_mode, hybrid),
+        Commands::Query {
+            query,
+            limit,
+            path,
+            heading,
+            json,
+            hybrid,
+        } => cmd_query(
+            &cli.config,
+            &query,
+            limit,
+            path.as_deref(),
+            heading.as_deref(),
+            json || json_mode,
+            hybrid,
+        ),
         Commands::Stats => cmd_stats(&cli.config),
         Commands::Export { output } => cmd_export(&cli.config, &output),
         Commands::Import { file } => cmd_import(&cli.config, &file),
         Commands::Embed { model, batch } => cmd_embed(&cli.config, &model, batch),
         Commands::Serve => cmd_serve(&cli.config).await,
         Commands::Watch { debounce } => cmd_watch(&cli.config, debounce).await,
-        Commands::Remember { session, role, content } => cmd_remember(&cli.config, session.as_deref(), &role, &content, json_mode),
-        Commands::Recall { query, session, limit } => cmd_recall(&cli.config, &query, session.as_deref(), limit, json_mode),
+        Commands::Remember {
+            session,
+            role,
+            content,
+        } => cmd_remember(&cli.config, session.as_deref(), &role, &content, json_mode),
+        Commands::Recall {
+            query,
+            session,
+            limit,
+        } => cmd_recall(&cli.config, &query, session.as_deref(), limit, json_mode),
         Commands::Status => cmd_status(&cli.config, json_mode),
         Commands::Inject { command } => cmd_inject(&cli.config, &command),
         Commands::Benchmark => cmd_benchmark(&cli.config).await,
@@ -156,7 +183,9 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
     if Path::new(expanded.as_ref()).exists() {
         eprintln!("Config already exists at {}", expanded);
     } else {
-        let root = scan_path.map(std::path::PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let root = scan_path
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let cfg = aikd_core::config::generate_smart_config(&root);
         cfg.save(config_path)?;
         eprintln!("Created config at {}", expanded);
@@ -169,7 +198,10 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
         eprintln!("Downloading embedding model...");
         match aikd_embedder::download_model(&model_dir) {
             Ok(()) => eprintln!("Model downloaded to {}", model_dir.display()),
-            Err(e) => eprintln!("Warning: Failed to download model: {}. You can download manually later.", e),
+            Err(e) => eprintln!(
+                "Warning: Failed to download model: {}. You can download manually later.",
+                e
+            ),
         }
     } else {
         eprintln!("Model already downloaded at {}", model_dir.display());
@@ -215,7 +247,10 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
     if let Some(parent) = Path::new(mcp_path.as_ref()).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(mcp_path.as_ref(), serde_json::to_string_pretty(&mcp_config).unwrap_or_default());
+    let _ = std::fs::write(
+        mcp_path.as_ref(),
+        serde_json::to_string_pretty(&mcp_config).unwrap_or_default(),
+    );
     eprintln!("\nMCP config: {}", mcp_path);
 
     // Output JSON summary for programmatic use
@@ -227,7 +262,10 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
         "cli_usage": "aikd query \"keyword\" --json",
         "mcp_config": mcp_path.to_string(),
     });
-    println!("{}", serde_json::to_string_pretty(&summary).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&summary).unwrap_or_default()
+    );
 
     Ok(())
 }
@@ -253,7 +291,10 @@ aikd_auto_start"#,
     if Path::new(bashrc.as_ref()).exists() {
         let content = std::fs::read_to_string(bashrc.as_ref()).unwrap_or_default();
         if !content.contains("aikd_auto_start") {
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(bashrc.as_ref()) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .append(true)
+                .open(bashrc.as_ref())
+            {
                 use std::io::Write;
                 let _ = writeln!(f, "\n{}", hook_script);
                 println!("Shell hook installed to {}", bashrc);
@@ -266,7 +307,10 @@ aikd_auto_start"#,
     if Path::new(zshrc.as_ref()).exists() {
         let content = std::fs::read_to_string(zshrc.as_ref()).unwrap_or_default();
         if !content.contains("aikd_auto_start") {
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(zshrc.as_ref()) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .append(true)
+                .open(zshrc.as_ref())
+            {
                 use std::io::Write;
                 let _ = writeln!(f, "\n{}", hook_script);
                 println!("Shell hook installed to {}", zshrc);
@@ -288,7 +332,10 @@ aikd_auto_start"#,
     if let Some(parent) = Path::new(mcp_path.as_ref()).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(mcp_path.as_ref(), serde_json::to_string_pretty(&mcp_config).unwrap_or_default());
+    let _ = std::fs::write(
+        mcp_path.as_ref(),
+        serde_json::to_string_pretty(&mcp_config).unwrap_or_default(),
+    );
     println!("MCP config written to {}", mcp_path);
 }
 
@@ -304,9 +351,8 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         });
 
         let config_path_owned2 = config_path.to_string();
-        let mcp_handle = tokio::spawn(async move {
-            aikd_server::mcp::run_server(&config_path_owned2).await
-        });
+        let mcp_handle =
+            tokio::spawn(async move { aikd_server::mcp::run_server(&config_path_owned2).await });
 
         tokio::select! {
             r = rest_handle => { let _ = r?; }
@@ -331,22 +377,42 @@ fn cmd_scan(config_path: &str, override_path: Option<&str>) -> Result<()> {
 
     println!("Scanning...");
     let progress = aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts)?;
-    println!("Indexed {} files, {} chunks in {:?}", progress.files_indexed, progress.chunks_created, progress.elapsed);
+    println!(
+        "Indexed {} files, {} chunks in {:?}",
+        progress.files_indexed, progress.chunks_created, progress.elapsed
+    );
     if progress.files_skipped > 0 {
         println!("Skipped {} unchanged files", progress.files_skipped);
     }
     Ok(())
 }
 
-fn cmd_query(config_path: &str, query: &str, limit: usize, path_filter: Option<&str>, heading_filter: Option<&str>, json: bool, hybrid: bool) -> Result<()> {
+fn cmd_query(
+    config_path: &str,
+    query: &str,
+    limit: usize,
+    path_filter: Option<&str>,
+    heading_filter: Option<&str>,
+    json: bool,
+    hybrid: bool,
+) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
 
     // Auto-scan if DB is empty
-    let file_count: i64 = database.conn().query_row("SELECT COUNT(*) FROM files WHERE status='active'", [], |r| r.get(0)).unwrap_or(0);
+    let file_count: i64 = database
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE status='active'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     if file_count == 0 {
-        if !json { eprintln!("[aikd] Database kosong, auto-scan..."); }
+        if !json {
+            eprintln!("[aikd] Database kosong, auto-scan...");
+        }
         let opts = aikd_scanner::ScanOptions::default();
         aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts)?;
     }
@@ -371,7 +437,10 @@ fn cmd_query(config_path: &str, query: &str, limit: usize, path_filter: Option<&
             let first = kw_results.first();
             match first {
                 Some(r) => {
-                    let emb = all_embs.iter().find(|(id, _)| id == &r.chunk_id).map(|(_, e)| e.clone());
+                    let emb = all_embs
+                        .iter()
+                        .find(|(id, _)| id == &r.chunk_id)
+                        .map(|(_, e)| e.clone());
                     emb.unwrap_or_else(|| vec![0.0; embedder::DIMENSIONS])
                 }
                 None => vec![0.0; embedder::DIMENSIONS],
@@ -412,10 +481,23 @@ fn cmd_import(config_path: &str, file: &str) -> Result<()> {
 fn cmd_stats(config_path: &str) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
-    let fc: i64 = database.conn().query_row("SELECT COUNT(*) FROM files WHERE status='active'", [], |r| r.get(0))?;
-    let cc: i64 = database.conn().query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
-    let ts: i64 = database.conn().query_row("SELECT COALESCE(SUM(size),0) FROM files WHERE status='active'", [], |r| r.get(0))?;
-    let ec: i64 = database.conn().query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap_or(0);
+    let fc: i64 = database.conn().query_row(
+        "SELECT COUNT(*) FROM files WHERE status='active'",
+        [],
+        |r| r.get(0),
+    )?;
+    let cc: i64 = database
+        .conn()
+        .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+    let ts: i64 = database.conn().query_row(
+        "SELECT COALESCE(SUM(size),0) FROM files WHERE status='active'",
+        [],
+        |r| r.get(0),
+    )?;
+    let ec: i64 = database
+        .conn()
+        .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+        .unwrap_or(0);
     let (sc, convc, ce) = session::get_session_stats(database.conn()).unwrap_or((0, 0, 0));
     let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
     let stats = serde_json::json!({
@@ -435,38 +517,61 @@ fn cmd_stats(config_path: &str) -> Result<()> {
         "embedding_enabled": profile.embedding_enabled,
         "rest_port": cfg.server.rest_port,
     });
-    println!("{}", serde_json::to_string_pretty(&stats).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&stats).unwrap_or_default()
+    );
     Ok(())
 }
 
 fn cmd_embed(config_path: &str, _model: &str, batch_size: usize) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
-    let count: i64 = database.conn().query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+    let count: i64 = database
+        .conn()
+        .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
     if count == 0 {
         eprintln!("[aikd] No chunks to embed. Run: aikd scan first");
         return Ok(());
     }
-    let existing: i64 = database.conn().query_row("SELECT COUNT(*) FROM embeddings WHERE model = ?1", rusqlite::params![embedder::MODEL_NAME], |r| r.get(0)).unwrap_or(0);
+    let existing: i64 = database
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM embeddings WHERE model = ?1",
+            rusqlite::params![embedder::MODEL_NAME],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     let remaining = count - existing;
     if remaining <= 0 {
         eprintln!("[aikd] All {} chunks already embedded.", count);
         return Ok(());
     }
     let model_dir = cfg.model_path();
-    eprintln!("[aikd] {} chunks total, {} already embedded, {} to process", count, existing, remaining);
+    eprintln!(
+        "[aikd] {} chunks total, {} already embedded, {} to process",
+        count, existing, remaining
+    );
     eprintln!("[aikd] Loading model...");
     let start = std::time::Instant::now();
     let imported = embedder::embed_and_store(database.conn(), &model_dir, batch_size)?;
-    eprintln!("[aikd] {} embeddings stored in {:.1}s", imported, start.elapsed().as_secs_f64());
+    eprintln!(
+        "[aikd] {} embeddings stored in {:.1}s",
+        imported,
+        start.elapsed().as_secs_f64()
+    );
     eprintln!("[aikd] Hybrid search now available.");
     // JSON output
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-        "status": "ok",
-        "embeddings_created": imported,
-        "total_chunks": count,
-        "elapsed_ms": start.elapsed().as_millis(),
-    })).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "ok",
+            "embeddings_created": imported,
+            "total_chunks": count,
+            "elapsed_ms": start.elapsed().as_millis(),
+        }))
+        .unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -478,44 +583,85 @@ async fn cmd_watch(config_path: &str, debounce: u64) -> Result<()> {
     aikd_watcher::run_watcher(config_path, debounce).await
 }
 
-fn cmd_remember(config_path: &str, session_id: Option<&str>, role: &str, content: &str, json: bool) -> Result<()> {
+fn cmd_remember(
+    config_path: &str,
+    session_id: Option<&str>,
+    role: &str,
+    content: &str,
+    json: bool,
+) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
     let sid = match session_id {
         Some(id) => id.to_string(),
-        None => session::get_or_create_session(database.conn(), &cfg.scan.include_paths.first().cloned().unwrap_or_default())?.id,
+        None => {
+            session::get_or_create_session(
+                database.conn(),
+                &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+            )?
+            .id
+        }
     };
     let conv = session::remember(database.conn(), &sid, role, content, &[])?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "success": true,
-            "conversation_id": conv.id,
-            "session_id": conv.session_id,
-            "role": conv.role,
-        })).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "success": true,
+                "conversation_id": conv.id,
+                "session_id": conv.session_id,
+                "role": conv.role,
+            }))
+            .unwrap_or_default()
+        );
     } else {
-        println!("Remembered in session {}: [{}] {}", conv.session_id, conv.role, &conv.content[..conv.content.len().min(100)]);
+        println!(
+            "Remembered in session {}: [{}] {}",
+            conv.session_id,
+            conv.role,
+            &conv.content[..conv.content.len().min(100)]
+        );
     }
     Ok(())
 }
 
-fn cmd_recall(config_path: &str, query: &str, session_id: Option<&str>, limit: usize, json: bool) -> Result<()> {
+fn cmd_recall(
+    config_path: &str,
+    query: &str,
+    session_id: Option<&str>,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
     let sid = match session_id {
         Some(id) => id.to_string(),
-        None => session::get_or_create_session(database.conn(), &cfg.scan.include_paths.first().cloned().unwrap_or_default())?.id,
+        None => {
+            session::get_or_create_session(
+                database.conn(),
+                &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+            )?
+            .id
+        }
     };
     let convs = session::recall(database.conn(), &sid, query, limit)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&convs).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&convs).unwrap_or_default()
+        );
     } else if convs.is_empty() {
         println!("No matching conversations found.");
     } else {
         println!("{} results for '{}':\n", convs.len(), query);
         for (i, c) in convs.iter().enumerate() {
-            println!("{}. [{}] {}: {}", i + 1, c.created_at, c.role,
-                &c.content[..c.content.len().min(200)]);
+            println!(
+                "{}. [{}] {}: {}",
+                i + 1,
+                c.created_at,
+                c.role,
+                &c.content[..c.content.len().min(200)]
+            );
         }
     }
     Ok(())
@@ -535,13 +681,26 @@ fn cmd_status(config_path: &str, json: bool) -> Result<()> {
             "hnsw_m": profile.hnsw_m,
             "rest_port": cfg.server.rest_port,
         });
-        println!("{}", serde_json::to_string_pretty(&status).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status).unwrap_or_default()
+        );
     } else {
         println!("=== AIKD Daemon Status ===");
         println!("CPU Cores:   {}", profile.cpu_cores);
-        println!("RAM:         {:.1} GB", profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+        println!(
+            "RAM:         {:.1} GB",
+            profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
         println!("GPU:         {}", profile.has_gpu);
-        println!("Embedding:   {}", if profile.embedding_enabled { "ON" } else { "OFF" });
+        println!(
+            "Embedding:   {}",
+            if profile.embedding_enabled {
+                "ON"
+            } else {
+                "OFF"
+            }
+        );
         println!("Batch Size:  {}", profile.batch_size);
         println!("Parallelism: {}", profile.parallelism);
         println!("HNSW M:      {}", profile.hnsw_m);
@@ -550,7 +709,11 @@ fn cmd_status(config_path: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn load_chunks(conn: &rusqlite::Connection, ids: &[String], filters: &SearchFilters) -> Result<Vec<aikd_core::SearchResult>> {
+fn load_chunks(
+    conn: &rusqlite::Connection,
+    ids: &[String],
+    filters: &SearchFilters,
+) -> Result<Vec<aikd_core::SearchResult>> {
     let mut results = Vec::new();
     for id in ids {
         let row = conn.query_row(
@@ -560,10 +723,27 @@ fn load_chunks(conn: &rusqlite::Connection, ids: &[String], filters: &SearchFilt
         );
         match row {
             Ok((cid, fp, hj, ht, co, ls, le)) => {
-                if let Some(ref p) = filters.path_contains { if !fp.contains(p.as_str()) { continue; } }
-                if let Some(ref h) = filters.heading_contains { if !ht.contains(h.as_str()) { continue; } }
+                if let Some(ref p) = filters.path_contains {
+                    if !fp.contains(p.as_str()) {
+                        continue;
+                    }
+                }
+                if let Some(ref h) = filters.heading_contains {
+                    if !ht.contains(h.as_str()) {
+                        continue;
+                    }
+                }
                 let hier: Vec<String> = serde_json::from_str(&hj).unwrap_or_default();
-                results.push(aikd_core::SearchResult { chunk_id: cid, file_path: fp, heading_hierarchy: hier.join(" > "), heading_text: ht, content: co, line_start: ls, line_end: le, score: 0.0 });
+                results.push(aikd_core::SearchResult {
+                    chunk_id: cid,
+                    file_path: fp,
+                    heading_hierarchy: hier.join(" > "),
+                    heading_text: ht,
+                    content: co,
+                    line_start: ls,
+                    line_end: le,
+                    score: 0.0,
+                });
             }
             Err(_) => continue,
         }
@@ -571,14 +751,24 @@ fn load_chunks(conn: &rusqlite::Connection, ids: &[String], filters: &SearchFilt
     Ok(results)
 }
 
-fn enrich_with_line_numbers(conn: &rusqlite::Connection, results: &[aikd_core::SearchResult]) -> Result<Vec<aikd_core::SearchResult>> {
+fn enrich_with_line_numbers(
+    conn: &rusqlite::Connection,
+    results: &[aikd_core::SearchResult],
+) -> Result<Vec<aikd_core::SearchResult>> {
     let mut enriched = Vec::with_capacity(results.len());
     for r in results {
-        let lines = conn.query_row(
-            "SELECT line_start, line_end FROM chunks WHERE id=?1",
-            rusqlite::params![r.chunk_id],
-            |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize)),
-        ).unwrap_or((0, 0));
+        let lines = conn
+            .query_row(
+                "SELECT line_start, line_end FROM chunks WHERE id=?1",
+                rusqlite::params![r.chunk_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as usize,
+                        row.get::<_, i64>(1)? as usize,
+                    ))
+                },
+            )
+            .unwrap_or((0, 0));
         enriched.push(aikd_core::SearchResult {
             chunk_id: r.chunk_id.clone(),
             file_path: r.file_path.clone(),
@@ -593,41 +783,76 @@ fn enrich_with_line_numbers(conn: &rusqlite::Connection, results: &[aikd_core::S
     Ok(enriched)
 }
 
-fn print_results(query: &str, results: &[aikd_core::SearchResult], elapsed: std::time::Duration, json: bool) {
+fn print_results(
+    query: &str,
+    results: &[aikd_core::SearchResult],
+    elapsed: std::time::Duration,
+    json: bool,
+) {
     if json {
-        println!("{}", serde_json::to_string_pretty(results).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(results).unwrap_or_default()
+        );
         return;
     }
-    if results.is_empty() { println!("No results for: {}", query); return; }
-    println!("{} results for '{}' ({:?}):\n", results.len(), query, elapsed);
+    if results.is_empty() {
+        println!("No results for: {}", query);
+        return;
+    }
+    println!(
+        "{} results for '{}' ({:?}):\n",
+        results.len(),
+        query,
+        elapsed
+    );
     for (i, r) in results.iter().enumerate() {
         println!("{}. {}", i + 1, r.file_path);
-        if !r.heading_text.is_empty() { println!("   Heading: {}", r.heading_hierarchy); }
-        if r.line_start > 0 { println!("   Lines: {}-{}", r.line_start, r.line_end); }
-        if r.score > 0.0 { println!("   Score: {:.3}", r.score); }
+        if !r.heading_text.is_empty() {
+            println!("   Heading: {}", r.heading_hierarchy);
+        }
+        if r.line_start > 0 {
+            println!("   Lines: {}-{}", r.line_start, r.line_end);
+        }
+        if r.score > 0.0 {
+            println!("   Score: {:.3}", r.score);
+        }
         let preview = if r.content.chars().count() > 200 {
-            let end = r.content.char_indices().nth(200).map(|(i, _)| i).unwrap_or(r.content.len());
+            let end = r
+                .content
+                .char_indices()
+                .nth(200)
+                .map(|(i, _)| i)
+                .unwrap_or(r.content.len());
             format!("{}...", &r.content[..end])
-        } else { r.content.clone() };
+        } else {
+            r.content.clone()
+        };
         println!("   {}", preview.replace('\n', "\n   "));
         println!();
     }
 }
 
 fn load_or_default(p: &str) -> Config {
-    Config::load(p).unwrap_or_else(|_| { log::warn!("Using defaults"); Config::default() })
+    Config::load(p).unwrap_or_else(|_| {
+        log::warn!("Using defaults");
+        Config::default()
+    })
 }
 
 fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
-    use std::process::{Command, Stdio};
     use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
 
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
 
-    let session_id = session::get_or_create_session(database.conn(), &cfg.scan.include_paths.first().cloned().unwrap_or_default())
-        .map(|s| s.id)
-        .unwrap_or_default();
+    let session_id = session::get_or_create_session(
+        database.conn(),
+        &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+    )
+    .map(|s| s.id)
+    .unwrap_or_default();
 
     // Recall recent context
     let context = session::recall(database.conn(), &session_id, "", 5)
@@ -638,7 +863,10 @@ fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
         .join("\n");
 
     if !context.is_empty() {
-        eprintln!("[AIKD] Injected {} context messages", context.lines().count());
+        eprintln!(
+            "[AIKD] Injected {} context messages",
+            context.lines().count()
+        );
     }
 
     let program = &command[0];
@@ -680,7 +908,11 @@ async fn cmd_benchmark(config_path: &str) -> Result<()> {
     println!("Resource limit: CPU <=50%, RAM <=50%\n");
 
     let status = runner.resource_status();
-    println!("System: {} cores, {:.1} GB RAM\n", num_cpus::get(), status.mem_total_mb as f64 / 1024.0);
+    println!(
+        "System: {} cores, {:.1} GB RAM\n",
+        num_cpus::get(),
+        status.mem_total_mb as f64 / 1024.0
+    );
 
     let results = runner.run_all().await;
 
@@ -693,7 +925,11 @@ async fn cmd_benchmark(config_path: &str) -> Result<()> {
 
     for (i, result) in results.iter().enumerate() {
         println!("{:2}. {}", i + 1, result);
-        if result.success { passed += 1; } else { failed += 1; }
+        if result.success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
     }
 
     let total_duration: std::time::Duration = results.iter().map(|r| r.duration).sum();
@@ -705,8 +941,10 @@ async fn cmd_benchmark(config_path: &str) -> Result<()> {
     println!("  Total:   {:.2}s", total_duration.as_secs_f64());
 
     let final_status = runner.resource_status();
-    println!("  Peak:    CPU {:.1}%, RAM {:.1}% ({} MB)",
-        final_status.cpu_percent, final_status.mem_percent, final_status.mem_used_mb);
+    println!(
+        "  Peak:    CPU {:.1}%, RAM {:.1}% ({} MB)",
+        final_status.cpu_percent, final_status.mem_percent, final_status.mem_used_mb
+    );
 
     // Write JSON report
     let report = serde_json::json!({
@@ -738,6 +976,8 @@ async fn cmd_benchmark(config_path: &str) -> Result<()> {
     println!("\n  Report:  {}", report_path);
 
     runner.stop();
-    if failed > 0 { std::process::exit(1); }
+    if failed > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }

@@ -1,7 +1,7 @@
+use aikd_core::{Conversation, Session};
+use aikd_embedder::{self, DIMENSIONS, MODEL_NAME};
 use anyhow::Result;
 use rusqlite::Connection;
-use aikd_core::{Session, Conversation};
-use aikd_embedder::{self, MODEL_NAME, DIMENSIONS};
 
 pub fn create_session(conn: &Connection, name: &str, project_path: &str) -> Result<Session> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -35,7 +35,10 @@ pub fn get_or_create_session(conn: &Connection, project_path: &str) -> Result<Se
     match existing {
         Ok(mut session) => {
             let now = chrono::Utc::now().to_rfc3339();
-            conn.execute("UPDATE sessions SET last_active = ?1 WHERE id = ?2", rusqlite::params![now, session.id])?;
+            conn.execute(
+                "UPDATE sessions SET last_active = ?1 WHERE id = ?2",
+                rusqlite::params![now, session.id],
+            )?;
             session.last_active = now;
             Ok(session)
         }
@@ -45,15 +48,18 @@ pub fn get_or_create_session(conn: &Connection, project_path: &str) -> Result<Se
 
 pub fn list_sessions(conn: &Connection) -> Result<Vec<Session>> {
     let mut stmt = conn.prepare("SELECT id, name, project_path, created_at, last_active FROM sessions ORDER BY last_active DESC")?;
-    let sessions = stmt.query_map([], |row| {
-        Ok(Session {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            project_path: row.get(2)?,
-            created_at: row.get(3)?,
-            last_active: row.get(4)?,
-        })
-    })?.filter_map(|r| r.ok()).collect();
+    let sessions = stmt
+        .query_map([], |row| {
+            Ok(Session {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                project_path: row.get(2)?,
+                created_at: row.get(3)?,
+                last_active: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(sessions)
 }
 
@@ -75,7 +81,10 @@ pub fn remember(
     )?;
 
     // Update session last_active
-    conn.execute("UPDATE sessions SET last_active = ?1 WHERE id = ?2", rusqlite::params![now, session_id])?;
+    conn.execute(
+        "UPDATE sessions SET last_active = ?1 WHERE id = ?2",
+        rusqlite::params![now, session_id],
+    )?;
 
     Ok(Conversation {
         id,
@@ -99,17 +108,21 @@ pub fn recall(
         "SELECT id, session_id, role, content, tokens, chunk_refs, created_at FROM conversations WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 100"
     )?;
 
-    let mut conversations: Vec<Conversation> = stmt.query_map(rusqlite::params![session_id], |row| {
-        Ok(Conversation {
-            id: row.get(0)?,
-            session_id: row.get(1)?,
-            role: row.get(2)?,
-            content: row.get(3)?,
-            tokens: row.get::<_, i64>(4)? as usize,
-            chunk_refs: serde_json::from_str(&row.get::<_, String>(5).unwrap_or_default()).unwrap_or_default(),
-            created_at: row.get(6)?,
-        })
-    })?.filter_map(|r| r.ok()).collect();
+    let mut conversations: Vec<Conversation> = stmt
+        .query_map(rusqlite::params![session_id], |row| {
+            Ok(Conversation {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                role: row.get(2)?,
+                content: row.get(3)?,
+                tokens: row.get::<_, i64>(4)? as usize,
+                chunk_refs: serde_json::from_str(&row.get::<_, String>(5).unwrap_or_default())
+                    .unwrap_or_default(),
+                created_at: row.get(6)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Simple keyword matching for recall
     if !query_lower.is_empty() {
@@ -120,13 +133,20 @@ pub fn recall(
     Ok(conversations)
 }
 
-pub fn embed_conversations(conn: &Connection, model_dir: &std::path::Path, session_id: &str) -> Result<usize> {
+pub fn embed_conversations(
+    conn: &Connection,
+    model_dir: &std::path::Path,
+    session_id: &str,
+) -> Result<usize> {
     let mut stmt = conn.prepare(
         "SELECT id, content FROM conversations WHERE session_id = ?1 AND id NOT IN (SELECT conversation_id FROM conversation_embeddings WHERE model = ?2)"
     )?;
-    let rows: Vec<(String, String)> = stmt.query_map(rusqlite::params![session_id, MODEL_NAME], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?.filter_map(|r| r.ok()).collect();
+    let rows: Vec<(String, String)> = stmt
+        .query_map(rusqlite::params![session_id, MODEL_NAME], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     if rows.is_empty() {
         return Ok(0);
@@ -151,15 +171,19 @@ pub fn embed_conversations(conn: &Connection, model_dir: &std::path::Path, sessi
 pub fn get_session_stats(conn: &Connection) -> Result<(i64, i64, i64)> {
     let sc: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
     let cc: i64 = conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?;
-    let ec: i64 = conn.query_row("SELECT COUNT(*) FROM conversation_embeddings", [], |r| r.get(0)).unwrap_or(0);
+    let ec: i64 = conn
+        .query_row("SELECT COUNT(*) FROM conversation_embeddings", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
     Ok((sc, cc, ec))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
     use aikd_storage::schema;
+    use rusqlite::Connection;
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

@@ -1,20 +1,20 @@
-use aikd_core::{Config, Chunk, SearchFilters};
-use aikd_storage::Database;
+use aikd_core::{Chunk, Config, SearchFilters};
 use aikd_indexer::TantivyEngine;
-use anyhow::{Result, anyhow};
+use aikd_storage::Database;
+use anyhow::{anyhow, Result};
+use rayon::prelude::*;
 use rusqlite;
 use std::{
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::{Duration, Instant},
     fs,
     io::Write,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
 };
 use sysinfo::System;
-use rayon::prelude::*;
 use tracing::{info, warn};
 
 const MAX_CPU_PERCENT: f32 = 50.0;
@@ -34,10 +34,15 @@ impl std::fmt::Display for BenchResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let status = if self.success { "PASS" } else { "FAIL" };
         let ms = self.duration.as_secs_f64() * 1000.0;
-        let tp = self.throughput
+        let tp = self
+            .throughput
             .map(|t| format!(" ({:.1} ops/s)", t))
             .unwrap_or_default();
-        write!(f, "[{}] {} {:.1}ms{} — {}", status, self.name, ms, tp, self.details)?;
+        write!(
+            f,
+            "[{}] {} {:.1}ms{} — {}",
+            status, self.name, ms, tp, self.details
+        )?;
         if let Some(ref e) = self.error {
             write!(f, " | ERROR: {}", e)?;
         }
@@ -68,8 +73,8 @@ impl ResourceMonitor {
         let mut sys = self.sys.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
         sys.refresh_all();
 
-        let cpu_usage: f32 = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>()
-            / self.cpu_cores as f32;
+        let cpu_usage: f32 =
+            sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / self.cpu_cores as f32;
         let mem_usage = sys.used_memory();
         let mem_percent = (mem_usage as f64 / self.total_mem as f64) * 100.0;
 
@@ -85,7 +90,9 @@ impl ResourceMonitor {
         loop {
             match self.check() {
                 Ok(status) => {
-                    if status.cpu_percent <= MAX_CPU_PERCENT && status.mem_percent as f64 <= MAX_MEM_PERCENT {
+                    if status.cpu_percent <= MAX_CPU_PERCENT
+                        && status.mem_percent as f64 <= MAX_MEM_PERCENT
+                    {
                         break;
                     }
                     warn!(
@@ -183,11 +190,16 @@ impl BenchmarkRunner {
         fs::create_dir_all(&data_dir)?;
 
         let topics = [
-            "Rust programming language", "Web development with TypeScript",
-            "Machine learning fundamentals", "Database design patterns",
-            "API architecture best practices", "DevOps and CI/CD pipelines",
-            "Security and authentication", "Performance optimization",
-            "Data structures and algorithms", "Cloud infrastructure",
+            "Rust programming language",
+            "Web development with TypeScript",
+            "Machine learning fundamentals",
+            "Database design patterns",
+            "API architecture best practices",
+            "DevOps and CI/CD pipelines",
+            "Security and authentication",
+            "Performance optimization",
+            "Data structures and algorithms",
+            "Cloud infrastructure",
         ];
 
         let mut count = 0;
@@ -240,12 +252,20 @@ impl BenchmarkRunner {
             }
 
             let cfg = &self.config;
-            let indexed: Vec<(String, Vec<Chunk>)> = files.par_iter().filter_map(|path| {
-                let ps = path.to_string_lossy().to_string();
-                let content = fs::read_to_string(path).ok()?;
-                let chunks = aikd_chunker::chunk_file(&ps, &content, cfg.chunk.max_tokens, cfg.chunk.min_tokens);
-                Some((ps, chunks))
-            }).collect();
+            let indexed: Vec<(String, Vec<Chunk>)> = files
+                .par_iter()
+                .filter_map(|path| {
+                    let ps = path.to_string_lossy().to_string();
+                    let content = fs::read_to_string(path).ok()?;
+                    let chunks = aikd_chunker::chunk_file(
+                        &ps,
+                        &content,
+                        cfg.chunk.max_tokens,
+                        cfg.chunk.min_tokens,
+                    );
+                    Some((ps, chunks))
+                })
+                .collect();
 
             let tx = self.db.begin_transaction()?;
             for (ps, chunks) in &indexed {
@@ -271,8 +291,18 @@ impl BenchmarkRunner {
             }
             tx.commit()?;
 
-            let tc: Vec<(String, String, String, String)> = indexed.iter()
-                .flat_map(|(p, cs)| cs.iter().map(move |c| (c.id.clone(), p.clone(), c.heading_hierarchy_str(), c.content.clone())))
+            let tc: Vec<(String, String, String, String)> = indexed
+                .iter()
+                .flat_map(|(p, cs)| {
+                    cs.iter().map(move |c| {
+                        (
+                            c.id.clone(),
+                            p.clone(),
+                            c.heading_hierarchy_str(),
+                            c.content.clone(),
+                        )
+                    })
+                })
                 .collect();
             self.tantivy.clear()?;
             self.tantivy.index_chunks(&tc)?;
@@ -309,7 +339,18 @@ impl BenchmarkRunner {
 
         let queries: Vec<String> = (0..100)
             .map(|i| {
-                let topics = ["Rust", "TypeScript", "machine learning", "database", "API", "DevOps", "security", "performance", "algorithms", "cloud"];
+                let topics = [
+                    "Rust",
+                    "TypeScript",
+                    "machine learning",
+                    "database",
+                    "API",
+                    "DevOps",
+                    "security",
+                    "performance",
+                    "algorithms",
+                    "cloud",
+                ];
                 format!("{} {}", topics[i % topics.len()], i / topics.len())
             })
             .collect();
@@ -351,7 +392,11 @@ impl BenchmarkRunner {
                 total_results,
                 errors.len()
             ),
-            error: if errors.is_empty() { None } else { Some(errors.join("; ")) },
+            error: if errors.is_empty() {
+                None
+            } else {
+                Some(errors.join("; "))
+            },
             throughput: Some(queries.len() as f64 / elapsed.as_secs_f64()),
         }
     }
@@ -394,8 +439,14 @@ impl BenchmarkRunner {
             }
 
             let kw_ids: Vec<String> = kw_results.iter().map(|r| r.chunk_id.clone()).collect();
-            let q_emb = kw_results.first()
-                .and_then(|r| all_embs.iter().find(|(id, _)| id == &r.chunk_id).map(|(_, e)| e.clone()))
+            let q_emb = kw_results
+                .first()
+                .and_then(|r| {
+                    all_embs
+                        .iter()
+                        .find(|(id, _)| id == &r.chunk_id)
+                        .map(|(_, e)| e.clone())
+                })
                 .unwrap_or_else(|| vec![0.0; aikd_embedder::DIMENSIONS]);
 
             let vec_scored = aikd_embedder::vector_search(&q_emb, &all_embs, 20);
@@ -422,7 +473,11 @@ impl BenchmarkRunner {
                 avg_latency.as_secs_f64() * 1000.0,
                 errors.len()
             ),
-            error: if errors.is_empty() { None } else { Some(errors.join("; ")) },
+            error: if errors.is_empty() {
+                None
+            } else {
+                Some(errors.join("; "))
+            },
             throughput: Some(queries.len() as f64 / elapsed.as_secs_f64()),
         }
     }
@@ -450,7 +505,10 @@ impl BenchmarkRunner {
             let now = chrono::Utc::now().to_rfc3339();
             let tx = self.db.begin_transaction()?;
             for i in 0..100 {
-                let ps = data_dir.join(format!("doc_{:04}.md", i)).to_string_lossy().to_string();
+                let ps = data_dir
+                    .join(format!("doc_{:04}.md", i))
+                    .to_string_lossy()
+                    .to_string();
                 let content = fs::read_to_string(&ps)?;
                 let chunks = aikd_chunker::chunk_file(&ps, &content, 1000, 50);
 
@@ -460,8 +518,13 @@ impl BenchmarkRunner {
                     |r| r.get(0),
                 ) {
                     let _ = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]);
-                    let _ = tx.conn().execute("DELETE FROM chunks WHERE file_id=?1", rusqlite::params![old_fid]);
-                    let _ = tx.conn().execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid]);
+                    let _ = tx.conn().execute(
+                        "DELETE FROM chunks WHERE file_id=?1",
+                        rusqlite::params![old_fid],
+                    );
+                    let _ = tx
+                        .conn()
+                        .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid]);
                 }
 
                 let size = fs::metadata(&ps).map(|m| m.len()).unwrap_or(0);
@@ -469,7 +532,11 @@ impl BenchmarkRunner {
                     "INSERT INTO files (path, size, modified_at, last_scanned, status, blake3_hash) VALUES (?1,?2,?3,?4,'active','')",
                     rusqlite::params![ps, size as i64, now, now],
                 )?;
-                let fid: i64 = tx.conn().query_row("SELECT id FROM files WHERE path=?1", rusqlite::params![ps], |r| r.get(0))?;
+                let fid: i64 = tx.conn().query_row(
+                    "SELECT id FROM files WHERE path=?1",
+                    rusqlite::params![ps],
+                    |r| r.get(0),
+                )?;
                 for c in &chunks {
                     let hj = serde_json::to_string(&c.heading_hierarchy).unwrap_or_default();
                     let mj = serde_json::to_string(&c.metadata).unwrap_or_default();
@@ -523,19 +590,18 @@ impl BenchmarkRunner {
         let name = "Concurrent Search (10 threads x 50 queries)";
         let start = Instant::now();
 
-        let queries: Vec<String> = (0..500)
-            .map(|i| format!("test query {}", i))
-            .collect();
+        let queries: Vec<String> = (0..500).map(|i| format!("test query {}", i)).collect();
 
         let tantivy_ref = &self.tantivy;
         let filters = SearchFilters::default();
 
-        let errors: Vec<String> = queries.par_iter().filter_map(|q| {
-            match tantivy_ref.search(q, 5, &filters) {
+        let errors: Vec<String> = queries
+            .par_iter()
+            .filter_map(|q| match tantivy_ref.search(q, 5, &filters) {
                 Ok(_) => None,
                 Err(e) => Some(format!("'{}': {}", q, e)),
-            }
-        }).collect();
+            })
+            .collect();
 
         let elapsed = start.elapsed();
         let total = queries.len();
@@ -546,7 +612,11 @@ impl BenchmarkRunner {
             success: errors.is_empty(),
             duration: elapsed,
             details: format!("{}/{} queries succeeded", ok, total),
-            error: if errors.is_empty() { None } else { Some(format!("{} errors", errors.len())) },
+            error: if errors.is_empty() {
+                None
+            } else {
+                Some(format!("{} errors", errors.len()))
+            },
             throughput: Some(total as f64 / elapsed.as_secs_f64()),
         }
     }
@@ -566,16 +636,19 @@ impl BenchmarkRunner {
         }
 
         let cfg = &self.config;
-        let chunk_count: usize = files.par_iter().filter_map(|path| {
-            let content = fs::read_to_string(path).ok()?;
-            let chunks = aikd_chunker::chunk_file(
-                &path.to_string_lossy(),
-                &content,
-                cfg.chunk.max_tokens,
-                cfg.chunk.min_tokens,
-            );
-            Some(chunks.len())
-        }).sum();
+        let chunk_count: usize = files
+            .par_iter()
+            .filter_map(|path| {
+                let content = fs::read_to_string(path).ok()?;
+                let chunks = aikd_chunker::chunk_file(
+                    &path.to_string_lossy(),
+                    &content,
+                    cfg.chunk.max_tokens,
+                    cfg.chunk.min_tokens,
+                );
+                Some(chunks.len())
+            })
+            .sum();
 
         let elapsed = start.elapsed();
         BenchResult {
@@ -620,14 +693,16 @@ impl BenchmarkRunner {
         // Insert 500 test chunks into DB
         let tx = match self.db.begin_transaction() {
             Ok(tx) => tx,
-            Err(e) => return BenchResult {
-                name: name.to_string(),
-                success: false,
-                duration: start.elapsed(),
-                details: "Failed to start transaction".to_string(),
-                error: Some(format!("{:?}", e)),
-                throughput: None,
-            },
+            Err(e) => {
+                return BenchResult {
+                    name: name.to_string(),
+                    success: false,
+                    duration: start.elapsed(),
+                    details: "Failed to start transaction".to_string(),
+                    error: Some(format!("{:?}", e)),
+                    throughput: None,
+                }
+            }
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -635,7 +710,12 @@ impl BenchmarkRunner {
             "INSERT OR IGNORE INTO files (path, size, modified_at, last_scanned, status, blake3_hash) VALUES ('__bench__', 0, ?1, ?1, 'active', '')",
             rusqlite::params![now],
         );
-        let fid: i64 = tx.conn().query_row("SELECT id FROM files WHERE path='__bench__'", [], |r| r.get(0)).unwrap_or(0);
+        let fid: i64 = tx
+            .conn()
+            .query_row("SELECT id FROM files WHERE path='__bench__'", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
 
         for i in 0..500 {
             let content = format!("This is benchmark chunk number {} with enough content to be meaningful for embedding generation.", i);
@@ -648,7 +728,12 @@ impl BenchmarkRunner {
         let _ = tx.commit();
 
         // Run embedding
-        let batch_size = self.config.embedding.batch_size.parse::<usize>().unwrap_or(32);
+        let batch_size = self
+            .config
+            .embedding
+            .batch_size
+            .parse::<usize>()
+            .unwrap_or(32);
         let result = aikd_embedder::embed_and_store(self.db.conn(), &model_dir, batch_size);
 
         let elapsed = start.elapsed();
@@ -738,7 +823,11 @@ impl BenchmarkRunner {
             success: fails.is_empty(),
             duration: elapsed,
             details: format!("{}/100 requests succeeded, {} failed", ok, fails.len()),
-            error: if fails.is_empty() { None } else { Some(fails.join("; ")) },
+            error: if fails.is_empty() {
+                None
+            } else {
+                Some(fails.join("; "))
+            },
             throughput: Some(100.0 / elapsed.as_secs_f64()),
         }
     }
@@ -753,7 +842,9 @@ pub fn start_resource_monitor(stop_flag: Arc<AtomicBool>) {
             }
             match monitor.check() {
                 Ok(status) => {
-                    if status.cpu_percent > MAX_CPU_PERCENT || status.mem_percent > MAX_MEM_PERCENT as f32 {
+                    if status.cpu_percent > MAX_CPU_PERCENT
+                        || status.mem_percent > MAX_MEM_PERCENT as f32
+                    {
                         warn!(
                             "Resource high: CPU {:.1}%, RAM {:.1}%",
                             status.cpu_percent, status.mem_percent

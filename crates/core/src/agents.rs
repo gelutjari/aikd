@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 
 pub struct AgentConfig {
     pub name: &'static str,
@@ -77,10 +77,13 @@ fn write_claude_code(aikd_binary: &Path) -> Result<(), String> {
     let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
     let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
 
-    servers.insert("aikd".into(), json!({
-        "command": binary,
-        "args": ["serve"],
-    }));
+    servers.insert(
+        "aikd".into(),
+        json!({
+            "command": binary,
+            "args": ["serve"],
+        }),
+    );
 
     config["mcpServers"] = json!(servers);
 
@@ -114,10 +117,13 @@ fn write_cursor(aikd_binary: &Path) -> Result<(), String> {
     let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
     let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
 
-    servers.insert("aikd".into(), json!({
-        "command": binary,
-        "args": ["serve"],
-    }));
+    servers.insert(
+        "aikd".into(),
+        json!({
+            "command": binary,
+            "args": ["serve"],
+        }),
+    );
 
     config["mcpServers"] = json!(servers);
 
@@ -154,7 +160,11 @@ fn write_cline(aikd_binary: &Path) -> Result<(), String> {
     let binary = aikd_binary.to_str().ok_or("Invalid path")?;
 
     // Cline uses VSCode settings format
-    if path.file_name().map(|f| f == "settings.json").unwrap_or(false) {
+    if path
+        .file_name()
+        .map(|f| f == "settings.json")
+        .unwrap_or(false)
+    {
         let mut config: serde_json::Value = if path.exists() {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             serde_json::from_str(&content).unwrap_or(json!({}))
@@ -214,9 +224,9 @@ fn write_continue(aikd_binary: &Path) -> Result<(), String> {
     let mut servers = mcp_servers.as_array().cloned().unwrap_or_default();
 
     // Check if aikd already exists
-    let has_aikd = servers.iter().any(|s| {
-        s.get("name").and_then(|n| n.as_str()) == Some("aikd")
-    });
+    let has_aikd = servers
+        .iter()
+        .any(|s| s.get("name").and_then(|n| n.as_str()) == Some("aikd"));
 
     if !has_aikd {
         servers.push(json!({
@@ -258,10 +268,13 @@ fn write_windsurf(aikd_binary: &Path) -> Result<(), String> {
     let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
     let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
 
-    servers.insert("aikd".into(), json!({
-        "command": binary,
-        "args": ["serve"],
-    }));
+    servers.insert(
+        "aikd".into(),
+        json!({
+            "command": binary,
+            "args": ["serve"],
+        }),
+    );
 
     config["mcpServers"] = json!(servers);
 
@@ -298,10 +311,13 @@ fn write_mimocode(aikd_binary: &Path) -> Result<(), String> {
     let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
     let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
 
-    servers.insert("aikd".into(), json!({
-        "command": binary,
-        "args": ["serve"],
-    }));
+    servers.insert(
+        "aikd".into(),
+        json!({
+            "command": binary,
+            "args": ["serve"],
+        }),
+    );
 
     config["mcpServers"] = json!(servers);
 

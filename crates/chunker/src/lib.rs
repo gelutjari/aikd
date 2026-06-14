@@ -1,8 +1,8 @@
 pub mod code;
 pub mod markdown;
 
-use std::collections::HashMap;
 use aikd_core::Chunk;
+use std::collections::HashMap;
 
 pub fn chunk_file(
     file_path: &str,
@@ -10,12 +10,18 @@ pub fn chunk_file(
     max_tokens: usize,
     min_tokens: usize,
 ) -> Vec<Chunk> {
-    let config = ChunkConfig { max_tokens, min_tokens, overlap_tokens: 0 };
+    let config = ChunkConfig {
+        max_tokens,
+        min_tokens,
+        overlap_tokens: 0,
+    };
     match detect_file_type(file_path) {
         FileType::Markdown => markdown::chunk_markdown(file_path, content, max_tokens, min_tokens),
         FileType::Text => chunk_plain_text(file_path, content, max_tokens),
         FileType::Structured => chunk_structured(file_path, content),
-        FileType::SourceCode => code::chunk_source_code(file_path, content, &config, HashMap::new()),
+        FileType::SourceCode => {
+            code::chunk_source_code(file_path, content, &config, HashMap::new())
+        }
     }
 }
 
@@ -35,12 +41,25 @@ enum FileType {
 fn detect_file_type(path: &str) -> FileType {
     if path.ends_with(".md") || path.ends_with(".markdown") {
         FileType::Markdown
-    } else if path.ends_with(".json") || path.ends_with(".jsonl") || path.ends_with(".yaml") || path.ends_with(".yml") || path.ends_with(".toml") {
+    } else if path.ends_with(".json")
+        || path.ends_with(".jsonl")
+        || path.ends_with(".yaml")
+        || path.ends_with(".yml")
+        || path.ends_with(".toml")
+    {
         FileType::Structured
-    } else if path.ends_with(".rs") || path.ends_with(".py") || path.ends_with(".ts")
-        || path.ends_with(".tsx") || path.ends_with(".js") || path.ends_with(".jsx")
-        || path.ends_with(".go") || path.ends_with(".java") || path.ends_with(".c")
-        || path.ends_with(".cpp") || path.ends_with(".h") || path.ends_with(".hpp")
+    } else if path.ends_with(".rs")
+        || path.ends_with(".py")
+        || path.ends_with(".ts")
+        || path.ends_with(".tsx")
+        || path.ends_with(".js")
+        || path.ends_with(".jsx")
+        || path.ends_with(".go")
+        || path.ends_with(".java")
+        || path.ends_with(".c")
+        || path.ends_with(".cpp")
+        || path.ends_with(".h")
+        || path.ends_with(".hpp")
     {
         FileType::SourceCode
     } else {
@@ -142,7 +161,10 @@ mod tests {
     #[test]
     fn test_detect_file_type() {
         assert!(matches!(detect_file_type("test.md"), FileType::Markdown));
-        assert!(matches!(detect_file_type("test.json"), FileType::Structured));
+        assert!(matches!(
+            detect_file_type("test.json"),
+            FileType::Structured
+        ));
         assert!(matches!(detect_file_type("test.txt"), FileType::Text));
         assert!(matches!(detect_file_type("test.rs"), FileType::SourceCode));
         assert!(matches!(detect_file_type("test.py"), FileType::SourceCode));

@@ -1,17 +1,17 @@
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use aikd_core::{SearchFilters, SearchResult};
+use anndists::dist::distances::DistCosine;
 use anyhow::Result;
+use hnsw_rs::hnsw::Hnsw;
+use parking_lot::{Mutex, RwLock};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 use tantivy::collector::TopDocs;
 use tantivy::doc;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy};
-use hnsw_rs::hnsw::Hnsw;
-use anndists::dist::distances::DistCosine;
-use parking_lot::{RwLock, Mutex};
-use aikd_core::{SearchFilters, SearchResult};
 
 pub const HNSW_M: usize = 16;
 pub const HNSW_EF_CONSTRUCTION: usize = 200;
@@ -48,7 +48,12 @@ impl VectorIndex {
         }
     }
 
-    pub fn with_hnsw_params(dim: usize, m: usize, ef_construction: usize, ef_search: usize) -> Self {
+    pub fn with_hnsw_params(
+        dim: usize,
+        m: usize,
+        ef_construction: usize,
+        ef_search: usize,
+    ) -> Self {
         Self {
             data: RwLock::new(Vec::new()),
             id_map: RwLock::new(Vec::new()),
@@ -111,15 +116,19 @@ impl VectorIndex {
         self.search_with_cache(query, limit, &map)
     }
 
-    fn search_with_cache(&self, query: &[f32], limit: usize, map: &parking_lot::RwLockReadGuard<Vec<String>>) -> Vec<(String, f32)> {
+    fn search_with_cache(
+        &self,
+        query: &[f32],
+        limit: usize,
+        map: &parking_lot::RwLockReadGuard<Vec<String>>,
+    ) -> Vec<(String, f32)> {
         let cache_guard = self.hnsw_cache.lock();
         match cache_guard.as_ref() {
             Some(cache) => {
                 let results = cache.hnsw.search(query, limit, self.hnsw_ef_search);
-                results.into_iter()
-                    .filter_map(|r| {
-                        map.get(r.d_id).map(|id| (id.clone(), 1.0 - r.distance))
-                    })
+                results
+                    .into_iter()
+                    .filter_map(|r| map.get(r.d_id).map(|id| (id.clone(), 1.0 - r.distance)))
                     .collect()
             }
             None => Vec::new(),
@@ -203,7 +212,12 @@ impl TantivyEngine {
         Ok(())
     }
 
-    pub fn search(&self, query_str: &str, limit: usize, filters: &SearchFilters) -> Result<Vec<SearchResult>> {
+    pub fn search(
+        &self,
+        query_str: &str,
+        limit: usize,
+        filters: &SearchFilters,
+    ) -> Result<Vec<SearchResult>> {
         let searcher = self.reader.searcher();
 
         let query_parser = QueryParser::for_index(
@@ -218,7 +232,8 @@ impl TantivyEngine {
 
         for (_score, doc_addr) in top_docs {
             let doc = searcher.doc::<tantivy::TantivyDocument>(doc_addr)?;
-            let file_path = doc.get_first(self.field_file_path)
+            let file_path = doc
+                .get_first(self.field_file_path)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -236,13 +251,16 @@ impl TantivyEngine {
             }
 
             if let Some(ref ft) = filters.file_types {
-                let has_ext = ft.iter().any(|ext| file_path.ends_with(&format!(".{}", ext)));
+                let has_ext = ft
+                    .iter()
+                    .any(|ext| file_path.ends_with(&format!(".{}", ext)));
                 if !has_ext {
                     continue;
                 }
             }
 
-            let heading = doc.get_first(self.field_heading)
+            let heading = doc
+                .get_first(self.field_heading)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -253,12 +271,14 @@ impl TantivyEngine {
                 }
             }
 
-            let chunk_id = doc.get_first(self.field_chunk_id)
+            let chunk_id = doc
+                .get_first(self.field_chunk_id)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
 
-            let content = doc.get_first(self.field_content)
+            let content = doc
+                .get_first(self.field_content)
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -290,7 +310,10 @@ pub struct HybridSearcher {
 
 impl HybridSearcher {
     pub fn new(tantivy: TantivyEngine, vector_index: Arc<VectorIndex>) -> Self {
-        Self { tantivy, vector_index }
+        Self {
+            tantivy,
+            vector_index,
+        }
     }
 
     pub fn tantivy(&self) -> &TantivyEngine {
@@ -361,10 +384,22 @@ mod tests {
     fn test_tantivy_open_and_search() {
         let dir = tempfile::tempdir().unwrap();
         let engine = TantivyEngine::open(dir.path()).unwrap();
-        engine.index_chunks(&[
-            ("c1".into(), "/test.md".into(), "Heading".into(), "hello world".into()),
-            ("c2".into(), "/test2.md".into(), "Other".into(), "foo bar".into()),
-        ]).unwrap();
+        engine
+            .index_chunks(&[
+                (
+                    "c1".into(),
+                    "/test.md".into(),
+                    "Heading".into(),
+                    "hello world".into(),
+                ),
+                (
+                    "c2".into(),
+                    "/test2.md".into(),
+                    "Other".into(),
+                    "foo bar".into(),
+                ),
+            ])
+            .unwrap();
 
         let filters = SearchFilters::default();
         let results = engine.search("hello", 10, &filters).unwrap();
@@ -405,10 +440,22 @@ mod tests {
     fn test_hybrid_searcher() {
         let dir = tempfile::tempdir().unwrap();
         let tantivy = TantivyEngine::open(dir.path()).unwrap();
-        tantivy.index_chunks(&[
-            ("c1".into(), "/a.md".into(), "H1".into(), "rust programming".into()),
-            ("c2".into(), "/b.md".into(), "H2".into(), "python scripting".into()),
-        ]).unwrap();
+        tantivy
+            .index_chunks(&[
+                (
+                    "c1".into(),
+                    "/a.md".into(),
+                    "H1".into(),
+                    "rust programming".into(),
+                ),
+                (
+                    "c2".into(),
+                    "/b.md".into(),
+                    "H2".into(),
+                    "python scripting".into(),
+                ),
+            ])
+            .unwrap();
 
         let vector_idx = Arc::new(VectorIndex::new(3));
         vector_idx.insert("c1", &[1.0, 0.0, 0.0]);
@@ -416,7 +463,9 @@ mod tests {
 
         let searcher = HybridSearcher::new(tantivy, vector_idx);
         let filters = SearchFilters::default();
-        let results = searcher.hybrid_search("rust", &[1.0, 0.0, 0.0], 10, &filters, 60).unwrap();
+        let results = searcher
+            .hybrid_search("rust", &[1.0, 0.0, 0.0], 10, &filters, 60)
+            .unwrap();
         assert!(!results.is_empty());
     }
 
@@ -442,9 +491,9 @@ mod tests {
     fn test_tantivy_clear() {
         let dir = tempfile::tempdir().unwrap();
         let engine = TantivyEngine::open(dir.path()).unwrap();
-        engine.index_chunks(&[
-            ("c1".into(), "/test.md".into(), "H".into(), "content".into()),
-        ]).unwrap();
+        engine
+            .index_chunks(&[("c1".into(), "/test.md".into(), "H".into(), "content".into())])
+            .unwrap();
         engine.clear().unwrap();
         let filters = SearchFilters::default();
         let results = engine.search("content", 10, &filters).unwrap();

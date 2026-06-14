@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use indicatif::{ProgressBar, ProgressStyle};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use aikd_core::{Config, Chunk};
-use aikd_storage::{Database, compute_blake3};
+use aikd_core::{Chunk, Config};
 use aikd_indexer::TantivyEngine;
+use aikd_storage::{compute_blake3, Database};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanProgress {
@@ -25,12 +25,15 @@ pub struct ScanOptions {
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self { override_path: None }
+        Self {
+            override_path: None,
+        }
     }
 }
 
 pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
-    let scan_paths: Vec<String> = opts.override_path
+    let scan_paths: Vec<String> = opts
+        .override_path
         .as_ref()
         .map(|p| vec![p.to_string_lossy().to_string()])
         .unwrap_or(cfg.scan.include_paths.clone());
@@ -43,7 +46,10 @@ pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
             log::warn!("{} not found, skipping", sp);
             continue;
         }
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -111,7 +117,12 @@ pub fn chunk_files(files: &[PathBuf], cfg: &Config) -> Vec<(String, Vec<Chunk>)>
             if !cfg.matches_content_filter(&content) {
                 return None;
             }
-            let chunks = aikd_chunker::chunk_file(&ps, &content, cfg.max_chunk_tokens(), cfg.min_chunk_tokens());
+            let chunks = aikd_chunker::chunk_file(
+                &ps,
+                &content,
+                cfg.max_chunk_tokens(),
+                cfg.min_chunk_tokens(),
+            );
             Some((ps, chunks))
         })
         .collect()
@@ -133,9 +144,10 @@ pub fn store_chunks(indexed: &[(String, Vec<Chunk>)], db: &Database) -> Result<(
                 "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)",
                 rusqlite::params![old_fid],
             );
-            let _ = tx
-                .conn()
-                .execute("DELETE FROM chunks WHERE file_id=?1", rusqlite::params![old_fid]);
+            let _ = tx.conn().execute(
+                "DELETE FROM chunks WHERE file_id=?1",
+                rusqlite::params![old_fid],
+            );
             let _ = tx
                 .conn()
                 .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid]);
@@ -170,15 +182,26 @@ pub fn update_tantivy(indexed: &[(String, Vec<Chunk>)], tantivy: &TantivyEngine)
     let tc: Vec<(String, String, String, String)> = indexed
         .iter()
         .flat_map(|(p, cs)| {
-            cs.iter()
-                .map(move |c| (c.id.clone(), p.clone(), c.heading_hierarchy_str(), c.content.clone()))
+            cs.iter().map(move |c| {
+                (
+                    c.id.clone(),
+                    p.clone(),
+                    c.heading_hierarchy_str(),
+                    c.content.clone(),
+                )
+            })
         })
         .collect();
     tantivy.index_chunks(&tc)?;
     Ok(())
 }
 
-pub fn run_scan(cfg: &Config, db: &Database, tantivy: &TantivyEngine, opts: &ScanOptions) -> Result<ScanProgress> {
+pub fn run_scan(
+    cfg: &Config,
+    db: &Database,
+    tantivy: &TantivyEngine,
+    opts: &ScanOptions,
+) -> Result<ScanProgress> {
     let start = Instant::now();
 
     eprint!("[aikd] Discovering files...");
@@ -215,7 +238,12 @@ pub fn run_scan(cfg: &Config, db: &Database, tantivy: &TantivyEngine, opts: &Sca
                 pb.inc(1);
                 return None;
             }
-            let chunks = aikd_chunker::chunk_file(&ps, &content, cfg.max_chunk_tokens(), cfg.min_chunk_tokens());
+            let chunks = aikd_chunker::chunk_file(
+                &ps,
+                &content,
+                cfg.max_chunk_tokens(),
+                cfg.min_chunk_tokens(),
+            );
             pb.inc(1);
             Some((ps, chunks))
         })
@@ -224,7 +252,11 @@ pub fn run_scan(cfg: &Config, db: &Database, tantivy: &TantivyEngine, opts: &Sca
     pb.finish_with_message("done");
 
     let chunks_created: usize = indexed.iter().map(|(_, c)| c.len()).sum();
-    eprintln!("[aikd] Storing {} chunks from {} files...", chunks_created, indexed.len());
+    eprintln!(
+        "[aikd] Storing {} chunks from {} files...",
+        chunks_created,
+        indexed.len()
+    );
     store_chunks(&indexed, db)?;
 
     eprint!("[aikd] Updating search index...");

@@ -25,11 +25,14 @@ impl Chunk {
 }
 
 pub fn estimate_tokens(text: &str) -> usize {
-    let cjk_count = text.chars().filter(|c| {
-        ('\u{4E00}'..='\u{9FFF}').contains(c)
-            || ('\u{3040}'..='\u{30FF}').contains(c)
-            || ('\u{AC00}'..='\u{D7AF}').contains(c)
-    }).count();
+    let cjk_count = text
+        .chars()
+        .filter(|c| {
+            ('\u{4E00}'..='\u{9FFF}').contains(c)
+                || ('\u{3040}'..='\u{30FF}').contains(c)
+                || ('\u{AC00}'..='\u{D7AF}').contains(c)
+        })
+        .count();
     let non_cjk_bytes = text.len() - cjk_count * 3;
     (non_cjk_bytes / 4) + (cjk_count * 2)
 }
