@@ -16,18 +16,6 @@ jobs:
             artifact: aikd-linux-amd64
             compress: tar czf
 
-          # macOS Intel
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: aikd-macos-amd64
-            compress: tar czf
-
-          # macOS Apple Silicon (M1/M2/M3)
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: aikd-macos-arm64
-            compress: tar czf
-
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -82,7 +70,5 @@ jobs:
         with:
           files: |
             artifacts/aikd-linux-amd64/aikd-linux-amd64.tar.gz
-            artifacts/aikd-macos-amd64/aikd-macos-amd64.tar.gz
-            artifacts/aikd-macos-arm64/aikd-macos-arm64.tar.gz
             artifacts/aikd-windows-amd64/aikd-windows-amd64.exe
           generate_release_notes: true
