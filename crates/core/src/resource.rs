@@ -1,18 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ResourceMode {
     Low,
     Medium,
     High,
     Max,
+    #[default]
     Auto,
-}
-
-impl Default for ResourceMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone)]

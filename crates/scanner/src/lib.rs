@@ -18,17 +18,9 @@ pub struct ScanProgress {
     pub elapsed: Duration,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScanOptions {
     pub override_path: Option<PathBuf>,
-}
-
-impl Default for ScanOptions {
-    fn default() -> Self {
-        Self {
-            override_path: None,
-        }
-    }
 }
 
 pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
@@ -284,6 +276,6 @@ mod tests {
         let cfg = Config::default();
         let opts = ScanOptions::default();
         let files = discover_files(&cfg, &opts);
-        assert!(files.len() > 0);
+        assert!(!files.is_empty());
     }
 }

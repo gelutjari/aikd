@@ -17,6 +17,7 @@ pub const HNSW_M: usize = 16;
 pub const HNSW_EF_CONSTRUCTION: usize = 200;
 pub const HNSW_EF_SEARCH: usize = 64;
 
+#[allow(dead_code)]
 struct HnswCache {
     hnsw: Hnsw<'static, f32, DistCosine>,
     built_at: Instant,
@@ -26,6 +27,7 @@ struct HnswCache {
 pub struct VectorIndex {
     data: RwLock<Vec<Vec<f32>>>,
     id_map: RwLock<Vec<String>>,
+    #[allow(dead_code)]
     dim: usize,
     hnsw_cache: Mutex<Option<HnswCache>>,
     dirty: AtomicBool,
@@ -147,6 +149,7 @@ impl VectorIndex {
 pub struct TantivyEngine {
     index: Index,
     reader: IndexReader,
+    #[allow(dead_code)]
     schema: Schema,
     field_chunk_id: Field,
     field_file_path: Field,

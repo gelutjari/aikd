@@ -69,12 +69,10 @@ pub fn chunk_markdown(
                     }
                 }
             }
-            Event::Code(code) => {
-                if !in_heading {
-                    current_content.push('`');
-                    current_content.push_str(&code);
-                    current_content.push('`');
-                }
+            Event::Code(code) if !in_heading => {
+                current_content.push('`');
+                current_content.push_str(&code);
+                current_content.push('`');
             }
             Event::Start(Tag::List(_)) => {}
             Event::Start(Tag::Item) => {
@@ -196,14 +194,14 @@ fn make_chunk(
 fn extract_frontmatter(content: &str) -> HashMap<String, Value> {
     let mut metadata = HashMap::new();
 
-    if content.starts_with("---") {
-        if let Some(end) = content[3..].find("---") {
-            let fm = &content[3..3 + end];
-            if let Ok(yaml_val) = serde_yaml::from_str::<serde_json::Value>(fm) {
-                if let serde_json::Value::Object(map) = yaml_val {
-                    for (k, v) in map {
-                        metadata.insert(k, v);
-                    }
+    if let Some(rest) = content.strip_prefix("---") {
+        if let Some(end) = rest.find("---") {
+            let fm = &rest[..end];
+            if let Ok(serde_json::Value::Object(map)) =
+                serde_yaml::from_str::<serde_json::Value>(fm)
+            {
+                for (k, v) in map {
+                    metadata.insert(k, v);
                 }
             }
         }
@@ -213,10 +211,9 @@ fn extract_frontmatter(content: &str) -> HashMap<String, Value> {
 }
 
 fn strip_frontmatter(content: &str) -> &str {
-    if content.starts_with("---") {
-        if let Some(end) = content[3..].find("---") {
-            let rest = &content[3 + end + 3..];
-            return rest.trim_start();
+    if let Some(rest) = content.strip_prefix("---") {
+        if let Some(end) = rest.find("---") {
+            return rest[end + 3..].trim_start();
         }
     }
     content

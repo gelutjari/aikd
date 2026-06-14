@@ -300,7 +300,7 @@ fn helper() {
 }
 "#;
         let chunks = chunk_source_code("test.rs", content, &test_config(), HashMap::new());
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
     }
 
     #[test]
@@ -312,14 +312,14 @@ def world():
     print("world")
 "#;
         let chunks = chunk_source_code("test.py", content, &test_config(), HashMap::new());
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
     }
 
     #[test]
     fn test_chunk_unknown_fallback() {
         let content = "some random text\nwith multiple lines\n";
         let chunks = chunk_source_code("test.xyz", content, &test_config(), HashMap::new());
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
     }
 
     #[test]
@@ -335,7 +335,7 @@ func helper() int {
 }
 "#;
         let chunks = chunk_source_code("main.go", content, &test_config(), HashMap::new());
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
     }
 
     #[test]
@@ -349,7 +349,7 @@ const world = () => {
 }
 "#;
         let chunks = chunk_source_code("app.js", content, &test_config(), HashMap::new());
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
     }
 
     #[test]
@@ -362,7 +362,7 @@ const world = () => {
     fn test_chunk_single_function() {
         let content = "fn main() {\n    println!(\"hello\");\n}\n";
         let chunks = chunk_source_code("test.rs", content, &test_config(), HashMap::new());
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         assert!(chunks[0].content.contains("fn main"));
     }
 }

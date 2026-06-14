@@ -309,8 +309,8 @@ impl Config {
 
     pub fn should_exclude_file(&self, file_name: &str) -> bool {
         self.scan.exclude_files.iter().any(|f| {
-            if f.starts_with("*.") {
-                file_name.ends_with(&format!(".{}", &f[2..]))
+            if let Some(ext) = f.strip_prefix("*.") {
+                file_name.ends_with(&format!(".{}", ext))
             } else {
                 f == file_name
             }

@@ -297,7 +297,7 @@ impl EmbeddingCache {
 
         for id in ids_to_load {
             if let Ok(bytes) = stmt.query_row(rusqlite::params![MODEL_NAME, id.as_str()], |row| {
-                Ok(row.get::<_, Vec<u8>>(1)?)
+                row.get::<_, Vec<u8>>(1)
             }) {
                 cache.put(id.clone(), bytes_to_f32(&bytes));
             }

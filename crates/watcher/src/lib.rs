@@ -3,7 +3,6 @@ use aikd_indexer::TantivyEngine;
 use aikd_storage::{compute_blake3, Database};
 use anyhow::Result;
 use notify::Watcher;
-use rusqlite;
 use std::path::Path;
 
 pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
@@ -53,7 +52,7 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                         })
                         .collect();
                     for path in filtered {
-                        pending_events.insert(path, event.kind.clone());
+                        pending_events.insert(path, event.kind);
                     }
                     last_event_time = std::time::Instant::now();
                 }
@@ -92,81 +91,80 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                     }
 
                     match kind {
-                        notify::EventKind::Create(_) | notify::EventKind::Modify(_) => {
-                            if path.exists() {
-                                if let Ok(content) = std::fs::read_to_string(path) {
-                                    if cfg.matches_content_filter(&content) {
-                                        let chunks = aikd_chunker::chunk_file(
-                                            &ps,
-                                            &content,
-                                            cfg.max_chunk_tokens(),
-                                            cfg.min_chunk_tokens(),
+                        notify::EventKind::Create(_) | notify::EventKind::Modify(_)
+                            if path.exists() =>
+                        {
+                            if let Ok(content) = std::fs::read_to_string(path) {
+                                if cfg.matches_content_filter(&content) {
+                                    let chunks = aikd_chunker::chunk_file(
+                                        &ps,
+                                        &content,
+                                        cfg.max_chunk_tokens(),
+                                        cfg.min_chunk_tokens(),
+                                    );
+                                    let size =
+                                        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                                    let hash = compute_blake3(path).unwrap_or_default();
+                                    let tx = database.begin_transaction()?;
+                                    if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(
+                                        "SELECT id FROM files WHERE path=?1",
+                                        rusqlite::params![ps],
+                                        |r| r.get(0),
+                                    ) {
+                                        let _ = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]);
+                                        let _ = tx.conn().execute(
+                                            "DELETE FROM chunks WHERE file_id=?1",
+                                            rusqlite::params![old_fid],
                                         );
-                                        let size =
-                                            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                                        let hash = compute_blake3(path).unwrap_or_default();
-                                        let tx = database.begin_transaction()?;
-                                        if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(
-                                            "SELECT id FROM files WHERE path=?1",
-                                            rusqlite::params![ps],
-                                            |r| r.get(0),
-                                        ) {
-                                            let _ = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]);
+                                        let _ = tx.conn().execute(
+                                            "DELETE FROM files WHERE id=?1",
+                                            rusqlite::params![old_fid],
+                                        );
+                                    }
+                                    let _ = tx.conn().execute("INSERT INTO files (path, size, modified_at, last_scanned, status, blake3_hash) VALUES (?1,?2,?3,?4,'active',?5)", rusqlite::params![ps, size as i64, now, now, hash]);
+                                    if let Ok(fid) = tx.conn().query_row(
+                                        "SELECT id FROM files WHERE path=?1",
+                                        rusqlite::params![ps],
+                                        |r| r.get::<_, i64>(0),
+                                    ) {
+                                        for c in &chunks {
+                                            let hj = serde_json::to_string(&c.heading_hierarchy)
+                                                .unwrap_or_default();
+                                            let mj = serde_json::to_string(&c.metadata)
+                                                .unwrap_or_default();
                                             let _ = tx.conn().execute(
-                                                "DELETE FROM chunks WHERE file_id=?1",
-                                                rusqlite::params![old_fid],
-                                            );
-                                            let _ = tx.conn().execute(
-                                                "DELETE FROM files WHERE id=?1",
-                                                rusqlite::params![old_fid],
+                                                "INSERT INTO chunks (id,file_id,chunk_index,heading_hierarchy,heading_level,heading_text,line_start,line_end,content,metadata_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                                                rusqlite::params![c.id, fid, c.chunk_index as i64, hj, c.heading_level as i64, c.heading_text, c.line_start as i64, c.line_end as i64, c.content, mj, now, now],
                                             );
                                         }
-                                        let _ = tx.conn().execute("INSERT INTO files (path, size, modified_at, last_scanned, status, blake3_hash) VALUES (?1,?2,?3,?4,'active',?5)", rusqlite::params![ps, size as i64, now, now, hash]);
-                                        if let Ok(fid) = tx.conn().query_row(
-                                            "SELECT id FROM files WHERE path=?1",
-                                            rusqlite::params![ps],
-                                            |r| r.get::<_, i64>(0),
-                                        ) {
-                                            for c in &chunks {
-                                                let hj =
-                                                    serde_json::to_string(&c.heading_hierarchy)
-                                                        .unwrap_or_default();
-                                                let mj = serde_json::to_string(&c.metadata)
-                                                    .unwrap_or_default();
-                                                let _ = tx.conn().execute(
-                                                    "INSERT INTO chunks (id,file_id,chunk_index,heading_hierarchy,heading_level,heading_text,line_start,line_end,content,metadata_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                                                    rusqlite::params![c.id, fid, c.chunk_index as i64, hj, c.heading_level as i64, c.heading_text, c.line_start as i64, c.line_end as i64, c.content, mj, now, now],
-                                                );
-                                            }
-                                        }
-                                        tx.commit()?;
-                                        let tc: Vec<(String, String, String, String)> = chunks
-                                            .iter()
-                                            .map(|c| {
-                                                (
-                                                    c.id.clone(),
-                                                    ps.clone(),
-                                                    c.heading_hierarchy_str(),
-                                                    c.content.clone(),
-                                                )
-                                            })
-                                            .collect();
-                                        tantivy.index_chunks(&tc)?;
-                                        if matches!(kind, notify::EventKind::Create(_)) {
-                                            created += 1;
-                                            println!(
-                                                "[{}] + Created: {}",
-                                                chrono::Local::now().format("%H:%M:%S"),
-                                                ps
-                                            );
-                                        } else {
-                                            changed += 1;
-                                            println!(
-                                                "[{}] ~ Modified: {}",
-                                                chrono::Local::now().format("%H:%M:%S"),
-                                                ps
-                                            );
-                                        }
+                                    }
+                                    tx.commit()?;
+                                    let tc: Vec<(String, String, String, String)> = chunks
+                                        .iter()
+                                        .map(|c| {
+                                            (
+                                                c.id.clone(),
+                                                ps.clone(),
+                                                c.heading_hierarchy_str(),
+                                                c.content.clone(),
+                                            )
+                                        })
+                                        .collect();
+                                    tantivy.index_chunks(&tc)?;
+                                    if matches!(kind, notify::EventKind::Create(_)) {
+                                        created += 1;
+                                        println!(
+                                            "[{}] + Created: {}",
+                                            chrono::Local::now().format("%H:%M:%S"),
+                                            ps
+                                        );
+                                    } else {
+                                        changed += 1;
+                                        println!(
+                                            "[{}] ~ Modified: {}",
+                                            chrono::Local::now().format("%H:%M:%S"),
+                                            ps
+                                        );
                                     }
                                 }
                             }

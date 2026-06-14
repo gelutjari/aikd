@@ -3,7 +3,6 @@ use aikd_indexer::TantivyEngine;
 use aikd_storage::Database;
 use anyhow::{anyhow, Result};
 use rayon::prelude::*;
-use rusqlite;
 use std::{
     fs,
     io::Write,
@@ -54,6 +53,12 @@ pub struct ResourceMonitor {
     sys: std::sync::Mutex<System>,
     cpu_cores: usize,
     total_mem: u64,
+}
+
+impl Default for ResourceMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResourceMonitor {
@@ -120,8 +125,8 @@ pub struct ResourceStatus {
 
 pub struct BenchmarkRunner {
     config: Config,
-    db: Arc<Database>,
-    tantivy: Arc<TantivyEngine>,
+    db: Database,
+    tantivy: TantivyEngine,
     resource_monitor: Arc<ResourceMonitor>,
     stop_flag: Arc<AtomicBool>,
     temp_dir: tempfile::TempDir,
@@ -138,8 +143,8 @@ impl BenchmarkRunner {
         let db_path = temp_dir.path().join("bench.db");
         let tantivy_path = temp_dir.path().join("tantivy");
 
-        let db = Arc::new(Database::open(&db_path)?);
-        let tantivy = Arc::new(TantivyEngine::open(&tantivy_path)?);
+        let db = Database::open(&db_path)?;
+        let tantivy = TantivyEngine::open(&tantivy_path)?;
         let resource_monitor = Arc::new(ResourceMonitor::new());
         let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -552,7 +557,7 @@ impl BenchmarkRunner {
                 .filter_map(|i| {
                     let ps = data_dir.join(format!("doc_{:04}.md", i));
                     let content = fs::read_to_string(&ps).ok()?;
-                    let chunks = aikd_chunker::chunk_file(&ps.to_str()?, &content, 1000, 50);
+                    let chunks = aikd_chunker::chunk_file(ps.to_str()?, &content, 1000, 50);
                     Some(chunks.into_iter().map(move |c| {
                         let p = ps.to_string_lossy().to_string();
                         (c.id.clone(), p, c.heading_hierarchy_str(), c.content)

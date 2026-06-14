@@ -20,6 +20,7 @@ use rusqlite;
 #[derive(Clone)]
 struct RestState {
     config: Arc<Mutex<Config>>,
+    #[allow(dead_code)]
     config_path: String,
 }
 

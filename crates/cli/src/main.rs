@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let json_mode = cli.json;
-    let quiet = cli.quiet;
+    let _quiet = cli.quiet;
     match cli.command {
         Commands::Init { path } => cmd_init(&cli.config, path.as_deref()),
         Commands::Daemon { foreground } => cmd_daemon(&cli.config, foreground).await,
@@ -271,20 +271,19 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
 }
 
 fn install_shell_hook(_config_path: &str) {
-    let hook_script = format!(
-        r#"# AIKD auto-start hook
-aikd_auto_start() {{
+    let hook_script = r#"# AIKD auto-start hook
+aikd_auto_start() {
     if [ -f ".aikd/config.yaml" ] || [ -f "$HOME/.aikd/config.yaml" ]; then
         if ! pgrep -f "aikd daemon" > /dev/null 2>&1; then
             aikd daemon --foreground &>/dev/null &
         fi
     fi
-}}
-cd() {{
+}
+cd() {
     builtin cd "$@" && aikd_auto_start
-}}
-aikd_auto_start"#,
-    );
+}
+aikd_auto_start"#
+        .to_string();
 
     // Bash hook
     let bashrc = shellexpand::tilde("~/.bashrc");
