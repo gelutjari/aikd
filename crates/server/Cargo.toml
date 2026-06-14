@@ -1,0 +1,28 @@
+[package]
+name = "aikd-server"
+version.workspace = true
+edition.workspace = true
+description = "AIKD MCP server and REST API"
+
+[dependencies]
+aikd-core = { path = "../core" }
+aikd-storage = { path = "../storage" }
+aikd-indexer = { path = "../indexer" }
+aikd-embedder = { path = "../embedder" }
+aikd-chunker = { path = "../chunker" }
+aikd-session = { path = "../session" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+walkdir = { workspace = true }
+rayon = { workspace = true }
+shellexpand = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+rusqlite = { workspace = true }

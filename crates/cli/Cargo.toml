@@ -1,0 +1,36 @@
+[package]
+name = "aikd-cli"
+version.workspace = true
+edition.workspace = true
+description = "AIKD CLI interface"
+
+[[bin]]
+name = "aikd"
+path = "src/main.rs"
+
+[dependencies]
+aikd-core = { path = "../core" }
+aikd-storage = { path = "../storage" }
+aikd-indexer = { path = "../indexer" }
+aikd-embedder = { path = "../embedder" }
+aikd-chunker = { path = "../chunker" }
+aikd-session = { path = "../session" }
+aikd-server = { path = "../server" }
+aikd-watcher = { path = "../watcher" }
+aikd-benchmark = { path = "../benchmark" }
+aikd-scanner = { path = "../scanner" }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+walkdir = { workspace = true }
+rayon = { workspace = true }
+shellexpand = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { version = "0.12", features = ["blocking"] }
+num_cpus = "1"

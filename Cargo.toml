@@ -1,0 +1,68 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/storage",
+    "crates/indexer",
+    "crates/embedder",
+    "crates/chunker",
+    "crates/scanner",
+    "crates/session",
+    "crates/server",
+    "crates/watcher",
+    "crates/cli",
+    "crates/plugin",
+    "crates/benchmark",
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+description = "AIKD — AI Knowledge Daemon: background knowledge indexer with hybrid search, session memory, and MCP/REST API"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tantivy = "0.22"
+notify = "6"
+walkdir = "2"
+rayon = "1.12"
+globset = "0.4"
+pulldown-cmark = "0.11"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+thiserror = "2"
+shellexpand = "3"
+fastembed = "5"
+rmcp = { version = "0.16", features = ["server", "transport-io"] }
+schemars = "0.8"
+axum = { version = "0.8", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+blake3 = "1"
+num_cpus = "1"
+sysinfo = "0.34"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+hnsw_rs = "0.3"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+indicatif = "0.17"
+lru = "0.12"
+dirs = "5"
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

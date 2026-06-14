@@ -1,0 +1,26 @@
+{
+    "name": "aikd",
+    "displayName": "AIKD — AI Knowledge Daemon",
+    "description": "Background knowledge indexer with hybrid search, session memory, and MCP/REST API",
+    "version": "1.1.0",
+    "publisher": "aikd",
+    "engines": { "vscode": "^1.80.0" },
+    "categories": ["Other"],
+    "activationEvents": ["onStartupFinished"],
+    "main": "./extension.js",
+    "contributes": {
+        "commands": [
+            { "command": "aikd.search", "title": "AIKD: Search Knowledge Base" },
+            { "command": "aikd.scan", "title": "AIKD: Scan & Index Files" },
+            { "command": "aikd.stats", "title": "AIKD: Show Statistics" },
+            { "command": "aikd.status", "title": "AIKD: Show Status" }
+        ],
+        "configuration": {
+            "title": "AIKD",
+            "properties": {
+                "aikd.restPort": { "type": "number", "default": 9090, "description": "REST API port" },
+                "aikd.authToken": { "type": "string", "default": "", "description": "Auth token" }
+            }
+        }
+    }
+}

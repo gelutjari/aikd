@@ -1,0 +1,17 @@
+[package]
+name = "aikd-indexer"
+version.workspace = true
+edition.workspace = true
+description = "AIKD Tantivy BM25 + HNSW ANN search engine"
+
+[dependencies]
+aikd-core = { path = "../core" }
+tantivy = { workspace = true }
+hnsw_rs = { workspace = true }
+anndists = "0.1"
+anyhow = { workspace = true }
+log = { workspace = true }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,26 @@
+# Rust build
+/target/
+**/*.rs.bk
+
+# AIKD data (user-specific)
+~/.aikd/
+*.db
+*.db-wal
+*.db-shm
+benchmark_report.json
+stress_results_*/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Model files (terlalu besar untuk git)
+*.onnx
+model/

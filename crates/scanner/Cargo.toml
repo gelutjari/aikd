@@ -1,0 +1,26 @@
+[package]
+name = "aikd-scanner"
+version.workspace = true
+edition.workspace = true
+description = "AIKD shared scan logic with progress events"
+
+[dependencies]
+aikd-core = { path = "../core" }
+aikd-storage = { path = "../storage" }
+aikd-indexer = { path = "../indexer" }
+aikd-chunker = { path = "../chunker" }
+walkdir = { workspace = true }
+rayon = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+shellexpand = { workspace = true }
+tokio = { workspace = true }
+indicatif = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

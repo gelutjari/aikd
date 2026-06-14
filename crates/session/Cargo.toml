@@ -1,0 +1,16 @@
+[package]
+name = "aikd-session"
+version.workspace = true
+edition.workspace = true
+description = "AIKD session and conversation memory management"
+
+[dependencies]
+aikd-core = { path = "../core" }
+aikd-storage = { path = "../storage" }
+aikd-embedder = { path = "../embedder" }
+rusqlite = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
+serde_json = { workspace = true }

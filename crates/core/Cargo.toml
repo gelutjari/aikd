@@ -1,0 +1,23 @@
+[package]
+name = "aikd-core"
+version.workspace = true
+edition.workspace = true
+description = "AIKD core types, errors, and configuration"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+shellexpand = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+num_cpus = { workspace = true }
+sysinfo = { workspace = true }
+log = { workspace = true }
+rusqlite = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "aikd-storage"
+version.workspace = true
+edition.workspace = true
+description = "AIKD SQLite storage layer with sessions and incremental indexing"
+
+[dependencies]
+aikd-core = { path = "../core" }
+rusqlite = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+blake3 = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

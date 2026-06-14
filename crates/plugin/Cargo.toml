@@ -1,0 +1,9 @@
+[package]
+name = "aikd-plugin"
+version.workspace = true
+edition.workspace = true
+description = "AIKD plugin SDK helpers for external integrations"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

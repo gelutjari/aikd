@@ -1,0 +1,18 @@
+[package]
+name = "aikd-watcher"
+version.workspace = true
+edition.workspace = true
+description = "AIKD file system watcher with incremental indexing"
+
+[dependencies]
+aikd-core = { path = "../core" }
+aikd-storage = { path = "../storage" }
+aikd-indexer = { path = "../indexer" }
+aikd-chunker = { path = "../chunker" }
+notify = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+shellexpand = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
