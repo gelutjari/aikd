@@ -40,28 +40,58 @@
 
 ## About
 
-**AIKD** (AI Knowledge Daemon) is a background knowledge indexer written in Rust. It indexes your project files (Markdown, JSON, YAML, TOML, source code) into a searchable knowledge base using BM25 full-text search and vector semantic search.
+**AIKD** (AI Knowledge Daemon) is an **MCP tool provider** written in Rust that gives AI agents instant access to your codebase. It indexes project files into a searchable knowledge base and exposes **7 tools** via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) that any AI agent can call.
 
-AI agents like Claude, MiMo, Cursor, and others can use AIKD to search your codebase instantly instead of scanning files one by one with `grep` or `find`.
+### What is AIKD?
+
+| Category | Answer |
+|----------|--------|
+| **MCP Tool Provider** | Yes — exposes `scan`, `query`, `embed`, `stats`, `remember`, `recall`, `status` tools |
+| **CLI Tool** | Yes — `aikd query "login" --json` works directly from terminal |
+| **REST API** | Yes — HTTP endpoints at `http://localhost:9090` |
+| **VS Code Extension** | No — standalone binary, not an IDE plugin |
+| **Library/SDK** | No — end-user tool, not a dependency |
+
+### How it works
 
 ```
-Before AIKD:
-  AI → grep -r "login" . → slow, inaccurate, no context
-
-With AIKD:
-  AI → aikd query "login" --json → instant results with file, line, score
+┌─────────────────────────────────────────────────────────┐
+│                    AI Agent                              │
+│  (MiMoCode, Claude Code, Cursor, Cline, Windsurf, etc) │
+└────────────────────────┬────────────────────────────────┘
+                         │ MCP Protocol (stdio)
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│                    AIKD Server                           │
+│                                                         │
+│  Tools:                                                 │
+│    scan    → Index files into knowledge base             │
+│    query   → BM25 + vector semantic search               │
+│    embed   → Generate vector embeddings                  │
+│    stats   → Knowledge base statistics                   │
+│    remember → Save conversation to memory                │
+│    recall  → Search conversation history                 │
+│    status  → System resource status                      │
+└────────────────────────┬────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│              Knowledge Base                              │
+│  SQLite + Tantivy (BM25) + ONNX embeddings (384d)       │
+│  84 files · 412 chunks · <1ms search                     │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ### The Problem
 
-AI agents need to understand your codebase to help you. Without an index, they resort to:
-- Running `grep` or `find` repeatedly (slow, no ranking)
-- Reading entire files (wastes tokens)
-- Guessing where things are (inaccurate)
+AI agents need to understand your codebase. Without an index, they:
+- Run `grep` or `find` repeatedly (slow, no ranking)
+- Read entire files (wastes tokens)
+- Guess where things are (inaccurate)
 
 ### The Solution
 
-AIKD pre-indexes your project into a fast search database. When an AI agent needs to find something, it calls `aikd query` and gets ranked, contextual results in milliseconds.
+AIKD pre-indexes your project. AI agents call `aikd query` via MCP and get ranked results in milliseconds.
 
 ---
 
