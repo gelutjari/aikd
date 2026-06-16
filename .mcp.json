@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "aikd": {
+      "command": "aikd",
+      "args": ["serve"],
+      "description": "AIKD — Indexed semantic & BM25 code search for AI agents. Gives your AI instant memory of your codebase.",
+      "env": {}
+    }
+  }
+}
