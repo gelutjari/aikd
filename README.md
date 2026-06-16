@@ -173,50 +173,25 @@ $ aikd query "login function" --json --limit 3
 
 ## Installation
 
-### Option 1: Pre-built Binary (Recommended)
-
-**Windows:**
-```powershell
-# Download from releases, then:
-copy aikd.exe %USERPROFILE%\.local\bin\aikd.exe
-```
+### One-Line Install (Recommended)
 
 **Linux / macOS:**
 ```bash
-# Download from releases, then:
-cp aikd ~/.local/bin/aikd
-chmod +x ~/.local/bin/aikd
-```
-
-### Option 2: Build from Source
-
-```bash
-# Clone the repository
-git clone https://github.com/your-org/aikd.git
-cd aikd
-
-# Build release
-cargo build --release
-
-# Install
-# Windows:
-copy target\release\aikd.exe %USERPROFILE%\.local\bin\aikd.exe
-
-# Linux/macOS:
-cp target/release/aikd ~/.local/bin/aikd
-chmod +x ~/.local/bin/aikd
-```
-
-### Option 3: Install Script
-
-**Linux / macOS:**
-```bash
-curl -sSfL https://raw.githubusercontent.com/your-org/aikd/main/install.sh | bash
+curl -sSfL https://raw.githubusercontent.com/gelutjari/aikd/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/gelutjari/aikd/main/install.ps1 | iex"
+```
+
+### Build from Source
+
+```bash
+git clone https://github.com/gelutjari/aikd.git
+cd aikd
+cargo build --release
+# Binary: target/release/aikd (Linux/macOS) or target\release\aikd.exe (Windows)
 ```
 
 ### After Installation
@@ -527,7 +502,7 @@ Contributions are welcome! Please follow these steps:
 ### Development Setup
 
 ```bash
-git clone https://github.com/your-org/aikd.git
+git clone https://github.com/gelutjari/aikd.git
 cd aikd
 cargo build
 cargo test
