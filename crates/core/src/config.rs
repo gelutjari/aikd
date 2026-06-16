@@ -109,7 +109,7 @@ pub struct ResourceConfig {
 }
 
 fn default_version() -> String {
-    "1.1.0".to_string()
+    env!("CARGO_PKG_VERSION").to_string()
 }
 fn default_paths() -> Vec<String> {
     vec![".".to_string()]
@@ -370,6 +370,34 @@ impl Config {
     pub fn min_chunk_tokens(&self) -> usize {
         self.chunk.min_tokens
     }
+
+    /// Validate config values and return warnings for invalid settings.
+    pub fn validate(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        if self.server.rest_port < 1024 {
+            warnings.push(format!(
+                "rest_port {} is below 1024 (may require root privileges)",
+                self.server.rest_port
+            ));
+        }
+
+        if self.chunk.max_tokens < self.chunk.min_tokens {
+            warnings.push(format!(
+                "max_chunk_tokens ({}) < min_chunk_tokens ({})",
+                self.chunk.max_tokens, self.chunk.min_tokens
+            ));
+        }
+
+        for path in &self.scan.include_paths {
+            let expanded = shellexpand::tilde(path);
+            if !std::path::Path::new(expanded.as_ref()).exists() {
+                warnings.push(format!("include_path does not exist: {}", path));
+            }
+        }
+
+        warnings
+    }
 }
 
 pub fn generate_smart_config(project_root: &Path) -> Config {
@@ -454,7 +482,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = Config::default();
-        assert_eq!(cfg.version, "1.1.0");
+        assert_eq!(cfg.version, env!("CARGO_PKG_VERSION"));
         assert!(cfg.scan.include_extensions.contains(&"md".to_string()));
         assert!(cfg.scan.exclude_paths.contains(&"node_modules".to_string()));
         assert_eq!(cfg.chunk.max_tokens, 1000);

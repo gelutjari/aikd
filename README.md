@@ -10,7 +10,10 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-green.svg)]()
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)]()
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
-[![Tests](https://img.shields.io/badge/tests-82%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-85%20passed-brightgreen.svg)]()
+[![Clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen.svg)]()
+
+**Keywords:** `code-search` `semantic-search` `mcp-server` `ai-agent` `knowledge-base` `vector-search` `bm25` `tantivy` `onnx` `embeddings` `rust` `cli-tool` `rest-api` `file-indexer`
 
 </div>
 
@@ -41,6 +44,14 @@
 ## About
 
 **AIKD** (AI Knowledge Daemon) is an **MCP tool provider** written in Rust that gives AI agents instant access to your codebase. It indexes project files into a searchable knowledge base and exposes **7 tools** via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) that any AI agent can call.
+
+### Use Cases
+
+- **AI-assisted development**: Let Claude, Cursor, Cline, or any MCP-capable AI search your codebase semantically
+- **Code navigation**: Find functions, patterns, and logic across large projects in milliseconds
+- **Knowledge management**: Index documentation, configs, and code into a unified searchable knowledge base
+- **Conversation memory**: Save and recall conversation context across sessions
+- **CI/CD integration**: Use CLI or REST API for automated code search in pipelines
 
 ### What is AIKD?
 

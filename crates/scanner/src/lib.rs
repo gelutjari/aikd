@@ -39,6 +39,7 @@ pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
             continue;
         }
         for entry in walkdir::WalkDir::new(root)
+            .follow_links(cfg.scan.follow_symlinks)
             .into_iter()
             .filter_map(|e| e.ok())
         {
@@ -132,17 +133,16 @@ pub fn store_chunks(indexed: &[(String, Vec<Chunk>)], db: &Database) -> Result<(
             rusqlite::params![ps],
             |r| r.get(0),
         ) {
-            let _ = tx.conn().execute(
+            tx.conn().execute(
                 "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)",
                 rusqlite::params![old_fid],
-            );
-            let _ = tx.conn().execute(
+            )?;
+            tx.conn().execute(
                 "DELETE FROM chunks WHERE file_id=?1",
                 rusqlite::params![old_fid],
-            );
-            let _ = tx
-                .conn()
-                .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid]);
+            )?;
+            tx.conn()
+                .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid])?;
         }
 
         tx.conn().execute(
@@ -198,12 +198,15 @@ pub fn run_scan(
 
     eprint!("[aikd] Discovering files...");
     let files = discover_files(cfg, opts);
-    eprintln!(" found {} files", files.len());
+    let total_files = files.len();
+    eprintln!(" found {} files", total_files);
 
     eprint!("[aikd] Checking for changes...");
     let files_to_index = filter_changed(files, db);
     let files_found = files_to_index.len();
     eprintln!(" {} to index", files_found);
+
+    log::info!("Discovered {} files, {} to index", total_files, files_found);
 
     if files_found == 0 {
         return Ok(ScanProgress {
@@ -256,7 +259,7 @@ pub fn run_scan(
     eprintln!(" done");
 
     let files_indexed = indexed.len();
-    let files_skipped = files_found - files_indexed;
+    let files_skipped = files_found.saturating_sub(files_indexed);
 
     Ok(ScanProgress {
         files_found,

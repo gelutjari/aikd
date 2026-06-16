@@ -1,4 +1,4 @@
-use aikd_core::Config;
+use aikd_core::{Chunk, Config};
 use aikd_indexer::TantivyEngine;
 use aikd_storage::{compute_blake3, Database};
 use anyhow::Result;
@@ -67,10 +67,13 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                 }
 
                 let events: Vec<_> = pending_events.drain().collect();
-                let now = chrono::Utc::now().to_rfc3339();
                 let mut changed = 0;
                 let mut created = 0;
                 let mut removed = 0;
+
+                // Collect file changes for batch processing
+                let mut to_index: Vec<(String, Vec<Chunk>)> = Vec::new();
+                let mut to_remove: Vec<String> = Vec::new();
 
                 for (path, kind) in &events {
                     let ps = path.to_string_lossy().to_string();
@@ -84,7 +87,7 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                                 |r| r.get(0),
                             ) {
                                 if old_hash == new_hash {
-                                    continue; // File unchanged
+                                    continue;
                                 }
                             }
                         }
@@ -102,55 +105,7 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                                         cfg.max_chunk_tokens(),
                                         cfg.min_chunk_tokens(),
                                     );
-                                    let size =
-                                        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                                    let hash = compute_blake3(path).unwrap_or_default();
-                                    let tx = database.begin_transaction()?;
-                                    if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(
-                                        "SELECT id FROM files WHERE path=?1",
-                                        rusqlite::params![ps],
-                                        |r| r.get(0),
-                                    ) {
-                                        let _ = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]);
-                                        let _ = tx.conn().execute(
-                                            "DELETE FROM chunks WHERE file_id=?1",
-                                            rusqlite::params![old_fid],
-                                        );
-                                        let _ = tx.conn().execute(
-                                            "DELETE FROM files WHERE id=?1",
-                                            rusqlite::params![old_fid],
-                                        );
-                                    }
-                                    let _ = tx.conn().execute("INSERT INTO files (path, size, modified_at, last_scanned, status, blake3_hash) VALUES (?1,?2,?3,?4,'active',?5)", rusqlite::params![ps, size as i64, now, now, hash]);
-                                    if let Ok(fid) = tx.conn().query_row(
-                                        "SELECT id FROM files WHERE path=?1",
-                                        rusqlite::params![ps],
-                                        |r| r.get::<_, i64>(0),
-                                    ) {
-                                        for c in &chunks {
-                                            let hj = serde_json::to_string(&c.heading_hierarchy)
-                                                .unwrap_or_default();
-                                            let mj = serde_json::to_string(&c.metadata)
-                                                .unwrap_or_default();
-                                            let _ = tx.conn().execute(
-                                                "INSERT INTO chunks (id,file_id,chunk_index,heading_hierarchy,heading_level,heading_text,line_start,line_end,content,metadata_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                                                rusqlite::params![c.id, fid, c.chunk_index as i64, hj, c.heading_level as i64, c.heading_text, c.line_start as i64, c.line_end as i64, c.content, mj, now, now],
-                                            );
-                                        }
-                                    }
-                                    tx.commit()?;
-                                    let tc: Vec<(String, String, String, String)> = chunks
-                                        .iter()
-                                        .map(|c| {
-                                            (
-                                                c.id.clone(),
-                                                ps.clone(),
-                                                c.heading_hierarchy_str(),
-                                                c.content.clone(),
-                                            )
-                                        })
-                                        .collect();
-                                    tantivy.index_chunks(&tc)?;
+                                    to_index.push((ps.clone(), chunks));
                                     if matches!(kind, notify::EventKind::Create(_)) {
                                         created += 1;
                                         println!(
@@ -170,23 +125,7 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                             }
                         }
                         notify::EventKind::Remove(_) => {
-                            let tx = database.begin_transaction()?;
-                            if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(
-                                "SELECT id FROM files WHERE path=?1",
-                                rusqlite::params![ps],
-                                |r| r.get(0),
-                            ) {
-                                let _ = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]);
-                                let _ = tx.conn().execute(
-                                    "DELETE FROM chunks WHERE file_id=?1",
-                                    rusqlite::params![old_fid],
-                                );
-                                let _ = tx.conn().execute(
-                                    "DELETE FROM files WHERE id=?1",
-                                    rusqlite::params![old_fid],
-                                );
-                            }
-                            tx.commit()?;
+                            to_remove.push(ps.clone());
                             removed += 1;
                             println!(
                                 "[{}] - Removed: {}",
@@ -196,6 +135,44 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                         }
                         _ => {}
                     }
+                }
+
+                // Batch store new/changed files using scanner
+                if !to_index.is_empty() {
+                    if let Err(e) = aikd_scanner::store_chunks(&to_index, &database) {
+                        log::warn!("Failed to store chunks: {}", e);
+                    }
+                    // Update Tantivy index for changed files
+                    if let Err(e) = aikd_scanner::update_tantivy(&to_index, &tantivy) {
+                        log::warn!("Failed to update tantivy: {}", e);
+                    }
+                }
+
+                // Remove deleted files
+                for ps in &to_remove {
+                    let tx = database.begin_transaction()?;
+                    if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(
+                        "SELECT id FROM files WHERE path=?1",
+                        rusqlite::params![ps],
+                        |r| r.get(0),
+                    ) {
+                        if let Err(e) = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]) {
+                            log::warn!("Failed to delete embeddings for {}: {}", ps, e);
+                        }
+                        if let Err(e) = tx.conn().execute(
+                            "DELETE FROM chunks WHERE file_id=?1",
+                            rusqlite::params![old_fid],
+                        ) {
+                            log::warn!("Failed to delete chunks for {}: {}", ps, e);
+                        }
+                        if let Err(e) = tx
+                            .conn()
+                            .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid])
+                        {
+                            log::warn!("Failed to delete file {}: {}", ps, e);
+                        }
+                    }
+                    tx.commit()?;
                 }
 
                 if changed + created + removed > 0 {

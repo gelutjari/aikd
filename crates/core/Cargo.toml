@@ -11,11 +11,8 @@ serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 shellexpand = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
 num_cpus = { workspace = true }
 sysinfo = { workspace = true }
-log = { workspace = true }
 rusqlite = { workspace = true }
 dirs = { workspace = true }
 

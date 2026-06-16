@@ -1,3 +1,4 @@
+use aikd_core::fusion::reciprocal_rank_fusion;
 use aikd_core::{SearchFilters, SearchResult};
 use anndists::dist::distances::DistCosine;
 use anyhow::Result;
@@ -107,10 +108,14 @@ impl VectorIndex {
             return Vec::new();
         }
 
-        if self.dirty.load(Ordering::Acquire) {
+        // Atomically check and clear dirty flag to prevent TOCTOU race
+        if self
+            .dirty
+            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
             drop(map);
             self.rebuild_hnsw_cache();
-            self.dirty.store(false, Ordering::Release);
             let map = self.id_map.read();
             return self.search_with_cache(query, limit, &map);
         }
@@ -143,6 +148,21 @@ impl VectorIndex {
 
     pub fn is_empty(&self) -> bool {
         self.id_map.read().is_empty()
+    }
+
+    /// Load all embeddings from the database into the vector index.
+    pub fn load_from_db(conn: &rusqlite::Connection, model_name: &str) -> Result<Self> {
+        let index = Self::new(aikd_embedder::DIMENSIONS);
+        let mut stmt = conn.prepare("SELECT chunk_id, vector FROM embeddings WHERE model = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![model_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (id, bytes) = row?;
+            let vec = aikd_embedder::bytes_to_f32(&bytes);
+            index.insert(&id, &vec);
+        }
+        Ok(index)
     }
 }
 
@@ -192,7 +212,23 @@ impl TantivyEngine {
 
     pub fn index_chunks(&self, chunks: &[(String, String, String, String)]) -> Result<()> {
         let mut writer: IndexWriter = self.index.writer(50_000_000)?;
+        self.index_chunks_with_writer(&mut writer, chunks)
+    }
 
+    pub fn index_chunks_with_heap(
+        &self,
+        chunks: &[(String, String, String, String)],
+        heap_bytes: usize,
+    ) -> Result<()> {
+        let mut writer: IndexWriter = self.index.writer(heap_bytes)?;
+        self.index_chunks_with_writer(&mut writer, chunks)
+    }
+
+    fn index_chunks_with_writer(
+        &self,
+        writer: &mut IndexWriter,
+        chunks: &[(String, String, String, String)],
+    ) -> Result<()> {
         for (chunk_id, file_path, heading, content) in chunks {
             writer.add_document(doc!(
                 self.field_chunk_id => chunk_id.as_str(),
@@ -208,7 +244,11 @@ impl TantivyEngine {
     }
 
     pub fn clear(&self) -> Result<()> {
-        let mut writer: IndexWriter = self.index.writer(50_000_000)?;
+        self.clear_with_heap(50_000_000)
+    }
+
+    pub fn clear_with_heap(&self, heap_bytes: usize) -> Result<()> {
+        let mut writer: IndexWriter = self.index.writer(heap_bytes)?;
         writer.delete_all_documents()?;
         writer.commit()?;
         self.reader.reload()?;
@@ -307,12 +347,12 @@ impl TantivyEngine {
 }
 
 pub struct HybridSearcher {
-    tantivy: TantivyEngine,
+    tantivy: Arc<TantivyEngine>,
     vector_index: Arc<VectorIndex>,
 }
 
 impl HybridSearcher {
-    pub fn new(tantivy: TantivyEngine, vector_index: Arc<VectorIndex>) -> Self {
+    pub fn new(tantivy: Arc<TantivyEngine>, vector_index: Arc<VectorIndex>) -> Self {
         Self {
             tantivy,
             vector_index,
@@ -364,19 +404,6 @@ impl HybridSearcher {
 
         Ok(results)
     }
-}
-
-fn reciprocal_rank_fusion(kw: &[String], ann: &[String], k: u64) -> Vec<(String, f32)> {
-    let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
-    for (r, id) in kw.iter().enumerate() {
-        *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k as f32 + r as f32 + 1.0);
-    }
-    for (r, id) in ann.iter().enumerate() {
-        *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k as f32 + r as f32 + 1.0);
-    }
-    let mut fused: Vec<(String, f32)> = scores.into_iter().collect();
-    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    fused
 }
 
 #[cfg(test)]
@@ -464,7 +491,7 @@ mod tests {
         vector_idx.insert("c1", &[1.0, 0.0, 0.0]);
         vector_idx.insert("c2", &[0.0, 1.0, 0.0]);
 
-        let searcher = HybridSearcher::new(tantivy, vector_idx);
+        let searcher = HybridSearcher::new(Arc::new(tantivy), vector_idx);
         let filters = SearchFilters::default();
         let results = searcher
             .hybrid_search("rust", &[1.0, 0.0, 0.0], 10, &filters, 60)

@@ -3,7 +3,7 @@ set -euo pipefail
 
 AIKD_VERSION="2.0.0"
 INSTALL_DIR="${AIKD_INSTALL_DIR:-$HOME/.local/bin}"
-REPO="your-org/aikd"
+REPO="gelutjari/aikd"
 
 detect_platform() {
     local OS ARCH

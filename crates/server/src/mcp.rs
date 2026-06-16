@@ -7,13 +7,11 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use aikd_chunker as chunker;
 use aikd_core::SearchFilters;
 use aikd_embedder as embedder;
 use aikd_indexer::TantivyEngine;
 use aikd_session as session;
 use aikd_storage::Database;
-use rusqlite;
 
 use crate::AppState;
 
@@ -31,6 +29,10 @@ pub struct QueryParams {
     pub limit: Option<usize>,
     #[schemars(description = "Filter by file path")]
     pub path_filter: Option<String>,
+    #[schemars(description = "Exclude paths matching pattern")]
+    pub path_exclude: Option<String>,
+    #[schemars(description = "Filter by file extension (e.g. 'rs', 'ts')")]
+    pub file_types: Option<Vec<String>>,
     #[schemars(description = "Filter by heading")]
     pub heading_filter: Option<String>,
     #[schemars(description = "Use hybrid search")]
@@ -94,124 +96,17 @@ impl AikdServer {
             Err(e) => return format!("Error: {}", e),
         };
 
-        let scan_paths: Vec<String> = params
-            .path
-            .map(|p| vec![p])
-            .unwrap_or(cfg.scan.include_paths.clone());
-
-        let mut files = Vec::new();
-        for sp in &scan_paths {
-            let expanded = shellexpand::tilde(sp);
-            let root = std::path::Path::new(expanded.as_ref());
-            if !root.exists() {
-                continue;
-            }
-            for entry in walkdir::WalkDir::new(root)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let fname = entry.file_name().to_str().unwrap_or("");
-                if cfg.should_exclude_file(fname) || !cfg.matches_filename_filter(fname) {
-                    continue;
-                }
-                if !cfg.scan.include_extensions.iter().any(|ext| {
-                    entry
-                        .path()
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s == ext.as_str())
-                        .unwrap_or(false)
-                }) {
-                    continue;
-                }
-                files.push(entry.into_path());
-            }
-        }
-
-        use rayon::prelude::*;
-        let indexed: Vec<_> = files
-            .par_iter()
-            .filter_map(|path| {
-                let ps = path.to_string_lossy().to_string();
-                let content = std::fs::read_to_string(path).ok()?;
-                if !cfg.matches_content_filter(&content) {
-                    return None;
-                }
-                let chunks = chunker::chunk_file(
-                    &ps,
-                    &content,
-                    cfg.max_chunk_tokens(),
-                    cfg.min_chunk_tokens(),
-                );
-                Some((ps, chunks))
-            })
-            .collect();
-
-        let tx = match database.begin_transaction() {
-            Ok(tx) => tx,
-            Err(e) => return format!("Error: {}", e),
+        let opts = aikd_scanner::ScanOptions {
+            override_path: params.path.map(std::path::PathBuf::from),
         };
 
-        for (ps, chunks) in &indexed {
-            let size = std::fs::metadata(ps).map(|m| m.len()).unwrap_or(0);
-            let now = chrono::Utc::now().to_rfc3339();
-            if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(
-                "SELECT id FROM files WHERE path=?1",
-                rusqlite::params![ps],
-                |r| r.get(0),
-            ) {
-                let _ = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]);
-                let _ = tx.conn().execute(
-                    "DELETE FROM chunks WHERE file_id=?1",
-                    rusqlite::params![old_fid],
-                );
-                let _ = tx
-                    .conn()
-                    .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid]);
-            }
-            let hash = aikd_storage::compute_blake3(std::path::Path::new(ps)).unwrap_or_default();
-            let _ = tx.conn().execute("INSERT INTO files (path, size, modified_at, last_scanned, status, blake3_hash) VALUES (?1,?2,?3,?4,'active',?5)", rusqlite::params![ps, size as i64, now, now, hash]);
-            if let Ok(fid) = tx.conn().query_row(
-                "SELECT id FROM files WHERE path=?1",
-                rusqlite::params![ps],
-                |r| r.get::<_, i64>(0),
-            ) {
-                for c in chunks {
-                    let hj = serde_json::to_string(&c.heading_hierarchy).unwrap_or_default();
-                    let mj = serde_json::to_string(&c.metadata).unwrap_or_default();
-                    let _ = tx.conn().execute(
-                        "INSERT INTO chunks (id,file_id,chunk_index,heading_hierarchy,heading_level,heading_text,line_start,line_end,content,metadata_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                        rusqlite::params![c.id, fid, c.chunk_index as i64, hj, c.heading_level as i64, c.heading_text, c.line_start as i64, c.line_end as i64, c.content, mj, now, now],
-                    );
-                }
-            }
+        match aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts) {
+            Ok(progress) => format!(
+                "Indexed {} files, {} chunks in {:?}",
+                progress.files_indexed, progress.chunks_created, progress.elapsed
+            ),
+            Err(e) => format!("Error: {}", e),
         }
-
-        if let Err(e) = tx.commit() {
-            return format!("Error: {}", e);
-        }
-
-        tantivy.clear().ok();
-        let tc: Vec<(String, String, String, String)> = indexed
-            .iter()
-            .flat_map(|(p, cs)| {
-                cs.iter().map(move |c| {
-                    (
-                        c.id.clone(),
-                        p.clone(),
-                        c.heading_hierarchy_str(),
-                        c.content.clone(),
-                    )
-                })
-            })
-            .collect();
-        tantivy.index_chunks(&tc).ok();
-
-        let total: usize = indexed.iter().map(|(_, c)| c.len()).sum();
-        format!("Indexed {} files, {} chunks", indexed.len(), total)
     }
 
     #[tool(description = "Search the knowledge base with BM25 or hybrid search")]
@@ -228,45 +123,56 @@ impl AikdServer {
 
         let filters = SearchFilters {
             path_contains: params.path_filter,
+            path_exclude: params.path_exclude,
+            file_types: params.file_types,
             heading_contains: params.heading_filter,
-            ..Default::default()
         };
 
         let limit = params.limit.unwrap_or(10);
         let hybrid = params.hybrid.unwrap_or(false);
 
         if hybrid {
-            let kw_results = match tantivy.search(&params.query, limit * 2, &filters) {
-                Ok(r) => r,
-                Err(e) => return format!("Error: {}", e),
-            };
-            let kw_ids: Vec<String> = kw_results.iter().map(|r| r.chunk_id.clone()).collect();
-            let all_embs = match embedder::load_all_embeddings(database.conn()) {
-                Ok(e) => e,
-                Err(e) => return format!("Error: {}", e),
-            };
-            if all_embs.is_empty() {
-                return format_results(&kw_results);
+            let model_dir = cfg.model_path();
+            if !embedder::is_model_downloaded(&model_dir) {
+                return "Model not downloaded. Run: aikd model download".to_string();
             }
-            let q_emb = kw_results
-                .first()
-                .and_then(|r| {
-                    all_embs
-                        .iter()
-                        .find(|(id, _)| id == &r.chunk_id)
-                        .map(|(_, e)| e.clone())
-                })
-                .unwrap_or_else(|| vec![0.0; embedder::DIMENSIONS]);
-            let vec_scored = embedder::vector_search(&q_emb, &all_embs, limit * 2);
-            let vec_ids: Vec<String> = vec_scored.iter().map(|(id, _)| id.clone()).collect();
-            let fused = embedder::reciprocal_rank_fusion(&kw_ids, &vec_ids, 60);
-            let fused_ids: Vec<String> =
-                fused.iter().take(limit).map(|(id, _)| id.clone()).collect();
-            let results = match load_chunks_from_db(database.conn(), &fused_ids) {
+            let mut model = match embedder::create_model(&model_dir) {
+                Ok(m) => m,
+                Err(e) => return format!("Error loading model: {}", e),
+            };
+            let q_emb = match model.embed(vec![params.query.as_str()], None) {
+                Ok(mut e) => e.remove(0),
+                Err(e) => return format!("Error embedding query: {}", e),
+            };
+            let vector_index = std::sync::Arc::new(
+                match aikd_indexer::VectorIndex::load_from_db(database.conn(), embedder::MODEL_NAME)
+                {
+                    Ok(v) => v,
+                    Err(e) => return format!("Error loading embeddings: {}", e),
+                },
+            );
+            if vector_index.is_empty() {
+                let results = match tantivy.search(&params.query, limit, &filters) {
+                    Ok(r) => r,
+                    Err(e) => return format!("Error: {}", e),
+                };
+                let enriched = match enrich_lines(database.conn(), &results) {
+                    Ok(r) => r,
+                    Err(e) => return format!("Error: {}", e),
+                };
+                return format_results(&enriched);
+            }
+            let searcher =
+                aikd_indexer::HybridSearcher::new(std::sync::Arc::new(tantivy), vector_index);
+            let results = match searcher.hybrid_search(&params.query, &q_emb, limit, &filters, 60) {
                 Ok(r) => r,
                 Err(e) => return format!("Error: {}", e),
             };
-            format_results(&results)
+            let enriched = match enrich_lines(database.conn(), &results) {
+                Ok(r) => r,
+                Err(e) => return format!("Error: {}", e),
+            };
+            format_results(&enriched)
         } else {
             let results = match tantivy.search(&params.query, limit, &filters) {
                 Ok(r) => r,
@@ -431,34 +337,6 @@ impl AikdServer {
             cfg.server.rest_port,
         )
     }
-}
-
-fn load_chunks_from_db(
-    conn: &rusqlite::Connection,
-    ids: &[String],
-) -> Result<Vec<aikd_core::SearchResult>> {
-    let mut results = Vec::new();
-    for id in ids {
-        let row = conn.query_row(
-            "SELECT c.id,f.path,c.heading_hierarchy,c.heading_text,c.content,c.line_start,c.line_end FROM chunks c JOIN files f ON c.file_id=f.id WHERE c.id=?1",
-            rusqlite::params![id],
-            |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,String>(4)?, r.get::<_,i64>(5)? as usize, r.get::<_,i64>(6)? as usize)),
-        );
-        if let Ok((cid, fp, hj, ht, co, ls, le)) = row {
-            let hier: Vec<String> = serde_json::from_str(&hj).unwrap_or_default();
-            results.push(aikd_core::SearchResult {
-                chunk_id: cid,
-                file_path: fp,
-                heading_hierarchy: hier.join(" > "),
-                heading_text: ht,
-                content: co,
-                line_start: ls,
-                line_end: le,
-                score: 0.0,
-            });
-        }
-    }
-    Ok(results)
 }
 
 fn enrich_lines(

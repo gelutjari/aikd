@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 $AIKD_VERSION = "2.0.0"
 $INSTALL_DIR = "$env:LOCALAPPDATA\aikd\bin"
-$URL = "https://github.com/your-org/aikd/releases/download/v$AIKD_VERSION/aikd-x86_64-pc-windows-msvc.exe"
+$URL = "https://github.com/gelutjari/aikd/releases/download/v$AIKD_VERSION/aikd-x86_64-pc-windows-msvc.exe"
 
 New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
 Invoke-WebRequest -Uri $URL -OutFile "$INSTALL_DIR\aikd.exe"

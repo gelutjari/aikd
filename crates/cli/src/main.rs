@@ -1,12 +1,41 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use aikd_core::{Config, ResourceProfile, SearchFilters};
 use aikd_embedder as embedder;
 use aikd_indexer::TantivyEngine;
 use aikd_session as session;
 use aikd_storage::Database;
+
+struct QueryParams<'a> {
+    limit: usize,
+    path_filter: Option<&'a str>,
+    exclude_path: Option<&'a str>,
+    file_type: Option<&'a str>,
+    heading_filter: Option<&'a str>,
+    json: bool,
+    hybrid: bool,
+}
+
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+macro_rules! info {
+    ($($arg:tt)*) => {
+        if !QUIET.load(Ordering::Relaxed) {
+            println!($($arg)*);
+        }
+    };
+}
+
+macro_rules! einfo {
+    ($($arg:tt)*) => {
+        if !QUIET.load(Ordering::Relaxed) {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 #[derive(Parser)]
 #[command(name = "aikd")]
@@ -35,8 +64,16 @@ struct Cli {
     json: bool,
     #[arg(short, long, global = true)]
     quiet: bool,
+    #[arg(long, global = true)]
+    version_json: bool,
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    #[command(about = "Start in foreground mode")]
+    Foreground,
 }
 
 #[derive(Subcommand)]
@@ -50,9 +87,15 @@ enum Commands {
     Serve,
     #[command(about = "[DAEMON] Start background service (REST API + file watcher)")]
     Daemon {
-        #[arg(long)]
-        foreground: bool,
+        #[command(subcommand)]
+        action: Option<DaemonAction>,
     },
+
+    #[command(about = "[DAEMON] Stop running daemon")]
+    DaemonStop,
+
+    #[command(about = "[DAEMON] Show daemon PID")]
+    DaemonPid,
     #[command(about = "[CLI] Scan and index files")]
     Scan {
         #[arg(short, long)]
@@ -65,6 +108,29 @@ enum Commands {
         limit: usize,
         #[arg(short, long)]
         path: Option<String>,
+        #[arg(long)]
+        exclude_path: Option<String>,
+        #[arg(short = 't', long)]
+        file_type: Option<String>,
+        #[arg(short = 'H', long)]
+        heading: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        hybrid: bool,
+    },
+
+    #[command(about = "[CLI] Search the knowledge base (alias for query)")]
+    Search {
+        query: String,
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+        #[arg(short, long)]
+        path: Option<String>,
+        #[arg(long)]
+        exclude_path: Option<String>,
+        #[arg(short = 't', long)]
+        file_type: Option<String>,
         #[arg(short = 'H', long)]
         heading: Option<String>,
         #[arg(long)]
@@ -122,6 +188,41 @@ enum Commands {
     },
     #[command(about = "[CLI] Run benchmark suite")]
     Benchmark,
+
+    #[command(about = "[CLI] Manage sessions")]
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+
+    #[command(about = "[CLI] Download or manage embedding model")]
+    Model {
+        #[command(subcommand)]
+        action: Option<ModelAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionAction {
+    #[command(about = "List all sessions")]
+    List,
+    #[command(about = "Create a new session")]
+    New {
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+    #[command(about = "Delete a session")]
+    Delete { id: String },
+}
+
+#[derive(Subcommand)]
+enum ModelAction {
+    #[command(about = "Show model status")]
+    Status,
+    #[command(about = "Download the embedding model")]
+    Download,
+    #[command(about = "Remove downloaded model files")]
+    Remove,
 }
 
 #[tokio::main]
@@ -134,27 +235,76 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    if cli.version_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "model": embedder::MODEL_NAME,
+                "db_schema": 4,
+            }))
+            .unwrap_or_default()
+        );
+        return Ok(());
+    }
+
     let json_mode = cli.json;
-    let _quiet = cli.quiet;
+    if cli.quiet {
+        QUIET.store(true, Ordering::Relaxed);
+    }
     match cli.command {
         Commands::Init { path } => cmd_init(&cli.config, path.as_deref()),
-        Commands::Daemon { foreground } => cmd_daemon(&cli.config, foreground).await,
+        Commands::Daemon { action } => {
+            let foreground = matches!(action, Some(DaemonAction::Foreground));
+            cmd_daemon(&cli.config, foreground).await
+        }
+        Commands::DaemonStop => cmd_daemon_stop(),
+        Commands::DaemonPid => cmd_daemon_pid(),
         Commands::Scan { path } => cmd_scan(&cli.config, path.as_deref()),
         Commands::Query {
             query,
             limit,
             path,
+            exclude_path,
+            file_type,
             heading,
             json,
             hybrid,
         } => cmd_query(
             &cli.config,
             &query,
+            &QueryParams {
+                limit,
+                path_filter: path.as_deref(),
+                exclude_path: exclude_path.as_deref(),
+                file_type: file_type.as_deref(),
+                heading_filter: heading.as_deref(),
+                json: json || json_mode,
+                hybrid,
+            },
+        ),
+        Commands::Search {
+            query,
             limit,
-            path.as_deref(),
-            heading.as_deref(),
-            json || json_mode,
+            path,
+            exclude_path,
+            file_type,
+            heading,
+            json,
             hybrid,
+        } => cmd_query(
+            &cli.config,
+            &query,
+            &QueryParams {
+                limit,
+                path_filter: path.as_deref(),
+                exclude_path: exclude_path.as_deref(),
+                file_type: file_type.as_deref(),
+                heading_filter: heading.as_deref(),
+                json: json || json_mode,
+                hybrid,
+            },
         ),
         Commands::Stats => cmd_stats(&cli.config),
         Commands::Export { output } => cmd_export(&cli.config, &output),
@@ -175,36 +325,39 @@ async fn main() -> Result<()> {
         Commands::Status => cmd_status(&cli.config, json_mode),
         Commands::Inject { command } => cmd_inject(&cli.config, &command),
         Commands::Benchmark => cmd_benchmark(&cli.config).await,
+        Commands::Session { action } => cmd_session(&cli.config, action, json_mode),
+        Commands::Model { action } => cmd_model(&cli.config, action.unwrap_or(ModelAction::Status)),
     }
 }
 
 fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
     let expanded = shellexpand::tilde(config_path);
-    if Path::new(expanded.as_ref()).exists() {
-        eprintln!("Config already exists at {}", expanded);
+    let config_exists = Path::new(expanded.as_ref()).exists();
+    if config_exists {
+        info!("Config already exists at {}", expanded);
     } else {
         let root = scan_path
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let cfg = aikd_core::config::generate_smart_config(&root);
         cfg.save(config_path)?;
-        eprintln!("Created config at {}", expanded);
+        info!("  Config created at {}", expanded);
     }
 
     // Auto-download model
     let cfg = load_or_default(config_path);
     let model_dir = cfg.model_path();
     if !aikd_embedder::is_model_downloaded(&model_dir) {
-        eprintln!("Downloading embedding model...");
+        info!("  Downloading embedding model...");
         match aikd_embedder::download_model(&model_dir) {
-            Ok(()) => eprintln!("Model downloaded to {}", model_dir.display()),
-            Err(e) => eprintln!(
-                "Warning: Failed to download model: {}. You can download manually later.",
+            Ok(()) => info!("  Model downloaded ({})", embedder::MODEL_NAME),
+            Err(e) => einfo!(
+                "  Warning: Failed to download model: {}. Run: aikd model download",
                 e
             ),
         }
     } else {
-        eprintln!("Model already downloaded at {}", model_dir.display());
+        info!("  Model already downloaded ({})", embedder::MODEL_NAME);
     }
 
     // Generate shell hooks
@@ -215,22 +368,14 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "aikd".to_string());
 
-    eprintln!("\nDetecting AI agents...");
+    info!("\nDetecting AI agents...");
     let results = aikd_core::agents::detect_and_register(&aikd_path);
 
-    if results.is_empty() {
-        eprintln!("No AI agents detected. AIKD is available as CLI tool:");
-        eprintln!("  aikd query \"keyword\" --json");
-        eprintln!("  aikd scan");
-        eprintln!("  aikd stats");
-    } else {
-        eprintln!("Registered AIKD as MCP server for:");
-        for (name, success) in &results {
-            if *success {
-                eprintln!("  + {} - OK", name);
-            } else {
-                eprintln!("  + {} - FAILED", name);
-            }
+    for (name, success) in &results {
+        if *success {
+            info!("  {} - registered", name);
+        } else {
+            info!("  {} - not found", name);
         }
     }
 
@@ -245,13 +390,18 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
     });
     let mcp_path = shellexpand::tilde("~/.aikd/mcp.json");
     if let Some(parent) = Path::new(mcp_path.as_ref()).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    let _ = std::fs::write(
+    std::fs::write(
         mcp_path.as_ref(),
         serde_json::to_string_pretty(&mcp_config).unwrap_or_default(),
-    );
-    eprintln!("\nMCP config: {}", mcp_path);
+    )?;
+    info!("  MCP config: {}", mcp_path);
+
+    info!("\nNext steps:");
+    info!("  aikd scan          # Index your project");
+    info!("  aikd embed         # Enable semantic search");
+    info!("  aikd query \"...\"   # Start searching");
 
     // Output JSON summary for programmatic use
     let summary = serde_json::json!({
@@ -275,7 +425,7 @@ fn install_shell_hook(_config_path: &str) {
 aikd_auto_start() {
     if [ -f ".aikd/config.yaml" ] || [ -f "$HOME/.aikd/config.yaml" ]; then
         if ! pgrep -f "aikd daemon" > /dev/null 2>&1; then
-            aikd daemon --foreground &>/dev/null &
+            aikd daemon &>/dev/null &
         fi
     fi
 }
@@ -316,26 +466,6 @@ aikd_auto_start"#
             }
         }
     }
-
-    // Write MCP config for AI assistants
-    let mcp_config = serde_json::json!({
-        "mcpServers": {
-            "aikd": {
-                "command": "aikd",
-                "args": ["serve"],
-                "env": {}
-            }
-        }
-    });
-    let mcp_path = shellexpand::tilde("~/.aikd/mcp.json");
-    if let Some(parent) = Path::new(mcp_path.as_ref()).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(
-        mcp_path.as_ref(),
-        serde_json::to_string_pretty(&mcp_config).unwrap_or_default(),
-    );
-    println!("MCP config written to {}", mcp_path);
 }
 
 async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
@@ -358,10 +488,149 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
             r = mcp_handle => { let _ = r?; }
         }
     } else {
-        println!("Starting AIKD daemon in background...");
-        println!("Use 'aikd daemon --foreground' for interactive mode");
-        Box::pin(cmd_daemon(config_path, true)).await?;
+        // Write PID file for daemon management
+        let pid_dir = shellexpand::tilde("~/.aikd");
+        let pid_path = format!("{}/aikd.pid", pid_dir);
+        std::fs::create_dir_all(pid_dir.as_ref())?;
+
+        // Check if daemon already running
+        if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
+            let pid: u32 = existing_pid.trim().parse().unwrap_or(0);
+            if pid > 0 {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    let check = std::process::Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    if check.map(|s| s.success()).unwrap_or(false) {
+                        eprintln!("AIKD daemon already running (PID {})", pid);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Spawn background process
+        let aikd_path = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "aikd".to_string());
+        let log_path = format!("{}/aikd.log", pid_dir);
+
+        #[cfg(unix)]
+        {
+            let child = std::process::Command::new(&aikd_path)
+                .args(["--config", config_path, "daemon", "--foreground"])
+                .stdout(std::fs::File::create(&log_path)?)
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .spawn()?;
+            std::fs::write(&pid_path, child.id().to_string())?;
+            println!("AIKD daemon started (PID {})", child.id());
+            println!("Log: {}", log_path);
+            println!("Stop: kill $(cat {})", pid_path);
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let child = std::process::Command::new(&aikd_path)
+                .args(["--config", config_path, "daemon", "--foreground"])
+                .stdout(std::fs::File::create(&log_path)?)
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                .spawn()?;
+            std::fs::write(&pid_path, child.id().to_string())?;
+            println!("AIKD daemon started (PID {})", child.id());
+            println!("Log: {}", log_path);
+        }
     }
+    Ok(())
+}
+
+fn cmd_daemon_stop() -> Result<()> {
+    let pid_path = shellexpand::tilde("~/.aikd/aikd.pid");
+    if !std::path::Path::new(pid_path.as_ref()).exists() {
+        eprintln!("No daemon PID file found. Daemon may not be running.");
+        return Ok(());
+    }
+    let pid_str = std::fs::read_to_string(pid_path.as_ref())?;
+    let pid: u32 = pid_str.trim().parse().unwrap_or(0);
+    if pid == 0 {
+        eprintln!("Invalid PID file.");
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        let status = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status()?;
+        if status.success() {
+            println!("Daemon stopped (PID {})", pid);
+            let _ = std::fs::remove_file(pid_path.as_ref());
+        } else {
+            eprintln!("Failed to kill PID {}. Daemon may already be stopped.", pid);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status()?;
+        if status.success() {
+            println!("Daemon stopped (PID {})", pid);
+            let _ = std::fs::remove_file(pid_path.as_ref());
+        } else {
+            eprintln!("Failed to kill PID {}. Daemon may already be stopped.", pid);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        eprintln!("Unsupported platform for daemon stop.");
+    }
+
+    Ok(())
+}
+
+fn cmd_daemon_pid() -> Result<()> {
+    let pid_path = shellexpand::tilde("~/.aikd/aikd.pid");
+    if !std::path::Path::new(pid_path.as_ref()).exists() {
+        println!("Daemon not running (no PID file).");
+        return Ok(());
+    }
+    let pid_str = std::fs::read_to_string(pid_path.as_ref())?;
+    let pid: u32 = pid_str.trim().parse().unwrap_or(0);
+    if pid == 0 {
+        println!("Invalid PID file.");
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        let check = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if check.map(|s| s.success()).unwrap_or(false) {
+            println!("Daemon running (PID {})", pid);
+        } else {
+            println!("Daemon not running (stale PID {})", pid);
+            let _ = std::fs::remove_file(pid_path.as_ref());
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        println!("Daemon PID: {}", pid);
+    }
+
     Ok(())
 }
 
@@ -374,27 +643,21 @@ fn cmd_scan(config_path: &str, override_path: Option<&str>) -> Result<()> {
         override_path: override_path.map(std::path::PathBuf::from),
     };
 
-    println!("Scanning...");
+    einfo!("[aikd] Scanning...");
     let progress = aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts)?;
-    println!(
-        "Indexed {} files, {} chunks in {:?}",
-        progress.files_indexed, progress.chunks_created, progress.elapsed
+    einfo!(
+        "[aikd] Indexed {} files, {} chunks in {:?}",
+        progress.files_indexed,
+        progress.chunks_created,
+        progress.elapsed
     );
     if progress.files_skipped > 0 {
-        println!("Skipped {} unchanged files", progress.files_skipped);
+        einfo!("[aikd] Skipped {} unchanged files", progress.files_skipped);
     }
     Ok(())
 }
 
-fn cmd_query(
-    config_path: &str,
-    query: &str,
-    limit: usize,
-    path_filter: Option<&str>,
-    heading_filter: Option<&str>,
-    json: bool,
-    hybrid: bool,
-) -> Result<()> {
+fn cmd_query(config_path: &str, query: &str, params: &QueryParams) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
@@ -409,52 +672,47 @@ fn cmd_query(
         )
         .unwrap_or(0);
     if file_count == 0 {
-        if !json {
-            eprintln!("[aikd] Database kosong, auto-scan...");
+        if !params.json {
+            einfo!("[aikd] No files indexed yet. Run: aikd scan");
         }
-        let opts = aikd_scanner::ScanOptions::default();
-        aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts)?;
+        return Ok(());
     }
 
     let filters = SearchFilters {
-        path_contains: path_filter.map(String::from),
-        heading_contains: heading_filter.map(String::from),
-        ..Default::default()
+        path_contains: params.path_filter.map(String::from),
+        path_exclude: params.exclude_path.map(String::from),
+        file_types: params.file_type.map(|ft| vec![ft.to_string()]),
+        heading_contains: params.heading_filter.map(String::from),
     };
     let start = std::time::Instant::now();
 
-    if hybrid {
-        let kw_results = tantivy.search(query, limit * 2, &filters)?;
-        let kw_ids: Vec<String> = kw_results.iter().map(|r| r.chunk_id.clone()).collect();
-        let all_embs = embedder::load_all_embeddings(database.conn())?;
-        if all_embs.is_empty() {
-            let results = enrich_with_line_numbers(database.conn(), &kw_results)?;
-            print_results(query, &results, start.elapsed(), json);
+    if params.hybrid {
+        let model_dir = cfg.model_path();
+        if !embedder::is_model_downloaded(&model_dir) {
+            eprintln!("[aikd] Model not downloaded. Run: aikd model download");
             return Ok(());
         }
-        let q_emb = {
-            let first = kw_results.first();
-            match first {
-                Some(r) => {
-                    let emb = all_embs
-                        .iter()
-                        .find(|(id, _)| id == &r.chunk_id)
-                        .map(|(_, e)| e.clone());
-                    emb.unwrap_or_else(|| vec![0.0; embedder::DIMENSIONS])
-                }
-                None => vec![0.0; embedder::DIMENSIONS],
-            }
-        };
-        let vec_scored = embedder::vector_search(&q_emb, &all_embs, limit * 2);
-        let vec_ids: Vec<String> = vec_scored.iter().map(|(id, _)| id.clone()).collect();
-        let fused = aikd_core::fusion::reciprocal_rank_fusion(&kw_ids, &vec_ids, 60);
-        let fused_ids: Vec<String> = fused.iter().take(limit).map(|(id, _)| id.clone()).collect();
-        let results = load_chunks(database.conn(), &fused_ids, &filters)?;
-        print_results(query, &results, start.elapsed(), json);
+        let mut model = embedder::create_model(&model_dir)?;
+        let q_emb = model.embed(vec![query], None)?.remove(0);
+        let vector_index = std::sync::Arc::new(aikd_indexer::VectorIndex::load_from_db(
+            database.conn(),
+            embedder::MODEL_NAME,
+        )?);
+        if vector_index.is_empty() {
+            let tantivy_results = tantivy.search(query, params.limit, &filters)?;
+            let results = enrich_with_line_numbers(database.conn(), &tantivy_results)?;
+            print_results(query, &results, start.elapsed(), params.json);
+            return Ok(());
+        }
+        let searcher =
+            aikd_indexer::HybridSearcher::new(std::sync::Arc::new(tantivy), vector_index);
+        let results = searcher.hybrid_search(query, &q_emb, params.limit, &filters, 60)?;
+        let results = enrich_with_line_numbers(database.conn(), &results)?;
+        print_results(query, &results, start.elapsed(), params.json);
     } else {
-        let tantivy_results = tantivy.search(query, limit, &filters)?;
+        let tantivy_results = tantivy.search(query, params.limit, &filters)?;
         let results = enrich_with_line_numbers(database.conn(), &tantivy_results)?;
-        print_results(query, &results, start.elapsed(), json);
+        print_results(query, &results, start.elapsed(), params.json);
     }
     Ok(())
 }
@@ -523,14 +781,14 @@ fn cmd_stats(config_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_embed(config_path: &str, _model: &str, batch_size: usize) -> Result<()> {
+fn cmd_embed(config_path: &str, _model: &str, _batch_size: usize) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
     let count: i64 = database
         .conn()
         .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
     if count == 0 {
-        eprintln!("[aikd] No chunks to embed. Run: aikd scan first");
+        einfo!("[aikd] No chunks to embed. Run: aikd scan first");
         return Ok(());
     }
     let existing: i64 = database
@@ -543,34 +801,64 @@ fn cmd_embed(config_path: &str, _model: &str, batch_size: usize) -> Result<()> {
         .unwrap_or(0);
     let remaining = count - existing;
     if remaining <= 0 {
-        eprintln!("[aikd] All {} chunks already embedded.", count);
+        einfo!("[aikd] All {} chunks already embedded.", count);
         return Ok(());
     }
     let model_dir = cfg.model_path();
-    eprintln!(
+    einfo!(
         "[aikd] {} chunks total, {} already embedded, {} to process",
-        count, existing, remaining
+        count,
+        existing,
+        remaining
     );
-    eprintln!("[aikd] Loading model...");
+
+    let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
     let start = std::time::Instant::now();
-    let imported = embedder::embed_and_store(database.conn(), &model_dir, batch_size)?;
-    eprintln!(
-        "[aikd] {} embeddings stored in {:.1}s",
-        imported,
-        start.elapsed().as_secs_f64()
-    );
-    eprintln!("[aikd] Hybrid search now available.");
-    // JSON output
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": "ok",
-            "embeddings_created": imported,
-            "total_chunks": count,
-            "elapsed_ms": start.elapsed().as_millis(),
-        }))
-        .unwrap_or_default()
-    );
+
+    if !QUIET.load(Ordering::Relaxed) {
+        use indicatif::{ProgressBar, ProgressStyle};
+        let pb = ProgressBar::new(remaining as u64);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("[aikd] {spinner:.green} Embedding [{bar:40.cyan/blue}] {pos}/{len} chunks | {per_sec} | ETA: {eta}")
+            .unwrap()
+            .progress_chars("█░"));
+
+        // Use embed_and_store_with_profile for resource-aware embedding
+        let imported =
+            embedder::embed_and_store_with_profile(database.conn(), &model_dir, &profile)?;
+        pb.finish_with_message("done");
+
+        einfo!(
+            "[aikd] {} embeddings stored in {:.1}s",
+            imported,
+            start.elapsed().as_secs_f64()
+        );
+        einfo!("[aikd] Hybrid search now available.");
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "ok",
+                "embeddings_created": imported,
+                "total_chunks": count,
+                "elapsed_ms": start.elapsed().as_millis(),
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        let imported =
+            embedder::embed_and_store_with_profile(database.conn(), &model_dir, &profile)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "ok",
+                "embeddings_created": imported,
+                "total_chunks": count,
+                "elapsed_ms": start.elapsed().as_millis(),
+            }))
+            .unwrap_or_default()
+        );
+    }
     Ok(())
 }
 
@@ -602,6 +890,15 @@ fn cmd_remember(
         }
     };
     let conv = session::remember(database.conn(), &sid, role, content, &[])?;
+
+    // Embed conversations if model is available
+    let model_dir = cfg.model_path();
+    if embedder::is_model_downloaded(&model_dir) {
+        if let Err(e) = session::embed_conversations(database.conn(), &model_dir, &sid) {
+            eprintln!("[aikd] Warning: failed to embed conversations: {}", e);
+        }
+    }
+
     if json {
         println!(
             "{}",
@@ -614,7 +911,7 @@ fn cmd_remember(
             .unwrap_or_default()
         );
     } else {
-        println!(
+        info!(
             "Remembered in session {}: [{}] {}",
             conv.session_id,
             conv.role,
@@ -708,48 +1005,6 @@ fn cmd_status(config_path: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn load_chunks(
-    conn: &rusqlite::Connection,
-    ids: &[String],
-    filters: &SearchFilters,
-) -> Result<Vec<aikd_core::SearchResult>> {
-    let mut results = Vec::new();
-    for id in ids {
-        let row = conn.query_row(
-            "SELECT c.id,f.path,c.heading_hierarchy,c.heading_text,c.content,c.line_start,c.line_end FROM chunks c JOIN files f ON c.file_id=f.id WHERE c.id=?1",
-            rusqlite::params![id],
-            |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,String>(4)?, r.get::<_,i64>(5)? as usize, r.get::<_,i64>(6)? as usize)),
-        );
-        match row {
-            Ok((cid, fp, hj, ht, co, ls, le)) => {
-                if let Some(ref p) = filters.path_contains {
-                    if !fp.contains(p.as_str()) {
-                        continue;
-                    }
-                }
-                if let Some(ref h) = filters.heading_contains {
-                    if !ht.contains(h.as_str()) {
-                        continue;
-                    }
-                }
-                let hier: Vec<String> = serde_json::from_str(&hj).unwrap_or_default();
-                results.push(aikd_core::SearchResult {
-                    chunk_id: cid,
-                    file_path: fp,
-                    heading_hierarchy: hier.join(" > "),
-                    heading_text: ht,
-                    content: co,
-                    line_start: ls,
-                    line_end: le,
-                    score: 0.0,
-                });
-            }
-            Err(_) => continue,
-        }
-    }
-    Ok(results)
-}
-
 fn enrich_with_line_numbers(
     conn: &rusqlite::Connection,
     results: &[aikd_core::SearchResult],
@@ -837,6 +1092,134 @@ fn load_or_default(p: &str) -> Config {
         log::warn!("Using defaults");
         Config::default()
     })
+}
+
+fn cmd_session(config_path: &str, action: SessionAction, json: bool) -> Result<()> {
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+
+    match action {
+        SessionAction::List => {
+            let sessions = session::list_sessions(database.conn())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&sessions).unwrap_or_default()
+                );
+            } else if sessions.is_empty() {
+                println!("No sessions found.");
+            } else {
+                println!("{} sessions:\n", sessions.len());
+                for (i, s) in sessions.iter().enumerate() {
+                    println!("{}. {} ({})", i + 1, s.name, s.id);
+                    println!("   Project: {}", s.project_path);
+                    println!("   Last active: {}", s.last_active);
+                    println!();
+                }
+            }
+        }
+        SessionAction::New { name } => {
+            let project_path = cfg
+                .scan
+                .include_paths
+                .first()
+                .cloned()
+                .unwrap_or_else(|| ".".to_string());
+            let session_name = name.unwrap_or_else(|| {
+                format!("Session {}", chrono::Local::now().format("%Y-%m-%d %H:%M"))
+            });
+            let s = session::create_session(database.conn(), &session_name, &project_path)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "project_path": s.project_path,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                println!("Created session: {} ({})", s.name, s.id);
+            }
+        }
+        SessionAction::Delete { id } => {
+            database.conn().execute(
+                "DELETE FROM conversations WHERE session_id = ?1",
+                rusqlite::params![id],
+            )?;
+            database
+                .conn()
+                .execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![id])?;
+            if json {
+                println!("{}", serde_json::json!({"deleted": id}));
+            } else {
+                println!("Deleted session: {}", id);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_model(config_path: &str, action: ModelAction) -> Result<()> {
+    let cfg = load_or_default(config_path);
+    let model_dir = cfg.model_path();
+
+    match action {
+        ModelAction::Status => {
+            let downloaded = embedder::is_model_downloaded(&model_dir);
+            if downloaded {
+                let size: u64 = std::fs::read_dir(&model_dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .filter_map(|e| e.metadata().ok())
+                            .map(|m| m.len())
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                println!("Model: {}", embedder::MODEL_NAME);
+                println!("Status: Downloaded");
+                println!("Path: {}", model_dir.display());
+                println!("Size: {:.1} MB", size as f64 / (1024.0 * 1024.0));
+                println!("Dimensions: {}", embedder::DIMENSIONS);
+            } else {
+                println!("Model: {}", embedder::MODEL_NAME);
+                println!("Status: Not downloaded");
+                println!("Download: aikd model download");
+            }
+        }
+        ModelAction::Download => {
+            if embedder::is_model_downloaded(&model_dir) {
+                println!("Model already downloaded at {}", model_dir.display());
+            } else {
+                println!("Downloading {}...", embedder::MODEL_NAME);
+                embedder::download_model(&model_dir)?;
+                println!("Model downloaded to {}", model_dir.display());
+            }
+        }
+        ModelAction::Remove => {
+            if model_dir.exists() {
+                let size: u64 = std::fs::read_dir(&model_dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .filter_map(|e| e.metadata().ok())
+                            .map(|m| m.len())
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                std::fs::remove_dir_all(&model_dir)?;
+                println!(
+                    "Removed model files ({:.1} MB)",
+                    size as f64 / (1024.0 * 1024.0)
+                );
+            } else {
+                println!("No model files found at {}", model_dir.display());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
@@ -947,7 +1330,7 @@ async fn cmd_benchmark(config_path: &str) -> Result<()> {
 
     // Write JSON report
     let report = serde_json::json!({
-        "version": "1.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "system": {
             "cpu_cores": num_cpus::get(),

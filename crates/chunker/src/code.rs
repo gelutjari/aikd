@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SourceLanguage {
+pub(crate) enum SourceLanguage {
     Rust,
     Python,
     TypeScript,
@@ -13,7 +13,7 @@ pub enum SourceLanguage {
     Unknown,
 }
 
-pub fn detect_language(path: &str) -> SourceLanguage {
+pub(crate) fn detect_language(path: &str) -> SourceLanguage {
     if path.ends_with(".rs") {
         SourceLanguage::Rust
     } else if path.ends_with(".py") || path.ends_with(".pyi") {

@@ -6,12 +6,13 @@ description = "AIKD Tantivy BM25 + HNSW ANN search engine"
 
 [dependencies]
 aikd-core = { path = "../core" }
+aikd-embedder = { path = "../embedder" }
 tantivy = { workspace = true }
 hnsw_rs = { workspace = true }
 anndists = "0.1"
 anyhow = { workspace = true }
-log = { workspace = true }
 parking_lot = "0.12"
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

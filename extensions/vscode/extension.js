@@ -2,7 +2,6 @@ const vscode = require("vscode");
 const http = require("http");
 
 let statusBarItem;
-let daemonProcess;
 
 function getBaseUrl() {
     const cfg = vscode.workspace.getConfiguration("aikd");
@@ -41,7 +40,7 @@ function apiRequest(method, path, body) {
         });
 
         req.on("error", reject);
-        req.setTimeout(5000, () => {
+        req.setTimeout(10000, () => {
             req.destroy();
             reject(new Error("Request timeout"));
         });
@@ -51,24 +50,12 @@ function apiRequest(method, path, body) {
     });
 }
 
-async function ensureDaemon() {
+async function checkDaemon() {
     try {
-        await apiRequest("GET", "/api/stats");
+        await apiRequest("GET", "/api/health");
         return true;
     } catch {
-        const { spawn } = require("child_process");
-        daemonProcess = spawn("aikd", ["daemon", "--foreground"], {
-            stdio: "ignore",
-            detached: true,
-        });
-        daemonProcess.unref();
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-            await apiRequest("GET", "/api/stats");
-            return true;
-        } catch {
-            return false;
-        }
+        return false;
     }
 }
 
@@ -79,10 +66,12 @@ function activate(context) {
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 
-    ensureDaemon().then((ok) => {
+    checkDaemon().then((ok) => {
         statusBarItem.text = ok ? "$(database) AIKD" : "$(warning) AIKD";
+        statusBarItem.tooltip = ok ? "AIKD daemon running" : "AIKD daemon not running";
     });
 
+    // Search knowledge base
     context.subscriptions.push(
         vscode.commands.registerCommand("aikd.search", async () => {
             const query = await vscode.window.showInputBox({ prompt: "Search knowledge base" });
@@ -93,16 +82,23 @@ function activate(context) {
                 if (result.success && result.data && result.data.length > 0) {
                     const items = result.data.map((r) => ({
                         label: r.file_path,
-                        description: r.heading_text,
-                        detail: r.content.substring(0, 200),
+                        description: r.heading_text || "",
+                        detail: (r.content || "").substring(0, 200).replace(/\n/g, " "),
+                        line: r.line_start || 1,
                     }));
-                    const selected = await vscode.window.showQuickPick(items, { placeHolder: "Search results" });
+                    const selected = await vscode.window.showQuickPick(items, {
+                        placeHolder: `${result.data.length} results for "${query}"`,
+                    });
                     if (selected) {
                         const doc = await vscode.workspace.openTextDocument(selected.label);
-                        vscode.window.showTextDocument(doc);
+                        const editor = await vscode.window.showTextDocument(doc);
+                        const line = Math.max(0, (selected.line || 1) - 1);
+                        const range = new vscode.Range(line, 0, line, 0);
+                        editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+                        editor.selection = new vscode.Selection(range.start, range.start);
                     }
                 } else {
-                    vscode.window.showInformationMessage("No results found");
+                    vscode.window.showInformationMessage(`No results for "${query}"`);
                 }
             } catch (e) {
                 vscode.window.showErrorMessage(`AIKD search failed: ${e.message}`);
@@ -110,9 +106,11 @@ function activate(context) {
         })
     );
 
+    // Scan & index files
     context.subscriptions.push(
         vscode.commands.registerCommand("aikd.scan", async () => {
             try {
+                vscode.window.showInformationMessage("AIKD: Scanning...");
                 const result = await apiRequest("POST", "/api/scan", {});
                 vscode.window.showInformationMessage(`AIKD: ${result.data || "Scan complete"}`);
             } catch (e) {
@@ -121,15 +119,22 @@ function activate(context) {
         })
     );
 
+    // Show statistics
     context.subscriptions.push(
         vscode.commands.registerCommand("aikd.stats", async () => {
             try {
                 const result = await apiRequest("GET", "/api/stats");
                 if (result.success) {
                     const d = result.data;
-                    vscode.window.showInformationMessage(
-                        `AIKD: ${d.files} files, ${d.chunks} chunks, ${d.embeddings} embeddings, ${d.sessions} sessions`
-                    );
+                    const output = vscode.window.createOutputChannel("AIKD Stats");
+                    output.clear();
+                    output.appendLine(`AIKD v${d.version}`);
+                    output.appendLine(`Files:         ${d.files}`);
+                    output.appendLine(`Chunks:        ${d.chunks}`);
+                    output.appendLine(`Embeddings:    ${d.embeddings} (${d.dimensions}d)`);
+                    output.appendLine(`Sessions:      ${d.sessions}`);
+                    output.appendLine(`Conversations: ${d.conversations}`);
+                    output.show();
                 }
             } catch (e) {
                 vscode.window.showErrorMessage(`AIKD stats failed: ${e.message}`);
@@ -137,24 +142,28 @@ function activate(context) {
         })
     );
 
+    // Show status
     context.subscriptions.push(
         vscode.commands.registerCommand("aikd.status", async () => {
             try {
-                const result = await apiRequest("GET", "/api/stats");
+                const result = await apiRequest("GET", "/api/status");
                 if (result.success) {
-                    vscode.window.showInformationMessage(`AIKD v${result.data.version} — OK`);
+                    const d = result.data;
+                    statusBarItem.text = "$(database) AIKD";
+                    statusBarItem.tooltip = `AIKD daemon running\nPort: ${d.rest_port}\nCPU: ${d.cpu_cores} cores\nRAM: ${d.ram_gb.toFixed(1)} GB\nEmbedding: ${d.embedding_enabled ? "ON" : "OFF"}`;
+                    vscode.window.showInformationMessage(
+                        `AIKD: ${d.cpu_cores} cores, ${d.ram_gb.toFixed(1)} GB RAM, embedding ${d.embedding_enabled ? "ON" : "OFF"}`
+                    );
                 }
             } catch {
-                vscode.window.showWarningMessage("AIKD daemon not running");
+                statusBarItem.text = "$(warning) AIKD";
+                statusBarItem.tooltip = "AIKD daemon not running";
+                vscode.window.showWarningMessage("AIKD daemon not running. Start with: aikd daemon");
             }
         })
     );
 }
 
-function deactivate() {
-    if (daemonProcess) {
-        daemonProcess.kill();
-    }
-}
+function deactivate() {}
 
 module.exports = { activate, deactivate };

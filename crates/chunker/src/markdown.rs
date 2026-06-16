@@ -17,6 +17,7 @@ pub fn chunk_markdown(
     let mut current_content = String::new();
     let mut current_heading_text = String::new();
     let mut in_heading = false;
+    let mut current_heading_level: usize = 0;
     let mut chunk_index = 0;
     let mut section_start_line = 1;
     let mut line_counter = 0;
@@ -48,13 +49,13 @@ pub fn chunk_markdown(
                 in_heading = true;
 
                 let level_num = heading_level_num(level);
+                current_heading_level = level_num;
                 heading_stack.retain(|(l, _)| *l < level_num);
             }
             Event::End(TagEnd::Heading(_)) => {
                 in_heading = false;
                 if !current_heading_text.is_empty() {
-                    let level_num = heading_stack.last().map_or(1, |(l, _)| *l);
-                    heading_stack.push((level_num, current_heading_text.clone()));
+                    heading_stack.push((current_heading_level, current_heading_text.clone()));
                 }
             }
             Event::Text(text) => {

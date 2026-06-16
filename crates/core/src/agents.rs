@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub struct AgentConfig {
@@ -55,6 +55,38 @@ pub fn detect_and_register(aikd_binary: &str) -> Vec<(&'static str, bool)> {
     results
 }
 
+/// Read existing JSON config from path, or return empty object if file doesn't exist.
+fn read_config(path: &Path) -> Result<Value, String> {
+    if !path.exists() {
+        return Ok(json!({}));
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&content).map_err(|e| e.to_string())
+}
+
+/// Write JSON config to path, creating parent directories if needed.
+fn write_config(path: &Path, config: &Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    std::fs::write(path, content).map_err(|e| e.to_string())
+}
+
+/// Insert aikd as an MCP server entry into an object-style mcpServers field.
+fn insert_mcp_server_object(config: &mut Value, binary: &str) {
+    let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
+    let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
+    servers.insert(
+        "aikd".into(),
+        json!({
+            "command": binary,
+            "args": ["serve"],
+        }),
+    );
+    config["mcpServers"] = json!(servers);
+}
+
 // ─── Claude Code ───
 
 fn claude_code_path() -> Option<PathBuf> {
@@ -66,29 +98,9 @@ fn claude_code_path() -> Option<PathBuf> {
 fn write_claude_code(aikd_binary: &Path) -> Result<(), String> {
     let path = claude_code_path().ok_or("No home dir")?;
     let binary = aikd_binary.to_str().ok_or("Invalid path")?;
-
-    let mut config: serde_json::Value = if path.exists() {
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&content).unwrap_or(json!({}))
-    } else {
-        json!({})
-    };
-
-    let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
-    let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
-
-    servers.insert(
-        "aikd".into(),
-        json!({
-            "command": binary,
-            "args": ["serve"],
-        }),
-    );
-
-    config["mcpServers"] = json!(servers);
-
-    let content = serde_json::to_string_pretty(&config).unwrap();
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    let mut config = read_config(&path)?;
+    insert_mcp_server_object(&mut config, binary);
+    write_config(&path, &config)
 }
 
 // ─── Cursor ───
@@ -106,44 +118,19 @@ fn cursor_path() -> Option<PathBuf> {
 fn write_cursor(aikd_binary: &Path) -> Result<(), String> {
     let path = cursor_path().ok_or("Cursor not found")?;
     let binary = aikd_binary.to_str().ok_or("Invalid path")?;
-
-    let mut config: serde_json::Value = if path.exists() {
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&content).unwrap_or(json!({}))
-    } else {
-        json!({})
-    };
-
-    let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
-    let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
-
-    servers.insert(
-        "aikd".into(),
-        json!({
-            "command": binary,
-            "args": ["serve"],
-        }),
-    );
-
-    config["mcpServers"] = json!(servers);
-
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let content = serde_json::to_string_pretty(&config).unwrap();
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    let mut config = read_config(&path)?;
+    insert_mcp_server_object(&mut config, binary);
+    write_config(&path, &config)
 }
 
 // ─── Cline ───
 
 fn cline_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    // Cline stores config in VSCode settings or its own config
     let path = home.join(".cline").join("mcp.json");
     if path.exists() || home.join(".cline").exists() {
         return Some(path);
     }
-    // Also check VSCode global settings
     #[cfg(target_os = "windows")]
     {
         let appdata = PathBuf::from(std::env::var("APPDATA").ok()?);
@@ -159,26 +146,19 @@ fn write_cline(aikd_binary: &Path) -> Result<(), String> {
     let path = cline_path().ok_or("Cline not found")?;
     let binary = aikd_binary.to_str().ok_or("Invalid path")?;
 
-    // Cline uses VSCode settings format
     if path
         .file_name()
         .map(|f| f == "settings.json")
         .unwrap_or(false)
     {
-        let mut config: serde_json::Value = if path.exists() {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            serde_json::from_str(&content).unwrap_or(json!({}))
-        } else {
-            json!({})
-        };
+        let mut config = read_config(&path)?;
         config["cline.mcpServers"] = json!({
             "aikd": {
                 "command": binary,
                 "args": ["serve"],
             }
         });
-        let content = serde_json::to_string_pretty(&config).unwrap();
-        std::fs::write(&path, content).map_err(|e| e.to_string())
+        write_config(&path, &config)
     } else {
         let config = json!({
             "mcpServers": {
@@ -188,11 +168,7 @@ fn write_cline(aikd_binary: &Path) -> Result<(), String> {
                 }
             }
         });
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let content = serde_json::to_string_pretty(&config).unwrap();
-        std::fs::write(&path, content).map_err(|e| e.to_string())
+        write_config(&path, &config)
     }
 }
 
@@ -211,19 +187,11 @@ fn continue_path() -> Option<PathBuf> {
 fn write_continue(aikd_binary: &Path) -> Result<(), String> {
     let path = continue_path().ok_or("Continue not found")?;
     let binary = aikd_binary.to_str().ok_or("Invalid path")?;
+    let mut config = read_config(&path)?;
 
-    let mut config: serde_json::Value = if path.exists() {
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&content).unwrap_or(json!({}))
-    } else {
-        json!({})
-    };
-
-    // Continue uses "mcpServers" in its config
     let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!([]));
     let mut servers = mcp_servers.as_array().cloned().unwrap_or_default();
 
-    // Check if aikd already exists
     let has_aikd = servers
         .iter()
         .any(|s| s.get("name").and_then(|n| n.as_str()) == Some("aikd"));
@@ -235,8 +203,7 @@ fn write_continue(aikd_binary: &Path) -> Result<(), String> {
             "args": ["serve"],
         }));
         config["mcpServers"] = json!(servers);
-        let content = serde_json::to_string_pretty(&config).unwrap();
-        std::fs::write(&path, content).map_err(|e| e.to_string())?;
+        write_config(&path, &config)?;
     }
 
     Ok(())
@@ -257,32 +224,9 @@ fn windsurf_path() -> Option<PathBuf> {
 fn write_windsurf(aikd_binary: &Path) -> Result<(), String> {
     let path = windsurf_path().ok_or("Windsurf not found")?;
     let binary = aikd_binary.to_str().ok_or("Invalid path")?;
-
-    let mut config: serde_json::Value = if path.exists() {
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&content).unwrap_or(json!({}))
-    } else {
-        json!({})
-    };
-
-    let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
-    let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
-
-    servers.insert(
-        "aikd".into(),
-        json!({
-            "command": binary,
-            "args": ["serve"],
-        }),
-    );
-
-    config["mcpServers"] = json!(servers);
-
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let content = serde_json::to_string_pretty(&config).unwrap();
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    let mut config = read_config(&path)?;
+    insert_mcp_server_object(&mut config, binary);
+    write_config(&path, &config)
 }
 
 // ─── MiMoCode ───
@@ -300,29 +244,9 @@ fn mimocode_path() -> Option<PathBuf> {
 fn write_mimocode(aikd_binary: &Path) -> Result<(), String> {
     let path = mimocode_path().ok_or("MiMoCode not found")?;
     let binary = aikd_binary.to_str().ok_or("Invalid path")?;
-
-    let mut config: serde_json::Value = if path.exists() {
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&content).unwrap_or(json!({}))
-    } else {
-        json!({})
-    };
-
-    let mcp_servers = config.get("mcpServers").cloned().unwrap_or(json!({}));
-    let mut servers = mcp_servers.as_object().cloned().unwrap_or_default();
-
-    servers.insert(
-        "aikd".into(),
-        json!({
-            "command": binary,
-            "args": ["serve"],
-        }),
-    );
-
-    config["mcpServers"] = json!(servers);
-
-    let content = serde_json::to_string_pretty(&config).unwrap();
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    let mut config = read_config(&path)?;
+    insert_mcp_server_object(&mut config, binary);
+    write_config(&path, &config)
 }
 
 #[cfg(test)]

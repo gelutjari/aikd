@@ -9,10 +9,10 @@ aikd-core = { path = "../core" }
 aikd-storage = { path = "../storage" }
 aikd-indexer = { path = "../indexer" }
 aikd-chunker = { path = "../chunker" }
+aikd-scanner = { path = "../scanner" }
 notify = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 chrono = { workspace = true }
 shellexpand = { workspace = true }
 rusqlite = { workspace = true }
-serde_json = { workspace = true }

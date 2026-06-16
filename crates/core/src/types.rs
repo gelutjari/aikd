@@ -25,16 +25,22 @@ impl Chunk {
 }
 
 pub fn estimate_tokens(text: &str) -> usize {
-    let cjk_count = text
+    if text.is_empty() {
+        return 0;
+    }
+    let cjk_bytes: usize = text
         .chars()
         .filter(|c| {
             ('\u{4E00}'..='\u{9FFF}').contains(c)
                 || ('\u{3040}'..='\u{30FF}').contains(c)
                 || ('\u{AC00}'..='\u{D7AF}').contains(c)
+                || ('\u{20000}'..='\u{2A6DF}').contains(c) // CJK Unified Ideographs Extension B
+                || ('\u{2A700}'..='\u{2B73F}').contains(c) // CJK Unified Ideographs Extension C
         })
-        .count();
-    let non_cjk_bytes = text.len() - cjk_count * 3;
-    (non_cjk_bytes / 4) + (cjk_count * 2)
+        .map(|c| c.len_utf8())
+        .sum();
+    let non_cjk_bytes = text.len().saturating_sub(cjk_bytes);
+    (non_cjk_bytes / 4) + (cjk_bytes * 2 / 3)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

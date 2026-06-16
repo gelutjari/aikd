@@ -2,7 +2,7 @@
     "name": "aikd",
     "displayName": "AIKD — AI Knowledge Daemon",
     "description": "Background knowledge indexer with hybrid search, session memory, and MCP/REST API",
-    "version": "1.1.0",
+    "version": "2.0.0",
     "publisher": "aikd",
     "engines": { "vscode": "^1.80.0" },
     "categories": ["Other"],

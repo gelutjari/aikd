@@ -4,6 +4,8 @@ use fastembed::{InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefin
 use rusqlite::Connection;
 use std::path::Path;
 
+pub use aikd_core::fusion::reciprocal_rank_fusion;
+
 pub const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 pub const DIMENSIONS: usize = 384;
 
@@ -71,7 +73,13 @@ pub fn embed_and_store(conn: &Connection, model_dir: &Path, batch_size: usize) -
         .query_map(rusqlite::params![MODEL_NAME], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log::warn!("Failed to read chunk row: {}", e);
+                None
+            }
+        })
         .collect();
 
     if rows.is_empty() {
@@ -141,19 +149,6 @@ pub fn vector_search(
     scored
 }
 
-pub fn reciprocal_rank_fusion(kw: &[String], vec: &[String], k: u64) -> Vec<(String, f32)> {
-    let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
-    for (r, id) in kw.iter().enumerate() {
-        *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k as f32 + r as f32 + 1.0);
-    }
-    for (r, id) in vec.iter().enumerate() {
-        *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k as f32 + r as f32 + 1.0);
-    }
-    let mut fused: Vec<(String, f32)> = scores.into_iter().collect();
-    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    fused
-}
-
 pub fn load_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
     let mut stmt = conn.prepare("SELECT chunk_id, vector FROM embeddings WHERE model = ?1")?;
     let rows = stmt.query_map(rusqlite::params![MODEL_NAME], |row| {
@@ -165,29 +160,6 @@ pub fn load_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>>
         result.push((id, bytes_to_f32(&bytes)));
     }
     Ok(result)
-}
-
-pub fn store_embeddings(conn: &Connection, ids: &[String], embeddings: &[Vec<f32>]) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT OR REPLACE INTO embeddings (chunk_id, model, dimensions, vector) VALUES (?1, ?2, ?3, ?4)"
-    )?;
-    for (id, emb) in ids.iter().zip(embeddings.iter()) {
-        stmt.execute(rusqlite::params![
-            id,
-            MODEL_NAME,
-            DIMENSIONS as i64,
-            f32_to_bytes(emb)
-        ])?;
-    }
-    Ok(())
-}
-
-pub fn delete_embeddings_for_file(conn: &Connection, file_id: i64) -> Result<()> {
-    conn.execute(
-        "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?1)",
-        rusqlite::params![file_id],
-    )?;
-    Ok(())
 }
 
 pub fn import_embeddings_json(conn: &Connection, json_path: &str) -> Result<usize> {

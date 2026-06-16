@@ -48,18 +48,21 @@ pub fn get_or_create_session(conn: &Connection, project_path: &str) -> Result<Se
 
 pub fn list_sessions(conn: &Connection) -> Result<Vec<Session>> {
     let mut stmt = conn.prepare("SELECT id, name, project_path, created_at, last_active FROM sessions ORDER BY last_active DESC")?;
-    let sessions = stmt
-        .query_map([], |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                project_path: row.get(2)?,
-                created_at: row.get(3)?,
-                last_active: row.get(4)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+    let mut sessions = Vec::new();
+    for row in stmt.query_map([], |row| {
+        Ok(Session {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            project_path: row.get(2)?,
+            created_at: row.get(3)?,
+            last_active: row.get(4)?,
+        })
+    })? {
+        match row {
+            Ok(s) => sessions.push(s),
+            Err(e) => log::warn!("Failed to read session row: {}", e),
+        }
+    }
     Ok(sessions)
 }
 
@@ -103,33 +106,37 @@ pub fn recall(
     query: &str,
     limit: usize,
 ) -> Result<Vec<Conversation>> {
-    let query_lower = query.to_lowercase();
-    let mut stmt = conn.prepare(
-        "SELECT id, session_id, role, content, tokens, chunk_refs, created_at FROM conversations WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 100"
-    )?;
+    let map_row = |row: &rusqlite::Row| {
+        Ok(Conversation {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            role: row.get(2)?,
+            content: row.get(3)?,
+            tokens: row.get::<_, i64>(4)? as usize,
+            chunk_refs: serde_json::from_str(&row.get::<_, String>(5).unwrap_or_default())
+                .unwrap_or_default(),
+            created_at: row.get(6)?,
+        })
+    };
 
-    let mut conversations: Vec<Conversation> = stmt
-        .query_map(rusqlite::params![session_id], |row| {
-            Ok(Conversation {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                role: row.get(2)?,
-                content: row.get(3)?,
-                tokens: row.get::<_, i64>(4)? as usize,
-                chunk_refs: serde_json::from_str(&row.get::<_, String>(5).unwrap_or_default())
-                    .unwrap_or_default(),
-                created_at: row.get(6)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+    let conversations = if query.is_empty() {
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, role, content, tokens, chunk_refs, created_at FROM conversations WHERE session_id = ?1 ORDER BY created_at DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id, limit as i64], map_row)?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    } else {
+        let pattern = format!("%{}%", query.to_lowercase());
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, role, content, tokens, chunk_refs, created_at FROM conversations WHERE session_id = ?1 AND LOWER(content) LIKE ?2 ORDER BY created_at DESC LIMIT ?3"
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, pattern, limit as i64],
+            map_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
 
-    // Simple keyword matching for recall
-    if !query_lower.is_empty() {
-        conversations.retain(|c| c.content.to_lowercase().contains(&query_lower));
-    }
-
-    conversations.truncate(limit);
     Ok(conversations)
 }
 
@@ -145,7 +152,13 @@ pub fn embed_conversations(
         .query_map(rusqlite::params![session_id, MODEL_NAME], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log::warn!("Failed to read conversation row: {}", e);
+                None
+            }
+        })
         .collect();
 
     if rows.is_empty() {
