@@ -1,19 +1,17 @@
 <div align="center">
 
-# AIKD
+# AIKD (AI Knowledge Daemon)
 
-### AI Knowledge Daemon
+**Indexed semantic & BM25 code search for AI agents. Give your AI instant memory of your codebase.**
 
-**Indexed code search for AI agents and developers.**
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0.0-green.svg)]()
-[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)]()
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/gelutjari/aikd?include_prereleases)](https://github.com/gelutjari/aikd/releases)
+[![Rust](https://img.shields.io/badge/Built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org/)
+[![MCP Compatible](https://img.shields.io/badge/MCP-Server-blue?logo=modelcontextprotocol)](https://modelcontextprotocol.io/)
 [![Tests](https://img.shields.io/badge/tests-85%20passed-brightgreen.svg)]()
 [![Clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen.svg)]()
 
-**Keywords:** `code-search` `semantic-search` `mcp-server` `ai-agent` `knowledge-base` `vector-search` `bm25` `tantivy` `onnx` `embeddings` `rust` `cli-tool` `rest-api` `file-indexer`
+[Quick Start](#quick-start) | [Features](#key-features) | [MCP Integration](#mcp-tools) | [Benchmarks](#benchmark-results)
 
 </div>
 
