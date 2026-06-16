@@ -491,11 +491,11 @@ Tested on: AMD EPYC 7B13 (6 cores), 7.8 GB RAM, Linux x86_64
 
 ## Contributing
 
-Contributions are welcome! Please follow these steps:
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architecture overview, and guidelines.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
+3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
@@ -513,6 +513,13 @@ cargo test
 - Run `cargo fmt` before committing
 - Run `cargo clippy -- -D warnings` to check for lint issues
 - All tests must pass (`cargo test`)
+
+### Docker (Optional)
+
+```bash
+docker build -t aikd .
+docker run -p 9090:9090 -v ~/.aikd:/root/.aikd aikd
+```
 
 ---
 
