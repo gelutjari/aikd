@@ -499,7 +499,6 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
             if pid > 0 {
                 #[cfg(unix)]
                 {
-                    use std::os::unix::process::CommandExt;
                     let check = std::process::Command::new("kill")
                         .args(["-0", &pid.to_string()])
                         .stdout(std::process::Stdio::null())
