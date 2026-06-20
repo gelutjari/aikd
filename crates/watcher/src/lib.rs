@@ -4,12 +4,12 @@ use aikd_storage::{compute_blake3, Database};
 use anyhow::Result;
 use notify::Watcher;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
     let cfg = Config::load(config_path).unwrap_or_default();
     println!(
-        "Starting AIKD file watcher (debounce: {}ms)...",
-        debounce_ms
+        "Starting AIKD file watcher (debounce: {debounce_ms}ms)..."
     );
     println!("Watching paths: {:?}", cfg.scan.include_paths);
     println!("Press Ctrl+C to stop.\n");
@@ -23,16 +23,17 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
         let path = Path::new(expanded.as_ref());
         if path.exists() {
             watcher.watch(path, notify::RecursiveMode::Recursive)?;
-            println!("  Watching: {}", expanded);
+            println!("  Watching: {expanded}");
         }
     }
 
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
 
-    let mut pending_events: std::collections::HashMap<std::path::PathBuf, notify::EventKind> =
-        std::collections::HashMap::new();
-    let mut last_event_time = std::time::Instant::now();
+    // Use Mutex for thread-safe access to pending events
+    let pending_events: Mutex<std::collections::HashMap<std::path::PathBuf, notify::EventKind>> =
+        Mutex::new(std::collections::HashMap::new());
+    let last_event_time = Mutex::new(std::time::Instant::now());
 
     loop {
         match rx.recv_timeout(debounce_duration) {
@@ -51,22 +52,36 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                             }
                         })
                         .collect();
+                    // Lock mutex for thread-safe access
+                    let mut events = pending_events.lock().unwrap();
                     for path in filtered {
-                        pending_events.insert(path, event.kind);
+                        events.insert(path, event.kind);
                     }
-                    last_event_time = std::time::Instant::now();
+                    *last_event_time.lock().unwrap() = std::time::Instant::now();
                 }
                 _ => {}
             },
             Ok(Err(e)) => {
-                log::warn!("Watch error: {}", e);
+                log::warn!("Watch error: {e}");
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if pending_events.is_empty() || last_event_time.elapsed() < debounce_duration {
+                // Check if we have pending events and debounce time has passed
+                let should_process = {
+                    let events = pending_events.lock().unwrap();
+                    let last_time = last_event_time.lock().unwrap();
+                    !events.is_empty() && last_time.elapsed() >= debounce_duration
+                };
+
+                if !should_process {
                     continue;
                 }
 
-                let events: Vec<_> = pending_events.drain().collect();
+                // Drain events under lock
+                let events: Vec<_> = {
+                    let mut events = pending_events.lock().unwrap();
+                    events.drain().collect()
+                };
+
                 let mut changed = 0;
                 let mut created = 0;
                 let mut removed = 0;
@@ -140,11 +155,11 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                 // Batch store new/changed files using scanner
                 if !to_index.is_empty() {
                     if let Err(e) = aikd_scanner::store_chunks(&to_index, &database) {
-                        log::warn!("Failed to store chunks: {}", e);
+                        log::warn!("Failed to store chunks: {e}");
                     }
                     // Update Tantivy index for changed files
                     if let Err(e) = aikd_scanner::update_tantivy(&to_index, &tantivy) {
-                        log::warn!("Failed to update tantivy: {}", e);
+                        log::warn!("Failed to update tantivy: {e}");
                     }
                 }
 
@@ -157,19 +172,19 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                         |r| r.get(0),
                     ) {
                         if let Err(e) = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]) {
-                            log::warn!("Failed to delete embeddings for {}: {}", ps, e);
+                            log::warn!("Failed to delete embeddings for {ps}: {e}");
                         }
                         if let Err(e) = tx.conn().execute(
                             "DELETE FROM chunks WHERE file_id=?1",
                             rusqlite::params![old_fid],
                         ) {
-                            log::warn!("Failed to delete chunks for {}: {}", ps, e);
+                            log::warn!("Failed to delete chunks for {ps}: {e}");
                         }
                         if let Err(e) = tx
                             .conn()
                             .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid])
                         {
-                            log::warn!("Failed to delete file {}: {}", ps, e);
+                            log::warn!("Failed to delete file {ps}: {e}");
                         }
                     }
                     tx.commit()?;

@@ -89,11 +89,11 @@ impl AikdServer {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return format!("Error: {e}"),
         };
         let tantivy = match TantivyEngine::open(&cfg.tantivy_path()) {
             Ok(t) => t,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return format!("Error: {e}"),
         };
 
         let opts = aikd_scanner::ScanOptions {
@@ -105,7 +105,7 @@ impl AikdServer {
                 "Indexed {} files, {} chunks in {:?}",
                 progress.files_indexed, progress.chunks_created, progress.elapsed
             ),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => format!("Error: {e}"),
         }
     }
 
@@ -114,11 +114,11 @@ impl AikdServer {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return format!("Error: {e}"),
         };
         let tantivy = match TantivyEngine::open(&cfg.tantivy_path()) {
             Ok(t) => t,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return format!("Error: {e}"),
         };
 
         let filters = SearchFilters {
@@ -138,27 +138,27 @@ impl AikdServer {
             }
             let mut model = match embedder::create_model(&model_dir) {
                 Ok(m) => m,
-                Err(e) => return format!("Error loading model: {}", e),
+                Err(e) => return format!("Error loading model: {e}"),
             };
             let q_emb = match model.embed(vec![params.query.as_str()], None) {
                 Ok(mut e) => e.remove(0),
-                Err(e) => return format!("Error embedding query: {}", e),
+                Err(e) => return format!("Error embedding query: {e}"),
             };
             let vector_index = std::sync::Arc::new(
                 match aikd_indexer::VectorIndex::load_from_db(database.conn(), embedder::MODEL_NAME)
                 {
                     Ok(v) => v,
-                    Err(e) => return format!("Error loading embeddings: {}", e),
+                    Err(e) => return format!("Error loading embeddings: {e}"),
                 },
             );
             if vector_index.is_empty() {
                 let results = match tantivy.search(&params.query, limit, &filters) {
                     Ok(r) => r,
-                    Err(e) => return format!("Error: {}", e),
+                    Err(e) => return format!("Error: {e}"),
                 };
                 let enriched = match enrich_lines(database.conn(), &results) {
                     Ok(r) => r,
-                    Err(e) => return format!("Error: {}", e),
+                    Err(e) => return format!("Error: {e}"),
                 };
                 return format_results(&enriched);
             }
@@ -166,21 +166,21 @@ impl AikdServer {
                 aikd_indexer::HybridSearcher::new(std::sync::Arc::new(tantivy), vector_index);
             let results = match searcher.hybrid_search(&params.query, &q_emb, limit, &filters, 60) {
                 Ok(r) => r,
-                Err(e) => return format!("Error: {}", e),
+                Err(e) => return format!("Error: {e}"),
             };
             let enriched = match enrich_lines(database.conn(), &results) {
                 Ok(r) => r,
-                Err(e) => return format!("Error: {}", e),
+                Err(e) => return format!("Error: {e}"),
             };
             format_results(&enriched)
         } else {
             let results = match tantivy.search(&params.query, limit, &filters) {
                 Ok(r) => r,
-                Err(e) => return format!("Error: {}", e),
+                Err(e) => return format!("Error: {e}"),
             };
             let enriched = match enrich_lines(database.conn(), &results) {
                 Ok(r) => r,
-                Err(e) => return format!("Error: {}", e),
+                Err(e) => return format!("Error: {e}"),
             };
             format_results(&enriched)
         }
@@ -191,7 +191,7 @@ impl AikdServer {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return format!("Error: {e}"),
         };
         let conn = database.conn();
         let fc: i64 = conn
@@ -227,7 +227,7 @@ impl AikdServer {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return format!("Error: {e}"),
         };
         let count: i64 = database
             .conn()
@@ -239,8 +239,8 @@ impl AikdServer {
         let batch_size = params.batch_size.unwrap_or(32);
         let model_dir = cfg.model_path();
         match embedder::embed_and_store(database.conn(), &model_dir, batch_size) {
-            Ok(n) => format!("Embedded {} chunks. Hybrid search now available.", n),
-            Err(e) => format!("Error: {}", e),
+            Ok(n) => format!("Embedded {n} chunks. Hybrid search now available."),
+            Err(e) => format!("Error: {e}"),
         }
     }
 
@@ -249,7 +249,7 @@ impl AikdServer {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return format!("Error: {e}"),
         };
 
         let session_id = match params.session_id {
@@ -259,7 +259,7 @@ impl AikdServer {
                 &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
             ) {
                 Ok(s) => s.id,
-                Err(e) => return format!("Error: {}", e),
+                Err(e) => return format!("Error: {e}"),
             },
         };
 
@@ -276,7 +276,7 @@ impl AikdServer {
                 conv.role,
                 &conv.content[..conv.content.len().min(100)]
             ),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => format!("Error: {e}"),
         }
     }
 
@@ -285,7 +285,7 @@ impl AikdServer {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return format!("Error: {e}"),
         };
 
         let session_id = match params.session_id {
@@ -295,7 +295,7 @@ impl AikdServer {
                 &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
             ) {
                 Ok(s) => s.id,
-                Err(e) => return format!("Error: {}", e),
+                Err(e) => return format!("Error: {e}"),
             },
         };
 
@@ -317,7 +317,7 @@ impl AikdServer {
                 }
                 out
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => format!("Error: {e}"),
         }
     }
 

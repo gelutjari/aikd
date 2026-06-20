@@ -12,9 +12,13 @@ aikd-embedder = { path = "../embedder" }
 aikd-scanner = { path = "../scanner" }
 aikd-session = { path = "../session" }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
+tower_governor = { workspace = true }
+governor = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -22,3 +26,8 @@ log = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 rusqlite = { workspace = true }
+moka = { workspace = true }
+prometheus = { workspace = true }
+once_cell = { workspace = true }
+jsonwebtoken = { workspace = true }
+chrono = { workspace = true }

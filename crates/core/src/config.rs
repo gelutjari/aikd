@@ -310,7 +310,7 @@ impl Config {
     pub fn should_exclude_file(&self, file_name: &str) -> bool {
         self.scan.exclude_files.iter().any(|f| {
             if let Some(ext) = f.strip_prefix("*.") {
-                file_name.ends_with(&format!(".{}", ext))
+                file_name.ends_with(&format!(".{ext}"))
             } else {
                 f == file_name
             }
@@ -392,7 +392,7 @@ impl Config {
         for path in &self.scan.include_paths {
             let expanded = shellexpand::tilde(path);
             if !std::path::Path::new(expanded.as_ref()).exists() {
-                warnings.push(format!("include_path does not exist: {}", path));
+                warnings.push(format!("include_path does not exist: {path}"));
             }
         }
 

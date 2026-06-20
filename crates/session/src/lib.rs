@@ -42,7 +42,7 @@ pub fn get_or_create_session(conn: &Connection, project_path: &str) -> Result<Se
             session.last_active = now;
             Ok(session)
         }
-        Err(_) => create_session(conn, &format!("Session for {}", project_path), project_path),
+        Err(_) => create_session(conn, &format!("Session for {project_path}"), project_path),
     }
 }
 
@@ -60,7 +60,7 @@ pub fn list_sessions(conn: &Connection) -> Result<Vec<Session>> {
     })? {
         match row {
             Ok(s) => sessions.push(s),
-            Err(e) => log::warn!("Failed to read session row: {}", e),
+            Err(e) => log::warn!("Failed to read session row: {e}"),
         }
     }
     Ok(sessions)
@@ -155,7 +155,7 @@ pub fn embed_conversations(
         .filter_map(|r| match r {
             Ok(v) => Some(v),
             Err(e) => {
-                log::warn!("Failed to read conversation row: {}", e);
+                log::warn!("Failed to read conversation row: {e}");
                 None
             }
         })

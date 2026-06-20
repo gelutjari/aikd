@@ -35,7 +35,7 @@ impl std::fmt::Display for BenchResult {
         let ms = self.duration.as_secs_f64() * 1000.0;
         let tp = self
             .throughput
-            .map(|t| format!(" ({:.1} ops/s)", t))
+            .map(|t| format!(" ({t:.1} ops/s)"))
             .unwrap_or_default();
         write!(
             f,
@@ -43,7 +43,7 @@ impl std::fmt::Display for BenchResult {
             status, self.name, ms, tp, self.details
         )?;
         if let Some(ref e) = self.error {
-            write!(f, " | ERROR: {}", e)?;
+            write!(f, " | ERROR: {e}")?;
         }
         Ok(())
     }
@@ -75,7 +75,7 @@ impl ResourceMonitor {
     }
 
     pub fn check(&self) -> Result<ResourceStatus> {
-        let mut sys = self.sys.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+        let mut sys = self.sys.lock().map_err(|e| anyhow!("Lock error: {e}"))?;
         sys.refresh_all();
 
         let cpu_usage: f32 =
@@ -172,7 +172,7 @@ impl BenchmarkRunner {
                 success: false,
                 duration: Duration::ZERO,
                 details: "Failed to prepare test data".to_string(),
-                error: Some(format!("{:?}", e)),
+                error: Some(format!("{e:?}")),
                 throughput: None,
             });
             return results;
@@ -209,28 +209,27 @@ impl BenchmarkRunner {
 
         let mut count = 0;
         for i in 0..1000 {
-            let path = data_dir.join(format!("doc_{:04}.md", i));
+            let path = data_dir.join(format!("doc_{i:04}.md"));
             let topic = topics[i % topics.len()];
             let content = format!(
-                "# Document {}: {}\n\n\
+                "# Document {i}: {topic}\n\n\
                  ## Overview\n\n\
-                 This document covers {} in detail.\n\n\
+                 This document covers {topic} in detail.\n\n\
                  ## Key Concepts\n\n\
-                 - Concept A: fundamental approach to {}\n\
+                 - Concept A: fundamental approach to {topic}\n\
                  - Concept B: advanced techniques\n\
                  - Concept C: real-world applications\n\n\
                  ## Code Example\n\n\
                  ```rust\n\
-                 fn example_{}() {{\n\
-                     println!(\"Hello from document {}\");\n\
+                 fn example_{i}() {{\n\
+                     println!(\"Hello from document {i}\");\n\
                  }}\n\
                  ```\n\n\
                  ## Summary\n\n\
-                 This concludes document {} about {}.",
-                i, topic, topic, topic, i, i, i, topic
+                 This concludes document {i} about {topic}."
             );
             let mut f = fs::File::create(&path)?;
-            writeln!(f, "{}", content)?;
+            writeln!(f, "{content}")?;
             count += 1;
         }
 
@@ -323,7 +322,7 @@ impl BenchmarkRunner {
                 name: name.to_string(),
                 success: true,
                 duration: elapsed,
-                details: format!("{} files, {} chunks", files, chunks),
+                details: format!("{files} files, {chunks} chunks"),
                 error: None,
                 throughput: Some(files as f64 / elapsed.as_secs_f64()),
             },
@@ -332,7 +331,7 @@ impl BenchmarkRunner {
                 success: false,
                 duration: elapsed,
                 details: "Indexing failed".to_string(),
-                error: Some(format!("{:?}", e)),
+                error: Some(format!("{e:?}")),
                 throughput: None,
             },
         }
@@ -374,7 +373,7 @@ impl BenchmarkRunner {
                     total_results += results.len();
                 }
                 Err(e) => {
-                    errors.push(format!("'{}': {}", q, e));
+                    errors.push(format!("'{q}': {e}"));
                 }
             }
         }
@@ -411,7 +410,7 @@ impl BenchmarkRunner {
         let start = Instant::now();
 
         let queries: Vec<String> = (0..50)
-            .map(|i| format!("programming concept {}", i))
+            .map(|i| format!("programming concept {i}"))
             .collect();
 
         let filters = SearchFilters::default();
@@ -425,7 +424,7 @@ impl BenchmarkRunner {
             let kw_results = match self.tantivy.search(q, 20, &filters) {
                 Ok(r) => r,
                 Err(e) => {
-                    errors.push(format!("BM25 '{}': {}", q, e));
+                    errors.push(format!("BM25 '{q}': {e}"));
                     continue;
                 }
             };
@@ -433,7 +432,7 @@ impl BenchmarkRunner {
             let all_embs = match aikd_embedder::load_all_embeddings(self.db.conn()) {
                 Ok(e) => e,
                 Err(e) => {
-                    errors.push(format!("Load embs: {}", e));
+                    errors.push(format!("Load embs: {e}"));
                     continue;
                 }
             };
@@ -498,10 +497,9 @@ impl BenchmarkRunner {
             let mut modified = 0;
 
             for i in 0..100 {
-                let path = data_dir.join(format!("doc_{:04}.md", i));
+                let path = data_dir.join(format!("doc_{i:04}.md"));
                 let content = format!(
-                    "# MODIFIED Document {}\n\nThis content has been updated for incremental indexing test.\n\n## New Section\n\nAdditional content here.",
-                    i
+                    "# MODIFIED Document {i}\n\nThis content has been updated for incremental indexing test.\n\n## New Section\n\nAdditional content here."
                 );
                 fs::write(&path, content)?;
                 modified += 1;
@@ -511,7 +509,7 @@ impl BenchmarkRunner {
             let tx = self.db.begin_transaction()?;
             for i in 0..100 {
                 let ps = data_dir
-                    .join(format!("doc_{:04}.md", i))
+                    .join(format!("doc_{i:04}.md"))
                     .to_string_lossy()
                     .to_string();
                 let content = fs::read_to_string(&ps)?;
@@ -555,7 +553,7 @@ impl BenchmarkRunner {
 
             let tc: Vec<(String, String, String, String)> = (0..100)
                 .filter_map(|i| {
-                    let ps = data_dir.join(format!("doc_{:04}.md", i));
+                    let ps = data_dir.join(format!("doc_{i:04}.md"));
                     let content = fs::read_to_string(&ps).ok()?;
                     let chunks = aikd_chunker::chunk_file(ps.to_str()?, &content, 1000, 50);
                     Some(chunks.into_iter().map(move |c| {
@@ -576,7 +574,7 @@ impl BenchmarkRunner {
                 name: name.to_string(),
                 success: true,
                 duration: elapsed,
-                details: format!("{} files re-indexed", count),
+                details: format!("{count} files re-indexed"),
                 error: None,
                 throughput: Some(count as f64 / elapsed.as_secs_f64()),
             },
@@ -585,7 +583,7 @@ impl BenchmarkRunner {
                 success: false,
                 duration: elapsed,
                 details: "Incremental re-index failed".to_string(),
-                error: Some(format!("{:?}", e)),
+                error: Some(format!("{e:?}")),
                 throughput: None,
             },
         }
@@ -595,7 +593,7 @@ impl BenchmarkRunner {
         let name = "Concurrent Search (10 threads x 50 queries)";
         let start = Instant::now();
 
-        let queries: Vec<String> = (0..500).map(|i| format!("test query {}", i)).collect();
+        let queries: Vec<String> = (0..500).map(|i| format!("test query {i}")).collect();
 
         let tantivy_ref = &self.tantivy;
         let filters = SearchFilters::default();
@@ -604,7 +602,7 @@ impl BenchmarkRunner {
             .par_iter()
             .filter_map(|q| match tantivy_ref.search(q, 5, &filters) {
                 Ok(_) => None,
-                Err(e) => Some(format!("'{}': {}", q, e)),
+                Err(e) => Some(format!("'{q}': {e}")),
             })
             .collect();
 
@@ -616,7 +614,7 @@ impl BenchmarkRunner {
             name: name.to_string(),
             success: errors.is_empty(),
             duration: elapsed,
-            details: format!("{}/{} queries succeeded", ok, total),
+            details: format!("{ok}/{total} queries succeeded"),
             error: if errors.is_empty() {
                 None
             } else {
@@ -704,7 +702,7 @@ impl BenchmarkRunner {
                     success: false,
                     duration: start.elapsed(),
                     details: "Failed to start transaction".to_string(),
-                    error: Some(format!("{:?}", e)),
+                    error: Some(format!("{e:?}")),
                     throughput: None,
                 }
             }
@@ -723,8 +721,8 @@ impl BenchmarkRunner {
             .unwrap_or(0);
 
         for i in 0..500 {
-            let content = format!("This is benchmark chunk number {} with enough content to be meaningful for embedding generation.", i);
-            let id = format!("bench-{}", i);
+            let content = format!("This is benchmark chunk number {i} with enough content to be meaningful for embedding generation.");
+            let id = format!("bench-{i}");
             let _ = tx.conn().execute(
                 "INSERT OR IGNORE INTO chunks (id, file_id, chunk_index, heading_hierarchy, heading_level, heading_text, line_start, line_end, content, metadata_json, created_at, updated_at) VALUES (?1,?2,?3,'[]',0,'',0,0,?4,'{}',?5,?5)",
                 rusqlite::params![id, fid, i, content, now],
@@ -747,7 +745,7 @@ impl BenchmarkRunner {
                 name: name.to_string(),
                 success: true,
                 duration: elapsed,
-                details: format!("{} chunks embedded", count),
+                details: format!("{count} chunks embedded"),
                 error: None,
                 throughput: Some(count as f64 / elapsed.as_secs_f64()),
             },
@@ -756,7 +754,7 @@ impl BenchmarkRunner {
                 success: false,
                 duration: elapsed,
                 details: "Embedding failed".to_string(),
-                error: Some(format!("{:?}", e)),
+                error: Some(format!("{e:?}")),
                 throughput: None,
             },
         }
@@ -767,7 +765,7 @@ impl BenchmarkRunner {
         let start = Instant::now();
 
         let port = self.config.server.rest_port;
-        let base_url = format!("http://127.0.0.1:{}", port);
+        let base_url = format!("http://127.0.0.1:{port}");
         let token = self.config.server.auth_token.clone().unwrap_or_default();
 
         // Check if server is running
@@ -777,8 +775,8 @@ impl BenchmarkRunner {
             .unwrap();
 
         let health_check = client
-            .get(format!("{}/api/stats", base_url))
-            .header("Authorization", format!("Bearer {}", token))
+            .get(format!("{base_url}/api/stats"))
+            .header("Authorization", format!("Bearer {token}"))
             .send()
             .await;
 
@@ -798,14 +796,14 @@ impl BenchmarkRunner {
 
         for i in 0..100 {
             let client = client.clone();
-            let url = format!("{}/api/query?q=test+{}&limit=5", base_url, i);
+            let url = format!("{base_url}/api/query?q=test+{i}&limit=5");
             let token = token.clone();
             let sem = sem.clone();
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 client
                     .get(&url)
-                    .header("Authorization", format!("Bearer {}", token))
+                    .header("Authorization", format!("Bearer {token}"))
                     .send()
                     .await
             }));
@@ -817,8 +815,8 @@ impl BenchmarkRunner {
             match handle.await {
                 Ok(Ok(resp)) if resp.status().is_success() => ok += 1,
                 Ok(Ok(resp)) => fails.push(format!("{}: HTTP {}", i, resp.status())),
-                Ok(Err(e)) => fails.push(format!("{}: {}", i, e)),
-                Err(e) => fails.push(format!("{}: join error: {}", i, e)),
+                Ok(Err(e)) => fails.push(format!("{i}: {e}")),
+                Err(e) => fails.push(format!("{i}: join error: {e}")),
             }
         }
 
@@ -887,7 +885,7 @@ mod tests {
             error: None,
             throughput: Some(280.0),
         };
-        let display = format!("{}", result);
+        let display = format!("{result}");
         assert!(display.contains("PASS"));
         assert!(display.contains("Test"));
         assert!(display.contains("150.0ms"));

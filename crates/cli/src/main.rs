@@ -445,8 +445,8 @@ aikd_auto_start"#
                 .open(bashrc.as_ref())
             {
                 use std::io::Write;
-                let _ = writeln!(f, "\n{}", hook_script);
-                println!("Shell hook installed to {}", bashrc);
+                let _ = writeln!(f, "\n{hook_script}");
+                println!("Shell hook installed to {bashrc}");
             }
         }
     }
@@ -461,8 +461,8 @@ aikd_auto_start"#
                 .open(zshrc.as_ref())
             {
                 use std::io::Write;
-                let _ = writeln!(f, "\n{}", hook_script);
-                println!("Shell hook installed to {}", zshrc);
+                let _ = writeln!(f, "\n{hook_script}");
+                println!("Shell hook installed to {zshrc}");
             }
         }
     }
@@ -490,7 +490,7 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
     } else {
         // Write PID file for daemon management
         let pid_dir = shellexpand::tilde("~/.aikd");
-        let pid_path = format!("{}/aikd.pid", pid_dir);
+        let pid_path = format!("{pid_dir}/aikd.pid");
         std::fs::create_dir_all(pid_dir.as_ref())?;
 
         // Check if daemon already running
@@ -516,7 +516,7 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         let aikd_path = std::env::current_exe()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "aikd".to_string());
-        let log_path = format!("{}/aikd.log", pid_dir);
+        let log_path = format!("{pid_dir}/aikd.log");
 
         #[cfg(unix)]
         {
@@ -544,7 +544,7 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
                 .spawn()?;
             std::fs::write(&pid_path, child.id().to_string())?;
             println!("AIKD daemon started (PID {})", child.id());
-            println!("Log: {}", log_path);
+            println!("Log: {log_path}");
         }
     }
     Ok(())
@@ -582,10 +582,10 @@ fn cmd_daemon_stop() -> Result<()> {
             .args(["/PID", &pid.to_string(), "/F"])
             .status()?;
         if status.success() {
-            println!("Daemon stopped (PID {})", pid);
+            println!("Daemon stopped (PID {pid})");
             let _ = std::fs::remove_file(pid_path.as_ref());
         } else {
-            eprintln!("Failed to kill PID {}. Daemon may already be stopped.", pid);
+            eprintln!("Failed to kill PID {pid}. Daemon may already be stopped.");
         }
     }
 
@@ -627,7 +627,7 @@ fn cmd_daemon_pid() -> Result<()> {
 
     #[cfg(not(unix))]
     {
-        println!("Daemon PID: {}", pid);
+        println!("Daemon PID: {pid}");
     }
 
     Ok(())
@@ -721,7 +721,7 @@ fn cmd_export(config_path: &str, output: &str) -> Result<()> {
     let database = Database::open(&cfg.db_path())?;
     let expanded = shellexpand::tilde(output);
     let count = embedder::export_chunks_for_embedding(database.conn(), expanded.as_ref())?;
-    println!("Exported {} chunks to {}", count, expanded);
+    println!("Exported {count} chunks to {expanded}");
     Ok(())
 }
 
@@ -730,7 +730,7 @@ fn cmd_import(config_path: &str, file: &str) -> Result<()> {
     let database = Database::open(&cfg.db_path())?;
     let expanded = shellexpand::tilde(file);
     let count = embedder::import_embeddings_json(database.conn(), expanded.as_ref())?;
-    println!("Imported {} embeddings", count);
+    println!("Imported {count} embeddings");
     Ok(())
 }
 
@@ -894,7 +894,7 @@ fn cmd_remember(
     let model_dir = cfg.model_path();
     if embedder::is_model_downloaded(&model_dir) {
         if let Err(e) = session::embed_conversations(database.conn(), &model_dir, &sid) {
-            eprintln!("[aikd] Warning: failed to embed conversations: {}", e);
+            eprintln!("[aikd] Warning: failed to embed conversations: {e}");
         }
     }
 
@@ -1050,7 +1050,7 @@ fn print_results(
         return;
     }
     if results.is_empty() {
-        println!("No results for: {}", query);
+        println!("No results for: {query}");
         return;
     }
     println!(
@@ -1153,7 +1153,7 @@ fn cmd_session(config_path: &str, action: SessionAction, json: bool) -> Result<(
             if json {
                 println!("{}", serde_json::json!({"deleted": id}));
             } else {
-                println!("Deleted session: {}", id);
+                println!("Deleted session: {id}");
             }
         }
     }
@@ -1262,7 +1262,7 @@ fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
 
     if let Some(ref mut stdin) = child.stdin {
         if !context.is_empty() {
-            writeln!(stdin, "# AIKD Context:\n{}", context)?;
+            writeln!(stdin, "# AIKD Context:\n{context}")?;
         }
     }
 
@@ -1270,7 +1270,7 @@ fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let line = line?;
-            println!("{}", line);
+            println!("{line}");
         }
     }
 
@@ -1318,7 +1318,7 @@ async fn cmd_benchmark(config_path: &str) -> Result<()> {
     println!("  Summary");
     println!("----------------------------------------");
     println!("  Passed:  {}/{}", passed, passed + failed);
-    println!("  Failed:  {}", failed);
+    println!("  Failed:  {failed}");
     println!("  Total:   {:.2}s", total_duration.as_secs_f64());
 
     let final_status = runner.resource_status();
@@ -1354,7 +1354,7 @@ async fn cmd_benchmark(config_path: &str) -> Result<()> {
 
     let report_path = "benchmark_report.json";
     std::fs::write(report_path, serde_json::to_string_pretty(&report)?)?;
-    println!("\n  Report:  {}", report_path);
+    println!("\n  Report:  {report_path}");
 
     runner.stop();
     if failed > 0 {

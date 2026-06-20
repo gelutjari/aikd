@@ -17,8 +17,61 @@ const HF_MODEL_URLS: &[(&str, &str)] = &[
     ("tokenizer_config.json", "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer_config.json"),
 ];
 
+/// Download the embedding model files from HuggingFace.
+/// Uses async reqwest to avoid blocking the tokio runtime.
+/// Falls back to blocking if called outside async context.
 pub fn download_model(model_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(model_dir)?;
+
+    // Clone the path to owned PathBuf so it can be moved into threads
+    let model_dir_owned = model_dir.to_path_buf();
+
+    // Try to get the current tokio runtime handle
+    let rt_handle = tokio::runtime::Handle::try_current();
+
+    match rt_handle {
+        Ok(handle) => {
+            // We're in an async context — spawn on a blocking thread
+            // to avoid freezing the tokio runtime
+            std::thread::spawn(move || {
+                handle.block_on(async { download_model_async(&model_dir_owned).await })
+            })
+            .join()
+            .map_err(|_| anyhow::anyhow!("Download thread panicked"))?
+        }
+        Err(_) => {
+            // Not in async context — use blocking directly
+            download_model_blocking(model_dir)
+        }
+    }
+}
+
+/// Async model download implementation.
+async fn download_model_async(model_dir: &Path) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()?;
+
+    for (filename, url) in HF_MODEL_URLS {
+        let dest = model_dir.join(filename);
+        if dest.exists() {
+            log::info!("{filename} already exists, skipping");
+            continue;
+        }
+        log::info!("Downloading {filename} ...");
+        let resp = client.get(*url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to download {}: HTTP {}", filename, resp.status());
+        }
+        let bytes = resp.bytes().await?;
+        tokio::fs::write(&dest, &bytes).await?;
+        log::info!("Downloaded {} ({} bytes)", filename, bytes.len());
+    }
+    Ok(())
+}
+
+/// Blocking model download for non-async contexts.
+fn download_model_blocking(model_dir: &Path) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
@@ -26,10 +79,10 @@ pub fn download_model(model_dir: &Path) -> Result<()> {
     for (filename, url) in HF_MODEL_URLS {
         let dest = model_dir.join(filename);
         if dest.exists() {
-            log::info!("{} already exists, skipping", filename);
+            log::info!("{filename} already exists, skipping");
             continue;
         }
-        log::info!("Downloading {} ...", filename);
+        log::info!("Downloading {filename} ...");
         let resp = client.get(*url).send()?;
         if !resp.status().is_success() {
             anyhow::bail!("Failed to download {}: HTTP {}", filename, resp.status());
@@ -76,7 +129,7 @@ pub fn embed_and_store(conn: &Connection, model_dir: &Path, batch_size: usize) -
         .filter_map(|r| match r {
             Ok(v) => Some(v),
             Err(e) => {
-                log::warn!("Failed to read chunk row: {}", e);
+                log::warn!("Failed to read chunk row: {e}");
                 None
             }
         })

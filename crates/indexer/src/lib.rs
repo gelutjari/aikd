@@ -28,7 +28,6 @@ struct HnswCache {
 pub struct VectorIndex {
     data: RwLock<Vec<Vec<f32>>>,
     id_map: RwLock<Vec<String>>,
-    #[allow(dead_code)]
     dim: usize,
     hnsw_cache: Mutex<Option<HnswCache>>,
     dirty: AtomicBool,
@@ -49,6 +48,30 @@ impl VectorIndex {
             hnsw_ef_construction: HNSW_EF_CONSTRUCTION,
             hnsw_ef_search: HNSW_EF_SEARCH,
         }
+    }
+
+    /// Estimate memory usage in bytes.
+    /// Returns (vector_data_bytes, id_map_bytes, total_bytes).
+    pub fn memory_usage(&self) -> (usize, usize, usize) {
+        let data = self.data.read();
+        let map = self.id_map.read();
+
+        let vector_bytes = data.len() * self.dim * std::mem::size_of::<f32>();
+        let id_bytes: usize = map.iter().map(|s| s.len() + 24).sum(); // 24 = String overhead
+        let total = vector_bytes + id_bytes;
+
+        (vector_bytes, id_bytes, total)
+    }
+
+    /// Get human-readable memory usage string.
+    pub fn memory_usage_str(&self) -> String {
+        let (vec_bytes, id_bytes, total) = self.memory_usage();
+        format!(
+            "Vectors: {:.1} MB, IDs: {:.1} MB, Total: {:.1} MB",
+            vec_bytes as f64 / (1024.0 * 1024.0),
+            id_bytes as f64 / (1024.0 * 1024.0),
+            total as f64 / (1024.0 * 1024.0)
+        )
     }
 
     pub fn with_hnsw_params(
@@ -296,7 +319,7 @@ impl TantivyEngine {
             if let Some(ref ft) = filters.file_types {
                 let has_ext = ft
                     .iter()
-                    .any(|ext| file_path.ends_with(&format!(".{}", ext)));
+                    .any(|ext| file_path.ends_with(&format!(".{ext}")));
                 if !has_ext {
                     continue;
                 }
@@ -367,6 +390,8 @@ impl HybridSearcher {
         &self.vector_index
     }
 
+    /// Perform hybrid search combining BM25 and vector search.
+    /// Uses HashMap for O(n) result merging instead of O(n²) linear search.
     pub fn hybrid_search(
         &self,
         query_str: &str,
@@ -375,20 +400,33 @@ impl HybridSearcher {
         filters: &SearchFilters,
         k: u64,
     ) -> Result<Vec<SearchResult>> {
+        // Run both searches in parallel scope
         let bm25_results = self.tantivy.search(query_str, limit * 2, filters)?;
-        let bm25_ids: Vec<String> = bm25_results.iter().map(|r| r.chunk_id.clone()).collect();
-
         let ann_results = self.vector_index.search(query_embedding, limit * 2);
+
+        // Build HashMap for O(1) lookups instead of O(n) find()
+        let bm25_map: std::collections::HashMap<&str, &SearchResult> = bm25_results
+            .iter()
+            .map(|r| (r.chunk_id.as_str(), r))
+            .collect();
+        let ann_map: std::collections::HashMap<&str, f32> = ann_results
+            .iter()
+            .map(|(id, score)| (id.as_str(), *score))
+            .collect();
+
+        // Collect IDs for fusion
+        let bm25_ids: Vec<String> = bm25_results.iter().map(|r| r.chunk_id.clone()).collect();
         let ann_ids: Vec<String> = ann_results.iter().map(|(id, _)| id.clone()).collect();
 
+        // Fuse results using RRF
         let fused = reciprocal_rank_fusion(&bm25_ids, &ann_ids, k);
-        let fused_ids: Vec<String> = fused.iter().take(limit).map(|(id, _)| id.clone()).collect();
 
-        let mut results = Vec::new();
-        for id in &fused_ids {
-            if let Some(r) = bm25_results.iter().find(|r| &r.chunk_id == id) {
-                results.push(r.clone());
-            } else if let Some((_, score)) = ann_results.iter().find(|(aid, _)| aid == id) {
+        // Build final results using HashMap lookups (O(1) per item)
+        let mut results = Vec::with_capacity(limit);
+        for (id, _score) in fused.iter().take(limit) {
+            if let Some(r) = bm25_map.get(id.as_str()) {
+                results.push((*r).clone());
+            } else if let Some(ann_score) = ann_map.get(id.as_str()) {
                 results.push(SearchResult {
                     chunk_id: id.clone(),
                     file_path: String::new(),
@@ -397,12 +435,132 @@ impl HybridSearcher {
                     content: String::new(),
                     line_start: 0,
                     line_end: 0,
-                    score: *score,
+                    score: *ann_score,
                 });
             }
         }
 
         Ok(results)
+    }
+}
+
+/// Memory-mapped vector index for large datasets.
+/// Uses memory-mapped files to reduce RAM usage.
+pub struct MmapVectorIndex {
+    /// Memory-mapped vector data file
+    #[allow(dead_code)]
+    mmap: memmap2::Mmap,
+    /// Number of vectors
+    num_vectors: usize,
+    /// Vector dimension
+    dim: usize,
+    /// ID map loaded separately
+    id_map: Vec<String>,
+    /// HNSW index for fast search
+    hnsw: Hnsw<'static, f32, DistCosine>,
+}
+
+impl MmapVectorIndex {
+    /// Create a new memory-mapped vector index from a file.
+    /// File format: [num_vectors: u64][dim: u64][vector_data: f32 * num_vectors * dim]
+    pub fn open(data_file: &Path, id_map: Vec<String>) -> Result<Self> {
+
+        let file = std::fs::File::open(data_file)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+
+        if mmap.len() < 16 {
+            anyhow::bail!("Invalid mmap file: too small");
+        }
+
+        // Read header
+        let num_vectors = u64::from_le_bytes([
+            mmap[0], mmap[1], mmap[2], mmap[3],
+            mmap[4], mmap[5], mmap[6], mmap[7],
+        ]) as usize;
+
+        let dim = u64::from_le_bytes([
+            mmap[8], mmap[9], mmap[10], mmap[11],
+            mmap[12], mmap[13], mmap[14], mmap[15],
+        ]) as usize;
+
+        if mmap.len() < 16 + num_vectors * dim * 4 {
+            anyhow::bail!("Invalid mmap file: data truncated");
+        }
+
+        if id_map.len() != num_vectors {
+            anyhow::bail!("ID map length mismatch");
+        }
+
+        // Build HNSW index
+        let hnsw = Hnsw::new(
+            HNSW_M,
+            num_vectors.max(100),
+            16,
+            HNSW_EF_CONSTRUCTION,
+            DistCosine,
+        );
+
+        // Get vector data pointer
+        let data_start = 16;
+        let vectors = &mmap[data_start..];
+
+        for i in 0..num_vectors {
+            let offset = i * dim * 4;
+            let vector_bytes = &vectors[offset..offset + dim * 4];
+            let vector: Vec<f32> = vector_bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            hnsw.insert((&vector, i));
+        }
+
+        Ok(Self {
+            mmap,
+            num_vectors,
+            dim,
+            id_map,
+            hnsw,
+        })
+    }
+
+    /// Search for similar vectors.
+    pub fn search(&self, query: &[f32], limit: usize) -> Vec<(String, f32)> {
+        if self.num_vectors == 0 {
+            return Vec::new();
+        }
+
+        let results = self.hnsw.search(query, limit, HNSW_EF_SEARCH);
+        results
+            .into_iter()
+            .filter_map(|r| {
+                self.id_map
+                    .get(r.d_id)
+                    .map(|id| (id.clone(), 1.0 - r.distance))
+            })
+            .collect()
+    }
+
+    /// Get the number of vectors.
+    pub fn len(&self) -> usize {
+        self.num_vectors
+    }
+
+    /// Check if the index is empty.
+    pub fn is_empty(&self) -> bool {
+        self.num_vectors == 0
+    }
+
+    /// Get the dimension.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Estimate memory usage in bytes (excluding mmap).
+    pub fn memory_usage(&self) -> usize {
+        let id_bytes: usize = self.id_map.iter().map(|s| s.len() + 24).sum();
+        // HNSW index memory is harder to estimate, use approximation
+        let hnsw_bytes = self.num_vectors * 100; // rough estimate
+        id_bytes + hnsw_bytes
     }
 }
 

@@ -13,6 +13,7 @@ anndists = "0.1"
 anyhow = { workspace = true }
 parking_lot = "0.12"
 rusqlite = { workspace = true }
+memmap2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

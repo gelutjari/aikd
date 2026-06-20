@@ -35,7 +35,7 @@ pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
         let expanded = shellexpand::tilde(sp);
         let root = Path::new(expanded.as_ref());
         if !root.exists() {
-            log::warn!("{} not found, skipping", sp);
+            log::warn!("{sp} not found, skipping");
             continue;
         }
         for entry in walkdir::WalkDir::new(root)
@@ -199,14 +199,14 @@ pub fn run_scan(
     eprint!("[aikd] Discovering files...");
     let files = discover_files(cfg, opts);
     let total_files = files.len();
-    eprintln!(" found {} files", total_files);
+    eprintln!(" found {total_files} files");
 
     eprint!("[aikd] Checking for changes...");
     let files_to_index = filter_changed(files, db);
     let files_found = files_to_index.len();
-    eprintln!(" {} to index", files_found);
+    eprintln!(" {files_found} to index");
 
-    log::info!("Discovered {} files, {} to index", total_files, files_found);
+    log::info!("Discovered {total_files} files, {files_found} to index");
 
     if files_found == 0 {
         return Ok(ScanProgress {

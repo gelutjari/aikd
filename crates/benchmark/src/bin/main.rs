@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     println!("  Summary");
     println!("----------------------------------------");
     println!("  Passed:  {}/{}", passed, passed + failed);
-    println!("  Failed:  {}", failed);
+    println!("  Failed:  {failed}");
     println!("  Total:   {:.2}s", total_duration.as_secs_f64());
 
     let final_status = runner.resource_status();

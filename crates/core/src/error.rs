@@ -42,18 +42,18 @@ mod tests {
     #[test]
     fn test_error_display_database() {
         let err = AikdError::Config("test error".into());
-        assert!(format!("{}", err).contains("test error"));
+        assert!(format!("{err}").contains("test error"));
     }
 
     #[test]
     fn test_error_display_path_traversal() {
         let err = AikdError::PathTraversal("blocked".into());
-        assert!(format!("{}", err).contains("blocked"));
+        assert!(format!("{err}").contains("blocked"));
     }
 
     #[test]
     fn test_error_display_session_not_found() {
         let err = AikdError::SessionNotFound("s1".into());
-        assert!(format!("{}", err).contains("s1"));
+        assert!(format!("{err}").contains("s1"));
     }
 }
