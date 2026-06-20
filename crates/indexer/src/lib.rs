@@ -317,9 +317,7 @@ impl TantivyEngine {
             }
 
             if let Some(ref ft) = filters.file_types {
-                let has_ext = ft
-                    .iter()
-                    .any(|ext| file_path.ends_with(&format!(".{ext}")));
+                let has_ext = ft.iter().any(|ext| file_path.ends_with(&format!(".{ext}")));
                 if !has_ext {
                     continue;
                 }
@@ -464,7 +462,6 @@ impl MmapVectorIndex {
     /// Create a new memory-mapped vector index from a file.
     /// File format: [num_vectors: u64][dim: u64][vector_data: f32 * num_vectors * dim]
     pub fn open(data_file: &Path, id_map: Vec<String>) -> Result<Self> {
-
         let file = std::fs::File::open(data_file)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
@@ -474,13 +471,11 @@ impl MmapVectorIndex {
 
         // Read header
         let num_vectors = u64::from_le_bytes([
-            mmap[0], mmap[1], mmap[2], mmap[3],
-            mmap[4], mmap[5], mmap[6], mmap[7],
+            mmap[0], mmap[1], mmap[2], mmap[3], mmap[4], mmap[5], mmap[6], mmap[7],
         ]) as usize;
 
         let dim = u64::from_le_bytes([
-            mmap[8], mmap[9], mmap[10], mmap[11],
-            mmap[12], mmap[13], mmap[14], mmap[15],
+            mmap[8], mmap[9], mmap[10], mmap[11], mmap[12], mmap[13], mmap[14], mmap[15],
         ]) as usize;
 
         if mmap.len() < 16 + num_vectors * dim * 4 {

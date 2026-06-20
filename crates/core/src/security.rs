@@ -72,15 +72,19 @@ pub fn sanitize_path_input(input: &str) -> Result<PathBuf, AikdError> {
     // Attempt canonicalization to resolve symlinks and normalize path
     // This is the critical step that prevents symlink attacks
     if path.exists() {
-        let canonical = path.canonicalize().map_err(|e| {
-            AikdError::PathTraversal(format!("Failed to canonicalize path: {e}"))
-        })?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| AikdError::PathTraversal(format!("Failed to canonicalize path: {e}")))?;
 
         // Verify canonical path doesn't escape to sensitive directories
         let canonical_str = canonical.to_string_lossy().to_lowercase();
         let sensitive_dirs = [
-            "/etc", "/proc", "/sys", "/dev",  // Unix sensitive
-            "c:\\windows", "c:\\program files",  // Windows sensitive
+            "/etc",
+            "/proc",
+            "/sys",
+            "/dev", // Unix sensitive
+            "c:\\windows",
+            "c:\\program files", // Windows sensitive
         ];
         for sensitive in &sensitive_dirs {
             if canonical_str.starts_with(&sensitive.to_lowercase()) {

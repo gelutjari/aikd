@@ -21,10 +21,10 @@ use aikd_storage::Database;
 /// JWT Claims structure
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Claims {
-    sub: String,        // Subject (user identifier)
-    role: String,       // User role (admin, user, readonly)
-    exp: usize,         // Expiration time
-    iat: usize,         // Issued at
+    sub: String,  // Subject (user identifier)
+    role: String, // User role (admin, user, readonly)
+    exp: usize,   // Expiration time
+    iat: usize,   // Issued at
 }
 
 /// JWT token response
@@ -52,7 +52,10 @@ impl JwtConfig {
     fn from_config(config: &Config) -> Self {
         // Use auth_token as JWT secret if available, otherwise use a default
         // In production, users should set a proper JWT secret
-        let secret = config.server.auth_token.clone()
+        let secret = config
+            .server
+            .auth_token
+            .clone()
             .unwrap_or_else(|| "aikd-default-jwt-secret-change-me".to_string());
         Self {
             secret,
@@ -106,62 +109,62 @@ impl Metrics {
     fn new() -> Self {
         let registry = Registry::new();
 
-        let query_total = IntCounter::new(
-            "aikd_query_total",
-            "Total number of search queries"
-        ).unwrap();
+        let query_total =
+            IntCounter::new("aikd_query_total", "Total number of search queries").unwrap();
 
         let query_cache_hits = IntCounter::new(
             "aikd_query_cache_hits_total",
-            "Total number of query cache hits"
-        ).unwrap();
+            "Total number of query cache hits",
+        )
+        .unwrap();
 
         let query_cache_misses = IntCounter::new(
             "aikd_query_cache_misses_total",
-            "Total number of query cache misses"
-        ).unwrap();
+            "Total number of query cache misses",
+        )
+        .unwrap();
 
         let query_duration_seconds = prometheus::Histogram::with_opts(
             prometheus::HistogramOpts::new(
                 "aikd_query_duration_seconds",
-                "Query duration in seconds"
+                "Query duration in seconds",
             )
-            .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0])
-        ).unwrap();
+            .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]),
+        )
+        .unwrap();
 
-        let files_indexed = IntGauge::new(
-            "aikd_files_indexed",
-            "Number of indexed files"
-        ).unwrap();
+        let files_indexed = IntGauge::new("aikd_files_indexed", "Number of indexed files").unwrap();
 
-        let chunks_indexed = IntGauge::new(
-            "aikd_chunks_indexed",
-            "Number of indexed chunks"
-        ).unwrap();
+        let chunks_indexed =
+            IntGauge::new("aikd_chunks_indexed", "Number of indexed chunks").unwrap();
 
-        let embeddings_count = IntGauge::new(
-            "aikd_embeddings_count",
-            "Number of embeddings"
-        ).unwrap();
+        let embeddings_count =
+            IntGauge::new("aikd_embeddings_count", "Number of embeddings").unwrap();
 
-        let active_sessions = IntGauge::new(
-            "aikd_active_sessions",
-            "Number of active sessions"
-        ).unwrap();
+        let active_sessions =
+            IntGauge::new("aikd_active_sessions", "Number of active sessions").unwrap();
 
-        let db_size_bytes = Gauge::new(
-            "aikd_db_size_bytes",
-            "Database file size in bytes"
-        ).unwrap();
+        let db_size_bytes =
+            Gauge::new("aikd_db_size_bytes", "Database file size in bytes").unwrap();
 
         registry.register(Box::new(query_total.clone())).unwrap();
-        registry.register(Box::new(query_cache_hits.clone())).unwrap();
-        registry.register(Box::new(query_cache_misses.clone())).unwrap();
-        registry.register(Box::new(query_duration_seconds.clone())).unwrap();
+        registry
+            .register(Box::new(query_cache_hits.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(query_cache_misses.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(query_duration_seconds.clone()))
+            .unwrap();
         registry.register(Box::new(files_indexed.clone())).unwrap();
         registry.register(Box::new(chunks_indexed.clone())).unwrap();
-        registry.register(Box::new(embeddings_count.clone())).unwrap();
-        registry.register(Box::new(active_sessions.clone())).unwrap();
+        registry
+            .register(Box::new(embeddings_count.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(active_sessions.clone()))
+            .unwrap();
         registry.register(Box::new(db_size_bytes.clone())).unwrap();
 
         Self {
@@ -351,7 +354,10 @@ async fn handle_query(
     // Check cache first
     if let Some(cached) = state.query_cache.get(&cache_key).await {
         state.metrics.query_cache_hits.inc();
-        state.metrics.query_duration_seconds.observe(start.elapsed().as_secs_f64());
+        state
+            .metrics
+            .query_duration_seconds
+            .observe(start.elapsed().as_secs_f64());
         log::debug!("Cache hit for query: {}", params.q);
         return Ok(Json(ApiResponse {
             success: true,
@@ -405,7 +411,10 @@ async fn handle_query(
 
     // Store in cache
     state.query_cache.insert(cache_key, results.clone()).await;
-    state.metrics.query_duration_seconds.observe(start.elapsed().as_secs_f64());
+    state
+        .metrics
+        .query_duration_seconds
+        .observe(start.elapsed().as_secs_f64());
     log::debug!("Cached query result: {}", params.q);
 
     Ok(Json(ApiResponse {
@@ -622,7 +631,11 @@ async fn handle_metrics(State(state): State<RestState>) -> impl IntoResponse {
     let conn = database.conn();
 
     let files_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE status='active'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE status='active'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     let chunks_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
@@ -751,7 +764,9 @@ async fn handle_login(
         return Ok(Json(ApiResponse {
             success: false,
             data: None,
-            error: Some("Authentication not configured. Set server.auth_token in config.yaml".to_string()),
+            error: Some(
+                "Authentication not configured. Set server.auth_token in config.yaml".to_string(),
+            ),
         }));
     }
 
@@ -837,10 +852,8 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
             .allow_headers(tower_http::cors::Any)
     } else {
         // Use configured origins
-        let origins: Vec<axum::http::HeaderValue> = cors_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
+        let origins: Vec<axum::http::HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
         if origins.is_empty() {
             log::warn!("CORS: No valid origins in config, falling back to localhost only");
             CorsLayer::new()

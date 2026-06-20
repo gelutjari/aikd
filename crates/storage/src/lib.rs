@@ -66,7 +66,9 @@ impl Database {
 
     /// Get a connection from the pool (if pooled).
     /// Returns None if not using connection pooling.
-    pub fn pooled_conn(&self) -> Option<r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>> {
+    pub fn pooled_conn(
+        &self,
+    ) -> Option<r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>> {
         self.pool.as_ref().and_then(|p| p.get().ok())
     }
 
@@ -172,9 +174,8 @@ impl Database {
 
         for id_chunk in ids.chunks(chunk_size) {
             // Build placeholders: "?1,?2,?3,..."
-            let placeholders: Vec<String> = (0..id_chunk.len())
-                .map(|i| format!("?{}", i + 1))
-                .collect();
+            let placeholders: Vec<String> =
+                (0..id_chunk.len()).map(|i| format!("?{}", i + 1)).collect();
             let query = format!(
                 "SELECT c.id, f.path, c.heading_hierarchy, c.heading_text, c.content, c.line_start, c.line_end \
                  FROM chunks c JOIN files f ON c.file_id=f.id \
@@ -187,7 +188,8 @@ impl Database {
                 .iter()
                 .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>)
                 .collect();
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
 
             let mut stmt = self.conn.prepare(&query)?;
             let rows = stmt.query_map(param_refs.as_slice(), |r| {
