@@ -295,6 +295,7 @@ fn check_auth(headers: &HeaderMap, token: &Option<String>) -> bool {
 
 /// Validate JWT token from request headers.
 /// Returns Claims if valid, None otherwise.
+#[allow(dead_code)]
 fn validate_jwt(headers: &HeaderMap, secret: &str) -> Option<Claims> {
     if let Some(auth) = headers.get("authorization") {
         if let Ok(auth_str) = auth.to_str() {
@@ -472,7 +473,7 @@ async fn handle_stats(
 #[allow(dead_code)]
 async fn handle_query_stream(
     State(_state): State<RestState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Query(_params): Query<QueryParams>,
 ) -> Json<ApiResponse<String>> {
     // SSE implementation requires more work on type compatibility
