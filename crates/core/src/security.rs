@@ -52,20 +52,10 @@ pub fn sanitize_path_input(input: &str) -> Result<PathBuf, AikdError> {
 
     // Check each component for traversal attempts
     for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                return Err(AikdError::PathTraversal(
-                    "Path contains '..' traversal".into(),
-                ));
-            }
-            // Reject root paths on non-Windows (they shouldn't be user input)
-            #[cfg(unix)]
-            std::path::Component::RootDir => {
-                return Err(AikdError::PathTraversal(
-                    "Absolute root paths are not allowed".into(),
-                ));
-            }
-            _ => {}
+        if let std::path::Component::ParentDir = component {
+            return Err(AikdError::PathTraversal(
+                "Path contains '..' traversal".into(),
+            ));
         }
     }
 
