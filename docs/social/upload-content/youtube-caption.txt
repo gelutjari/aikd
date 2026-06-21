@@ -1,0 +1,11 @@
+[BRAIN] AIKD - The Ultra-Fast Local Memory Layer for AI Coding Agents
+
+Give Claude, Cursor, and Cline instant memory of your entire codebase.
+
+[OK] 0.21ms search queries
+[OK] 100% local - your code never leaves your machine
+[OK] Single binary - no Python, no dependencies
+[OK] Works with Claude, Cursor, Cline out of the box
+
+[LINK] GitHub: https://github.com/gelutjari/aikd
+[PACKAGE] Install: curl -sSf https://raw.githubusercontent.com/gelutjari/aikd/main/install.sh | bash

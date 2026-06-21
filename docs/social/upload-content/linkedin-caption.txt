@@ -1,0 +1,17 @@
+[BRAIN] Excited to share AIKD - a Rust-based tool that gives AI coding agents instant memory of your codebase.
+
+The Problem:
+Every time you start a new conversation with Claude, Cursor, or Cline, it forgets everything about your project.
+
+The Solution:
+AIKD indexes your code locally and provides instant search via MCP protocol.
+
+Key Features:
+• 0.21ms search queries (yes, milliseconds)
+• 100% local - zero cloud dependency
+• Single binary - no Python/Node required
+• Works with Claude, Cursor, Cline out of the box
+
+Try it: github.com/gelutjari/aikd
+
+#Rust #AI #OpenSource #DeveloperTools #SoftwareEngineering

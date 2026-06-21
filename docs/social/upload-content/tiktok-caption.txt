@@ -1,0 +1,7 @@
+POV: Your AI agent finally remembers your codebase [BRAIN]
+
+AIKD gives Claude/Cursor instant memory of your entire project.
+
+0.21ms search. 100% local. Single binary.
+
+Link in bio 👆

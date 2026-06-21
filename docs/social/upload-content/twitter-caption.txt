@@ -1,0 +1,7 @@
+[ROCKET] Just open-sourced AIKD — a Rust tool that gives AI coding agents instant memory of your codebase.
+
+0.21ms search queries. 100% local. Single binary.
+
+GitHub: github.com/gelutjari/aikd
+
+#Rust #AI #OpenSource #DeveloperTools

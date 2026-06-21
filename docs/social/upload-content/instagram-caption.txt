@@ -1,0 +1,14 @@
+[BRAIN] AIKD - Give your AI coding agents instant memory!
+
+Tired of explaining your codebase to Claude/Cursor every single conversation?
+
+AIKD indexes your code locally and provides instant search in 0.21ms [FAST]
+
+[OK] 100% local - your code never leaves your machine
+[OK] Single binary - no Python, no dependencies
+[OK] Works with Claude, Cursor, Cline out of the box
+
+Try it now:
+curl -sSf https://raw.githubusercontent.com/gelutjari/aikd/main/install.sh | bash
+
+GitHub: github.com/gelutjari/aikd
