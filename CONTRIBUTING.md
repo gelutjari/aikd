@@ -1,129 +1,87 @@
 # Contributing to AIKD
 
-Thank you for your interest in contributing to AIKD! This guide will help you get started.
+Thank you for your interest in contributing to AIKD! This document provides guidelines and instructions for contributing.
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
-# 1. Fork & clone
+# Fork and clone
 git clone https://github.com/YOUR_USERNAME/aikd.git
 cd aikd
 
-# 2. Build
-cargo build
+# Create feature branch
+git checkout -b feature/amazing-feature
 
-# 3. Run tests
-cargo test
-
-# 4. Check lint
+# Make changes, test, commit
+cargo test --all
 cargo clippy -- -D warnings
+git commit -m "feat: add amazing feature"
+
+# Push and create PR
+git push origin feature/amazing-feature
 ```
 
-## Development Prerequisites
+## 🏗️ Architecture Overview
 
-| Tool | Version | Install |
-|------|---------|---------|
-| Rust | 1.75+ | [rustup.rs](https://rustup.rs/) |
-| Git | any | [git-scm.com](https://git-scm.com/) |
+AIKD is a Rust workspace with 11 crates:
 
-No other dependencies needed — everything is built from source via Cargo.
+| Crate | Purpose |
+|-------|---------|
+| `core` | Types, config, errors, security |
+| `storage` | SQLite database layer |
+| `indexer` | Tantivy BM25 + HNSW vector index |
+| `embedder` | ONNX model inference |
+| `chunker` | Code/markdown parsing |
+| `scanner` | File discovery and indexing |
+| `session` | Conversation memory |
+| `server` | MCP + REST API |
+| `watcher` | File change monitoring |
+| `cli` | Command-line interface |
+| `benchmark` | Performance testing |
 
-## Project Architecture
+## 📝 Coding Standards
 
-AIKD is a 12-crate Rust workspace:
+- **Rust Edition 2021** minimum
+- Run `cargo fmt` before committing
+- Run `cargo clippy -- -D warnings` — must pass
+- Add tests for new functionality
+- Document public APIs with `///` doc comments
+- Use `anyhow::Result` for error handling
+- Use `thiserror` for custom error types
 
+## 🧪 Testing
+
+```bash
+# Run all tests
+cargo test --all
+
+# Run specific crate tests
+cargo test -p aikd-core
+
+# Run with output
+cargo test -- --nocapture
 ```
-crates/
-├── core/        # Types, errors, config, security, fusion, platform detection
-├── storage/     # SQLite database + schema migrations
-├── indexer/     # Tantivy BM25 + HNSW vector index
-├── embedder/    # ONNX embedding engine (fastembed-rs)
-├── chunker/     # File chunking (markdown, source code, text)
-├── scanner/     # File discovery + scan orchestration
-├── session/     # Conversation memory (remember/recall)
-├── server/      # MCP server (rmcp) + REST API (axum)
-├── watcher/     # File system watcher (notify)
-├── cli/         # CLI binary (clap)
-├── plugin/      # SDK constants for external integrations
-└── benchmark/   # Benchmark suite
-```
 
-### Data Flow
+## 📋 Pull Request Process
 
-```
-Files → Scanner → Chunker → Storage (SQLite)
-                              ↓
-                          Indexer (Tantivy + HNSW)
-                              ↓
-                          Server (MCP/REST) → AI Agent
-```
+1. Update documentation if needed
+2. Add tests for new features
+3. Ensure CI passes (fmt, clippy, test)
+4. Request review from maintainers
+5. Squash and merge
 
-### Key Patterns
+## 🐛 Reporting Bugs
 
-- **Shared state**: `Database` and `TantivyEngine` are wrapped in `Arc<Mutex<T>>` for async handlers
-- **Config**: YAML-based config at `~/.aikd/config.yaml`, loaded via `Config::load()`
-- **Security**: Path validation in `core/security.rs` — rejects `..` traversal, null bytes, empty roots
-- **Fusion**: Single canonical `reciprocal_rank_fusion` in `core/fusion.rs`
+Use the [Bug Report template](https://github.com/gelutjari/aikd/issues/new?template=bug_report.md).
 
-## Code Style
+## 💡 Suggesting Features
 
-- **Formatting**: `cargo fmt --all` (enforced in CI)
-- **Linting**: `cargo clippy -- -D warnings` (zero warnings policy)
-- **Tests**: All tests must pass (`cargo test --all`)
-- **Naming**: Rust conventions (snake_case functions, CamelCase types)
+Use the [Feature Request template](https://github.com/gelutjari/aikd/issues/new?template=feature_request.md).
 
-## Adding a New Feature
+## 📜 Code of Conduct
 
-1. Create a branch: `git checkout -b feature/my-feature`
-2. Write code + tests
-3. Ensure all checks pass:
-   ```bash
-   cargo fmt --all
-   cargo clippy -- -D warnings
-   cargo test --all
-   ```
-4. Commit with a clear message: `feat: add hybrid search caching`
-5. Push and open a PR
+Please read [CODE_OF_CONDUCT.md](.github/CODE_OF_CONDUCT.md).
 
-### Commit Message Convention
+## 🙏 Acknowledgements
 
-Use conventional commits:
-- `feat:` — new feature
-- `fix:` — bug fix
-- `docs:` — documentation only
-- `refactor:` — code change that neither fixes a bug nor adds a feature
-- `test:` — adding or updating tests
-- `ci:` — CI/CD changes
-- `chore:` — maintenance tasks
-
-## Adding a New AI Agent
-
-To add support for a new MCP-compatible AI agent:
-
-1. Edit `crates/core/src/agents.rs`
-2. Add a new `AgentConfig` entry with:
-   - `name`: Display name
-   - `config_path`: Function that returns the agent's config file path
-   - `write_config`: Function that writes the MCP server entry
-3. Add tests
-4. Open a PR with the agent name in the title: `feat(agent): add Aider support`
-
-Alternatively, open an issue using the "Add AI Agent Support" template.
-
-## Adding a New Language to Chunker
-
-To add AST-aware chunking for a new language:
-
-1. Edit `crates/chunker/src/code.rs`
-2. Add the language to `SourceLanguage` enum
-3. Add detection in `detect_language()`
-4. Add chunking patterns in `chunk_source_code()`
-5. Add tests with sample code
-
-## Reporting Bugs
-
-Use the [Bug Report](https://github.com/gelutjari/aikd/issues/new?template=bug_report.md) template.
-
-## Questions?
-
-Open a [GitHub Discussion](https://github.com/gelutjari/aikd/discussions) or comment on an existing issue.
+Thanks to all contributors who help make AIKD better!

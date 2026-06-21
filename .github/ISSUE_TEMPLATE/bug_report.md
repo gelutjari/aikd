@@ -1,31 +1,54 @@
 ---
 name: Bug Report
-about: Report a bug to help us improve AIKD
-title: "[BUG] "
-labels: bug
+about: Report a bug in AIKD
+title: '[BUG] '
+labels: 'bug'
 assignees: ''
 ---
 
-## Environment
-- OS: [e.g., Windows 11, Ubuntu 24.04, macOS 15]
-- AIKD version: [e.g., 2.0.0] (run `aikd --version`)
-- Rust version (if built from source): [e.g., 1.80.0]
+## 🐛 Bug Description
 
-## Description
-A clear description of the bug.
+A clear and concise description of what the bug is.
 
-## Steps to Reproduce
-1. Run `aikd ...`
-2. ...
+## 📋 Environment
+
+- **OS**: [e.g., Windows 11, Ubuntu 22.04, macOS 14]
+- **AIKD Version**: [e.g., 2.0.0] (run `aikd --version`)
+- **Rust Version**: [e.g., 1.75.0] (run `rustc --version`)
+- **Installation Method**: [e.g., install.sh, cargo install, build from source]
+
+## 🔄 Steps to Reproduce
+
+1. Go to '...'
+2. Run command '...'
 3. See error
 
-## Expected Behavior
-What you expected to happen.
+## ✅ Expected Behavior
 
-## Actual Behavior
-What actually happened. Include error messages or logs.
+A clear and concise description of what you expected to happen.
 
-## Logs
+## ❌ Actual Behavior
+
+A clear and concise description of what actually happened.
+
+## 📸 Screenshots / Logs
+
+If applicable, add screenshots or terminal output to help explain your problem.
+
 ```
-Paste output of `aikd status --json` or relevant error logs here
+Paste terminal output here
+```
+
+## 📝 Additional Context
+
+Add any other context about the problem here.
+
+## 🔍 Diagnostic Output
+
+Please run these commands and include the output:
+
+```bash
+aikd --version
+aikd status --json
+aikd stats
 ```

@@ -10,28 +10,44 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        # macOS excluded due to ONNX Runtime compatibility issues
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      # Skip benchmark tests to avoid timeout
       - run: cargo test --all --exclude aikd-benchmark
 
   build:
     name: Build (${{ matrix.target }})
-    needs: test
+    needs: [fmt, clippy, test]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     strategy:
       matrix:
@@ -50,11 +66,8 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --target ${{ matrix.target }} -p aikd-cli
-      - name: Package
-        run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/aikd${{ matrix.suffix }} dist/aikd-${{ matrix.target }}${{ matrix.suffix }}
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: aikd-${{ matrix.target }}
-          path: dist/
+          path: target/${{ matrix.target }}/release/aikd${{ matrix.suffix }}
