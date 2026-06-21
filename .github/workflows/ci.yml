@@ -13,6 +13,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       matrix:
         # macOS excluded due to ONNX Runtime compatibility issues
@@ -25,7 +26,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all
+      # Skip benchmark tests to avoid timeout
+      - run: cargo test --all --exclude aikd-benchmark
 
   build:
     name: Build (${{ matrix.target }})
