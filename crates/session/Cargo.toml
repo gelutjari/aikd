@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "AIKD session and conversation memory management"
 
+[features]
+default = []
+semantic = ["aikd-embedder/semantic"]
+
 [dependencies]
 aikd-core = { path = "../core" }
 aikd-storage = { path = "../storage" }

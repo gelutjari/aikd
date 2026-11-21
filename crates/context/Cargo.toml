@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "AIKD unified retrieval service: one query path for CLI, MCP and REST"
 
+[features]
+default = []
+semantic = ["aikd-embedder/semantic"]
+
 [dependencies]
 aikd-core = { path = "../core" }
 aikd-storage = { path = "../storage" }

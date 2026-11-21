@@ -140,6 +140,7 @@ pub fn recall(
     Ok(conversations)
 }
 
+#[cfg(feature = "semantic")]
 pub fn embed_conversations(
     conn: &Connection,
     model_dir: &std::path::Path,
@@ -179,6 +180,15 @@ pub fn embed_conversations(
     }
 
     Ok(total)
+}
+
+#[cfg(not(feature = "semantic"))]
+pub fn embed_conversations(
+    _conn: &Connection,
+    _model_dir: &std::path::Path,
+    _session_id: &str,
+) -> Result<usize> {
+    anyhow::bail!("semantic unavailable: default builds are zero-ONNX")
 }
 
 pub fn get_session_stats(conn: &Connection) -> Result<(i64, i64, i64)> {

@@ -1,12 +1,17 @@
 use aikd_core::ResourceProfile;
 use anyhow::Result;
+#[cfg(feature = "semantic")]
 use fastembed::{InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
 use rusqlite::Connection;
 use std::path::Path;
 
-pub use aikd_core::fusion::reciprocal_rank_fusion;
+// Pure vector math, storage IO and cache live in `aikd_core::vector` so the
+// default build uses them without linking ONNX. Re-exported below (single block).
 
-pub use aikd_core::{bytes_to_f32, f32_to_bytes, EMBEDDING_DIMENSIONS as DIMENSIONS, EMBEDDING_MODEL as MODEL_NAME};
+/// True only in builds compiled with the `semantic` feature (ONNX linked).
+/// Default builds are zero-ONNX: semantic inference is unavailable and every
+/// semantic entry point must fail honestly instead of downloading or stubbing.
+pub const SEMANTIC_COMPILED: bool = cfg!(feature = "semantic");
 
 const HF_MODEL_URLS: &[(&str, &str)] = &[
     ("model.onnx", "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"),
@@ -19,6 +24,7 @@ const HF_MODEL_URLS: &[(&str, &str)] = &[
 /// Download the embedding model files from HuggingFace.
 /// Uses async reqwest to avoid blocking the tokio runtime.
 /// Falls back to blocking if called outside async context.
+#[cfg(feature = "semantic")]
 pub fn download_model(model_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(model_dir)?;
 
@@ -45,7 +51,14 @@ pub fn download_model(model_dir: &Path) -> Result<()> {
     }
 }
 
+#[cfg(not(feature = "semantic"))]
+/// Zero-ONNX builds never download models. Use an external provider via `aikd import`.
+pub fn download_model(_model_dir: &Path) -> Result<()> {
+    anyhow::bail!("semantic unavailable: default builds are zero-ONNX and never download models; rebuild with --features semantic, or import vectors from an external provider via `aikd import`")
+}
+
 /// Async model download implementation.
+#[cfg(feature = "semantic")]
 async fn download_model_async(model_dir: &Path) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -70,6 +83,7 @@ async fn download_model_async(model_dir: &Path) -> Result<()> {
 }
 
 /// Blocking model download for non-async contexts.
+#[cfg(feature = "semantic")]
 fn download_model_blocking(model_dir: &Path) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -99,6 +113,7 @@ pub fn is_model_downloaded(model_dir: &Path) -> bool {
         .all(|(f, _)| model_dir.join(f).exists())
 }
 
+#[cfg(feature = "semantic")]
 pub fn create_model(model_dir: &Path) -> Result<TextEmbedding> {
     if model_dir.join("model.onnx").exists() {
         let onnx_file = std::fs::read(model_dir.join("model.onnx"))?;
@@ -109,16 +124,20 @@ pub fn create_model(model_dir: &Path) -> Result<TextEmbedding> {
             tokenizer_config_file: std::fs::read(model_dir.join("tokenizer_config.json"))?,
         };
         let user_model = UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files);
-        let model = TextEmbedding::try_new_from_user_defined(
-            user_model,
-            InitOptionsUserDefined::default(),
-        )?;
-        Ok(model)
+        TextEmbedding::try_new_from_user_defined(user_model, InitOptionsUserDefined::default())
+            .map_err(|e| anyhow::anyhow!("{e}"))
     } else {
         anyhow::bail!("Model not found at {}. Download with: curl -L -o {}/model.onnx https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx", model_dir.display(), model_dir.display())
     }
 }
 
+/// Zero-ONNX builds: semantic inference is unavailable. Fail honestly.
+#[cfg(not(feature = "semantic"))]
+pub fn create_model(_model_dir: &Path) -> Result<()> {
+    anyhow::bail!("semantic unavailable: rebuild with --features semantic to enable ONNX inference")
+}
+
+#[cfg(feature = "semantic")]
 pub fn embed_and_store(conn: &Connection, model_dir: &Path, batch_size: usize) -> Result<usize> {
     let mut stmt = conn.prepare("SELECT id, content FROM chunks WHERE id NOT IN (SELECT chunk_id FROM embeddings WHERE model = ?1)")?;
     let rows: Vec<(String, String)> = stmt
@@ -157,6 +176,11 @@ pub fn embed_and_store(conn: &Connection, model_dir: &Path, batch_size: usize) -
     Ok(total)
 }
 
+#[cfg(not(feature = "semantic"))]
+pub fn embed_and_store(_conn: &Connection, _model_dir: &Path, _batch_size: usize) -> Result<usize> {
+    anyhow::bail!("semantic unavailable: default builds are zero-ONNX; rebuild with --features semantic for local embeddings, or import vectors from an external provider via `aikd import`")
+}
+
 pub fn embed_and_store_with_profile(
     conn: &Connection,
     model_dir: &Path,
@@ -169,256 +193,38 @@ pub fn embed_and_store_with_profile(
     embed_and_store(conn, model_dir, profile.batch_size)
 }
 
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    let d = na.sqrt() * nb.sqrt();
-    if d == 0.0 {
-        0.0
-    } else {
-        dot / d
-    }
-}
-
-pub fn vector_search(
-    query: &[f32],
-    all: &[(String, Vec<f32>)],
-    limit: usize,
-) -> Vec<(String, f32)> {
-    let mut scored: Vec<(String, f32)> = all
-        .iter()
-        .map(|(id, e)| (id.clone(), cosine_similarity(query, e)))
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit);
-    scored
-}
-
-pub fn load_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
-    let mut stmt = conn.prepare("SELECT chunk_id, vector FROM embeddings WHERE model = ?1")?;
-    let rows = stmt.query_map(rusqlite::params![MODEL_NAME], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-    })?;
-    let mut result = Vec::new();
-    for row in rows {
-        let (id, bytes) = row?;
-        result.push((id, bytes_to_f32(&bytes)));
-    }
-    Ok(result)
-}
-
-pub fn import_embeddings_json(conn: &Connection, json_path: &str) -> Result<usize> {
-    let content = std::fs::read_to_string(json_path)?;
-    let data: serde_json::Value = serde_json::from_str(&content)?;
-    let arr = data
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("Expected JSON array"))?;
-
-    let mut imported = 0;
-    for item in arr {
-        let chunk_id = item["chunk_id"].as_str().unwrap_or_default().to_string();
-        let embedding: Vec<f32> = item["embedding"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_f64().map(|f| f as f32))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if chunk_id.is_empty() || embedding.is_empty() {
-            continue;
-        }
-
-        conn.execute(
-            "INSERT OR REPLACE INTO embeddings (chunk_id, model, dimensions, vector) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![chunk_id, MODEL_NAME, DIMENSIONS as i64, f32_to_bytes(&embedding)],
-        )?;
-        imported += 1;
-    }
-    Ok(imported)
-}
-
-pub fn export_chunks_for_embedding(conn: &Connection, output_path: &str) -> Result<usize> {
-    let mut stmt = conn.prepare("SELECT id, content FROM chunks")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-
-    let mut items = Vec::new();
-    for row in rows {
-        let (id, content) = row?;
-        items.push(serde_json::json!({"chunk_id": id, "content": content}));
-    }
-
-    let json = serde_json::to_string_pretty(&items)?;
-    std::fs::write(output_path, json)?;
-    Ok(items.len())
-}
-
-
-pub struct EmbeddingCache {
-    cache: parking_lot::Mutex<lru::LruCache<String, Vec<f32>>>,
-}
-
-impl EmbeddingCache {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            cache: parking_lot::Mutex::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(capacity.max(1000)).unwrap(),
-            )),
-        }
-    }
-
-    pub fn from_resource(profile: &aikd_core::ResourceProfile) -> Self {
-        let capacity = (profile.total_ram_bytes as usize / (DIMENSIONS * 4)) / 5;
-        Self::new(capacity.max(1000))
-    }
-
-    pub fn get(&self, chunk_id: &str) -> Option<Vec<f32>> {
-        self.cache.lock().get(chunk_id).cloned()
-    }
-
-    pub fn put(&self, chunk_id: String, vector: Vec<f32>) {
-        self.cache.lock().put(chunk_id, vector);
-    }
-
-    pub fn preload_for_ids(&self, chunk_ids: &[String], conn: &Connection) -> Result<()> {
-        let mut cache = self.cache.lock();
-        let ids_to_load: Vec<&String> = chunk_ids
-            .iter()
-            .filter(|id| cache.get(id.as_str()).is_none())
-            .collect();
-
-        if ids_to_load.is_empty() {
-            return Ok(());
-        }
-
-        let mut stmt = conn.prepare(
-            "SELECT chunk_id, vector FROM embeddings WHERE model = ?1 AND chunk_id = ?2",
-        )?;
-
-        for id in ids_to_load {
-            if let Ok(bytes) = stmt.query_row(rusqlite::params![MODEL_NAME, id.as_str()], |row| {
-                row.get::<_, Vec<u8>>(1)
-            }) {
-                cache.put(id.clone(), bytes_to_f32(&bytes));
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn len(&self) -> usize {
-        self.cache.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.cache.lock().is_empty()
-    }
-}
+// Pure vector math, storage IO and cache live in `aikd_core::vector` so the
+// default build uses them without linking ONNX. Re-exported here for
+// backward compatibility of the `aikd_embedder::` paths.
+pub use aikd_core::{
+    bytes_to_f32, cosine_similarity, export_chunks_for_embedding, f32_to_bytes,
+    import_embeddings_json, load_all_embeddings, vector_search, EmbeddingCache, SemanticProvider,
+    EMBEDDING_DIMENSIONS as DIMENSIONS, EMBEDDING_MODEL as MODEL_NAME,
+};
+pub use aikd_core::fusion::reciprocal_rank_fusion;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_cosine_similarity() {
-        let a = vec![1.0, 0.0, 0.0];
-        let b = vec![1.0, 0.0, 0.0];
-        assert!((cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
-
-        let c = vec![0.0, 1.0, 0.0];
-        assert!((cosine_similarity(&a, &c) - 0.0).abs() < 1e-6);
+    fn zero_onnx_default_has_no_semantic() {
+        // Default build: pure helpers work, inference entry points fail honestly.
+        assert!(!SEMANTIC_COMPILED);
+        assert!(create_model(std::path::Path::new("nope")).is_err());
+        assert!(download_model(std::path::Path::new("nope")).is_err());
+        assert!(embed_and_store_with_profile(
+            &rusqlite::Connection::open_in_memory().unwrap(),
+            std::path::Path::new("nope"),
+            &aikd_core::ResourceProfile::detect(),
+        )
+        .is_err());
     }
 
     #[test]
-    fn test_vector_search() {
-        let all = vec![
-            ("a".to_string(), vec![1.0, 0.0, 0.0]),
-            ("b".to_string(), vec![0.0, 1.0, 0.0]),
-            ("c".to_string(), vec![0.7, 0.7, 0.0]),
-        ];
-        let query = vec![1.0, 0.0, 0.0];
-        let results = vector_search(&query, &all, 2);
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, "a");
-    }
-
-    #[test]
-    fn test_reciprocal_rank_fusion() {
-        let kw = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let vec = vec!["b".to_string(), "a".to_string(), "d".to_string()];
-        let fused = reciprocal_rank_fusion(&kw, &vec, 60);
-        assert_eq!(fused.len(), 4);
-        assert!(fused[0].1 > fused[2].1);
-    }
-
-    #[test]
-    fn test_f32_roundtrip() {
-        let original = vec![1.0_f32, 2.5, -3.7, 0.0, 100.123];
-        let bytes = f32_to_bytes(&original);
-        let recovered = bytes_to_f32(&bytes);
-        for (a, b) in original.iter().zip(recovered.iter()) {
-            assert!((a - b).abs() < 1e-6);
-        }
-    }
-
-    #[test]
-    fn test_embedding_cache_new() {
-        let cache = EmbeddingCache::new(1000);
-        assert!(cache.is_empty());
-        assert_eq!(cache.len(), 0);
-    }
-
-    #[test]
-    fn test_embedding_cache_put_get() {
-        let cache = EmbeddingCache::new(100);
-        cache.put("c1".into(), vec![1.0, 0.0, 0.0]);
-        assert_eq!(cache.len(), 1);
-        let v = cache.get("c1");
-        assert!(v.is_some());
-        assert_eq!(v.unwrap(), vec![1.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn test_embedding_cache_miss() {
-        let cache = EmbeddingCache::new(100);
-        assert!(cache.get("nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_f32_empty() {
-        let bytes = f32_to_bytes(&[]);
-        assert!(bytes.is_empty());
-        let recovered = bytes_to_f32(&bytes);
-        assert!(recovered.is_empty());
-    }
-
-    #[test]
-    fn test_cosine_similarity_orthogonal() {
-        let a = vec![1.0, 0.0];
-        let b = vec![0.0, 1.0];
-        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_similarity_opposite() {
-        let a = vec![1.0, 0.0];
-        let b = vec![-1.0, 0.0];
-        assert!((cosine_similarity(&a, &b) - (-1.0)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_similarity_empty() {
-        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    fn pure_helpers_come_from_core() {
+        assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
+        let hits = vector_search(&[1.0, 0.0], &[("a".to_string(), vec![1.0, 0.0])], 1);
+        assert_eq!(hits.len(), 1);
     }
 }

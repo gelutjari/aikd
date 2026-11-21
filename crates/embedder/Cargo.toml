@@ -4,15 +4,22 @@ version.workspace = true
 edition.workspace = true
 description = "AIKD vector embedding engine with resource-adaptive batching"
 
+
+[features]
+default = []
+# `semantic` links ONNX (fastembed/ort). Default builds are zero-ONNX:
+# semantic entry points fail honestly instead of downloading or inferring.
+semantic = ["dep:fastembed", "dep:reqwest", "dep:tokio"]
+
 [dependencies]
 aikd-core = { path = "../core" }
-fastembed = { workspace = true }
+fastembed = { workspace = true, optional = true }
 rusqlite = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { version = "0.12", features = ["blocking", "json"] }
-tokio = { workspace = true }
+reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
+tokio = { workspace = true, optional = true }
 lru = { workspace = true }
 parking_lot = { workspace = true }
 

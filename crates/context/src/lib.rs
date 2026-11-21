@@ -132,6 +132,7 @@ pub fn run_query(
     })
 }
 
+#[cfg(feature = "semantic")]
 fn try_hybrid(
     db: &aikd_storage::Database,
     tantivy: std::sync::Arc<aikd_indexer::TantivyEngine>,
@@ -165,6 +166,18 @@ fn try_hybrid(
         .map_err(|_| "hybrid search failed")?;
     let results = enrich(db, &results).map_err(|_| "enrich failed")?;
     Ok((results, RetrievalKind::Hybrid))
+}
+
+#[cfg(not(feature = "semantic"))]
+fn try_hybrid(
+    _db: &aikd_storage::Database,
+    _tantivy: std::sync::Arc<aikd_indexer::TantivyEngine>,
+    _model_dir: &Path,
+    _embedding_enabled: bool,
+    _req: &QueryRequest,
+    _limit: usize,
+) -> Result<(Vec<SearchResult>, RetrievalKind), &'static str> {
+    Err("semantic not compiled (zero-ONNX default build); rebuild with --features semantic")
 }
 
 /// Fill line numbers from SQLite (Tantivy docs carry chunk IDs only).
