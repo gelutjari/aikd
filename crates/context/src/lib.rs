@@ -487,6 +487,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canonical_project_unifies_separators() {
+        // Regresi bug nyata: cmd_memory memakai include_paths mentah
+        // (backslash) sementara handoff memakai canonical_project (slash)
+        // — item tersimpan tidak ditemukan handoff.
+        let v = vec!["C:\\proj".to_string()];
+        assert_eq!(aikd_core::platform::canonical_project(&v), "C:/proj");
+        assert_eq!(aikd_core::platform::canonical_project(&[]), "");
+    }
+
+    #[test]
+    fn memory_roundtrip_same_project_key() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        aikd_storage::schema::run_migrations(&conn).unwrap();
+        let project = aikd_core::platform::canonical_project(&["C:\\proj".to_string()]);
+        aikd_storage::memory::save_memory(&conn, &project, "ws", "task", "T", "STATUS: IN_PROGRESS\nREMAINING: x", "explicit", 1.0).unwrap();
+        let pkg = assemble_handoff(&conn, &project, "ws", 10).unwrap();
+        assert_eq!(pkg.tasks.len(), 1, "handoff must see what memory saved under the same project key");
+        assert_eq!(pkg.next_actions, vec!["REMAINING: x".to_string()]);
+    }
+
+    #[test]
     fn budget_truncates_and_reports() {
         let mk = |n: usize| SearchResult {
             chunk_id: format!("c{n}"),

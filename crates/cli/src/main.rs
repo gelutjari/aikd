@@ -439,7 +439,7 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "model": embedder::MODEL_NAME,
-                "db_schema": 12,
+                "db_schema": 13,
             }))
             .unwrap_or_default()
         );
@@ -1527,12 +1527,7 @@ fn cmd_session(config_path: &str, action: SessionAction, json: bool) -> Result<(
             }
         }
         SessionAction::New { name } => {
-            let project_path = cfg
-                .scan
-                .include_paths
-                .first()
-                .cloned()
-                .unwrap_or_else(|| ".".to_string());
+            let project_path = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
             let session_name = name.unwrap_or_else(|| {
                 format!("Session {}", chrono::Local::now().format("%Y-%m-%d %H:%M"))
             });
@@ -1859,12 +1854,7 @@ fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()>
     use aikd_storage::memory::{active_tasks, latest_checkpoint, list_memory, save_memory, supersede};
     let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
-    let project = cfg
-        .scan
-        .include_paths
-        .first()
-        .cloned()
-        .unwrap_or_default();
+    let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
     match action {
         MemoryAction::Save { kind, title, body, workstream, source, confidence } => {
             const KINDS: [&str; 6] = ["fact", "decision", "constraint", "discovery", "task", "checkpoint"];

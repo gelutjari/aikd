@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 13;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -63,6 +63,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if current < 12 {
         migrate_v12(conn)?;
+    }
+
+    if current < 13 {
+        migrate_v13(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -476,9 +480,57 @@ fn migrate_v12(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v13(conn: &Connection) -> Result<()> {
+    // Canonical project keys everywhere (follow-up of v11 which only fixed
+    // files.path). Rows written with backslash keys (memory, events,
+    // sessions, atlas) were invisible to slash-key readers — data looked
+    // "lost" while present. Rewrite in place, no dedup needed (keys are
+    // not UNIQUE-indexed; worst case two spellings merge into one scope,
+    // which is the correct scope anyway).
+    for (table, col) in [
+        ("memory", "project_path"),
+        ("events", "project_id"),
+        ("sessions", "project_path"),
+        ("atlas", "project_path"),
+    ] {
+        let sql = format!("UPDATE {table} SET {col} = replace({col}, '\\', '/')");
+        let n = conn.execute(&sql, [])?;
+        if n > 0 {
+            log::info!("Migration v13 normalized {n} rows in {table}.{col}");
+        }
+    }
+    log::info!("Migration v13 applied — canonical project keys");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_v13_normalizes_backslash_project_keys() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Simulate a legacy DB: rewind version, insert pre-fix rows, migrate.
+        conn.execute("UPDATE schema_version SET version = 12", []).unwrap();
+        // Simulate a pre-fix row written with a Windows backslash key.
+        conn.execute(
+            "INSERT INTO memory (id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, conflict_note, created_at, updated_at) VALUES ('m1', 'C:\\proj', 'ws', 'task', 'T', 'b', 'explicit', 'active', 1.0, NULL, NULL, 't', 't')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO events (event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence) VALUES ('e1', 'C:\\proj', 'ws', 'a', 's', 't', 't', '', '{}', 1)",
+            [],
+        ).unwrap();
+        run_migrations(&conn).unwrap();
+        let mp: String = conn.query_row("SELECT project_path FROM memory WHERE id='m1'", [], |r| r.get(0)).unwrap();
+        let ep: String = conn.query_row("SELECT project_id FROM events WHERE event_id='e1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(mp, "C:/proj");
+        assert_eq!(ep, "C:/proj");
+        // And the canonical reader finds it.
+        let items = crate::memory::list_memory(&conn, "C:/proj", Some("ws"), Some("task"), false).unwrap();
+        assert_eq!(items.len(), 1);
+    }
 
     #[test]
     fn test_migrations() {
