@@ -672,10 +672,15 @@ aikd_auto_start"#
 async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
     // Cross-platform pre-check: is the REST port already served? This stops
     // double daemons on Windows too (the old code only checked PID via `kill` on unix).
-    if !foreground {
+    // NOTE: a starting daemon does not listen yet — the post-spawn wait
+    // below (D1) closes the race instead of trusting this check alone.
+    let probe_of = || -> String {
         let cfg = Config::load(config_path).unwrap_or_default();
-        let probe = format!("127.0.0.1:{}", cfg.server.rest_port);
-        if std::net::TcpStream::connect_timeout(&probe.parse().unwrap(), std::time::Duration::from_millis(500)).is_ok() {
+        format!("127.0.0.1:{}", cfg.server.rest_port)
+    };
+    if !foreground {
+        let probe = probe_of();
+        if probe_listening(&probe) {
             eprintln!("AIKD daemon already running on {probe} — multi agent share ONE instance.");
             return Ok(());
         }
@@ -703,66 +708,113 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         }
         return Ok(());
     }
-        let pid_dir = shellexpand::tilde("~/.aikd");
-        let pid_path = format!("{pid_dir}/aikd.pid");
-        std::fs::create_dir_all(pid_dir.as_ref())?;
-
-        // Check if daemon already running
-        if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
-            let pid: u32 = existing_pid.trim().parse().unwrap_or(0);
-            if pid > 0 {
-                #[cfg(unix)]
-                {
-                    let check = std::process::Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    if check.map(|s| s.success()).unwrap_or(false) {
-                        eprintln!("AIKD daemon already running (PID {})", pid);
-                        return Ok(());
-                    }
-                }
-            }
+    // ---- background spawn ----
+    let pid_dir = shellexpand::tilde("~/.aikd");
+    let pid_path = format!("{pid_dir}/aikd.pid");
+    std::fs::create_dir_all(pid_dir.as_ref())?;
+    // Stale PID from a crashed daemon must not block a fresh start; the
+    // port check above is authoritative, the PID file is bookkeeping.
+    let _ = std::fs::remove_file(pid_path.as_str());
+    let aikd_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "aikd".to_string());
+    let log_path = format!("{pid_dir}/aikd.log");
+    #[cfg(windows)]
+    let child = {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(&aikd_path)
+            .args(["--config", config_path, "daemon", "foreground"]).env("AIKD_DAEMON_BG", "1")
+            .stdout(std::fs::File::create(&log_path)?)
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .spawn()?
+    };
+    #[cfg(not(windows))]
+    let child = {
+        std::process::Command::new(&aikd_path)
+            .args(["--config", config_path, "daemon", "foreground"]).env("AIKD_DAEMON_BG", "1")
+            .stdout(std::fs::File::create(&log_path)?)
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .spawn()?
+    };
+    // D1: NEVER report success before the port listens. Poll up to 15s;
+    // on failure, show the log tail so the cause is visible (no more
+    // silent stderr=null deaths). A second starter racing us fails the
+    // singleton lock inside the child and exits here with a clear error.
+    let probe = probe_of();
+    let mut ok = false;
+    for _ in 0..150 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Child died early? Surface why instead of claiming success.
+        if let ChildState::Exited(code) = child_try_wait(child.id()) {
+            let tail = tail_file(&log_path, 15);
+            anyhow::bail!("daemon child exited early (code {code}). Log tail:\n{tail}");
         }
-
-        // Spawn background process
-        let aikd_path = std::env::current_exe()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "aikd".to_string());
-        let log_path = format!("{pid_dir}/aikd.log");
-
-        #[cfg(unix)]
-        {
-            let child = std::process::Command::new(&aikd_path)
-                .args(["--config", config_path, "daemon", "foreground"]).env("AIKD_DAEMON_BG", "1")
-                .stdout(std::fs::File::create(&log_path)?)
-                .stderr(std::process::Stdio::null())
-                .stdin(std::process::Stdio::null())
-                .spawn()?;
-            std::fs::write(&pid_path, child.id().to_string())?;
-            println!("AIKD daemon started (PID {})", child.id());
-            println!("Log: {}", log_path);
-            println!("Stop: kill $(cat {})", pid_path);
+        if probe_listening(&probe) {
+            ok = true;
+            break;
         }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let child = std::process::Command::new(&aikd_path)
-                .args(["--config", config_path, "daemon", "foreground"]).env("AIKD_DAEMON_BG", "1")
-                .stdout(std::fs::File::create(&log_path)?)
-                .stderr(std::process::Stdio::null())
-                .stdin(std::process::Stdio::null())
-                .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                .spawn()?;
-            std::fs::write(&pid_path, child.id().to_string())?;
-            println!("AIKD daemon started (PID {})", child.id());
-            println!("Log: {log_path}");
-        }
+    }
+    if !ok {
+        let tail = tail_file(&log_path, 15);
+        anyhow::bail!("daemon did not listen on {probe} within 15s. Log tail:\n{tail}");
+    }
+    std::fs::write(&pid_path, child.id().to_string())?;
+    println!("AIKD daemon started (PID {}) on {probe}", child.id());
+    println!("Log: {log_path}");
     Ok(())
 }
 
+#[derive(PartialEq)]
+enum ChildState {
+    Running,
+    Exited(i32),
+}
+
+#[cfg(windows)]
+fn child_try_wait(pid: u32) -> ChildState {
+    let st = std::process::Command::new("cmd")
+        .args(["/C", &format!("tasklist /FI \"PID eq {pid}\" | find \"{pid}\" >NUL")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    // NOTE: NO CREATE_NO_WINDOW here — hiding the window breaks tasklist
+    // output detection in some contexts; a flash is acceptable for a helper.
+    match st {
+        Ok(s) if s.success() => ChildState::Running,
+        _ => ChildState::Exited(-1),
+    }
+}
+
+#[cfg(not(windows))]
+fn child_try_wait(pid: u32) -> ChildState {
+    let st = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match st {
+        Ok(s) if s.success() => ChildState::Running,
+        _ => ChildState::Exited(-1),
+    }
+}
+
+fn probe_listening(addr: &str) -> bool {
+    std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), std::time::Duration::from_millis(300)).is_ok()
+}
+
+fn tail_file(path: &str, n: usize) -> String {
+    std::fs::read_to_string(path)
+        .map(|s| {
+            let lines: Vec<&str> = s.lines().collect();
+            lines[lines.len().saturating_sub(n)..].join("\n")
+        })
+        .unwrap_or_else(|_| "(log unreadable)".into())
+}
 fn cmd_daemon_stop() -> Result<()> {
     // D2: check the port first (cross-platform). A stale PID file from a
     // crashed daemon must not block a fresh start, and killing a recycled
@@ -1381,10 +1433,17 @@ fn print_results(
     json: bool,
 ) {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(results).unwrap_or_default()
-        );
+        if results.is_empty() {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "results": [],
+                "hint": "check `aikd stats` (is this the right DB?), `aikd project show` (what is indexed?), or narrow filters (--path/--type)"
+            })).unwrap_or_default());
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(results).unwrap_or_default()
+            );
+        }
         return;
     }
     if results.is_empty() {
