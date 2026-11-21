@@ -51,7 +51,19 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/aikd${{ matrix.suffix }} dist/aikd-${{ matrix.target }}${{ matrix.suffix }}
-      
+
+      - name: Smoke test (no ONNX, no model, no network)
+        run: |
+          dist/aikd-${{ matrix.target }}${{ matrix.suffix }} --version
+          dist/aikd-${{ matrix.target }}${{ matrix.suffix }} --help | grep -q "project"
+          dist/aikd-${{ matrix.target }}${{ matrix.suffix }} --help | grep -q "doctor"
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum aikd-* > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -76,5 +88,6 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/aikd-*/aikd-*
+            artifacts/aikd-*/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

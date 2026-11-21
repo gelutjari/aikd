@@ -33,6 +33,14 @@ URL="https://github.com/$REPO/releases/download/v$AIKD_VERSION/aikd-$TARGET"
 echo "Installing AIKD v$AIKD_VERSION for $TARGET..."
 mkdir -p "$INSTALL_DIR"
 curl -sSfL "$URL" -o "$INSTALL_DIR/aikd"
+curl -sSfL "$URL.sha256" -o "$INSTALL_DIR/aikd.sha256" 2>/dev/null || true
+curl -sSfL "https://github.com/$REPO/releases/download/v$AIKD_VERSION/SHA256SUMS" -o "$INSTALL_DIR/SHA256SUMS" 2>/dev/null || true
+# Verify checksum when available; fail closed on mismatch.
+if [ -f "$INSTALL_DIR/SHA256SUMS" ]; then
+  (cd "$INSTALL_DIR" && grep "aikd-$TARGET$" SHA256SUMS | sha256sum -c --status -) \
+    && echo "Checksum OK" \
+    || { echo "Checksum FAILED for aikd-$TARGET" >&2; exit 1; }
+fi
 chmod +x "$INSTALL_DIR/aikd"
 
 echo "Installed to $INSTALL_DIR/aikd"
