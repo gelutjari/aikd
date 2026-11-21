@@ -53,3 +53,10 @@ Status hanya: PASS / FAIL / SKIPPED / NOT IMPLEMENTED. SKIPPED tidak dihitung PA
 - Incremental scan/watcher tidak lagi `clear()` seluruh index: `delete_chunks` per chunk_id + `update_tantivy_incremental` + `remove_from_tantivy`.
 - Regression test `test_delete_chunks_keeps_other_docs` (indexer 9/9 PASS); verifikasi live terisolasi: update 1 file, file lain tetap ketemu.
 - Sisa P2 (belum mulai): search backend abstraction + FTS5-vs-Tantivy benchmark; `delete_file_cascade` + migrasi v5; `aikd db …` + `aikd gc`; mode config terisolasi untuk uji.
+
+## P2 DONE (2026-11-21, commit f421e33)
+
+- Migrasi v5 live pada DB pengguna (4196 file / 25.551 chunk / FTS sinkron, `db check` OK). Harga: +12MB (+16%) pada DB 78MB.
+- `aikd db status|check|backup|restore|compact`, `aikd gc` — terverifikasi pada salinan terisolasi.
+- ADR-0002: Tantivy default, FTS5 backend kedua (fallback + fondasi session recall).
+- Temuan: DB pengguna punya 685 row basi (cache sementara yang sudah dihapus). `aikd gc` pada DB pengguna BELUM dijalankan — butuh persetujuan eksplisit.
