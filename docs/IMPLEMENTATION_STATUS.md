@@ -47,3 +47,9 @@ Status hanya: PASS / FAIL / SKIPPED / NOT IMPLEMENTED. SKIPPED tidak dihitung PA
 - Scan uji P1 (200 file sintetis) tanpa sadar memakai DB pengguna `~/.aikd/aikd.db` + bug `clear()` menghapus index Tantivy pengguna.
 - Mitigasi: 200 file uji + chunk + embedding dihapus dari DB (4196 file/25551 chunk tersisa, 0 bench); backup pra-kerja di `/tmp/aikd-rescue/`; Tantivy di-rebuild penuh dari SQLite (25.551 chunk) dan query terverifikasi kembali lintas-file.
 - Akar masalah: `--config` BEKERJA, tetapi `db_path`/`tantivy_path` default selalu global (`~/.aikd/`) — tidak ada isolasi data per config. Semua uji berikutnya WAJIB config terisolasi dengan db_path eksplisit; P2 perlu mode test terisolasi.
+
+## P2-1 DONE (2026-11-21, commit 6724f6a)
+
+- Incremental scan/watcher tidak lagi `clear()` seluruh index: `delete_chunks` per chunk_id + `update_tantivy_incremental` + `remove_from_tantivy`.
+- Regression test `test_delete_chunks_keeps_other_docs` (indexer 9/9 PASS); verifikasi live terisolasi: update 1 file, file lain tetap ketemu.
+- Sisa P2 (belum mulai): search backend abstraction + FTS5-vs-Tantivy benchmark; `delete_file_cascade` + migrasi v5; `aikd db …` + `aikd gc`; mode config terisolasi untuk uji.
