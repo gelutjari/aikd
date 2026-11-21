@@ -15,6 +15,7 @@ aikd-indexer = { path = "../indexer" }
 aikd-embedder = { path = "../embedder" }
 aikd-chunker = { path = "../chunker" }
 aikd-session = { path = "../session" }
+aikd-context = { path = "../context" }
 aikd-server = { path = "../server" }
 aikd-watcher = { path = "../watcher" }
 aikd-benchmark = { path = "../benchmark" }

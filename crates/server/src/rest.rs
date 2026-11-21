@@ -379,7 +379,6 @@ async fn handle_query(
     state.metrics.query_cache_misses.inc();
 
     let database = state.database.lock().await;
-    let tantivy = &state.tantivy;
 
     let filters = SearchFilters {
         path_contains: params.path.clone(),
@@ -388,39 +387,22 @@ async fn handle_query(
         heading_contains: params.heading.clone(),
     };
 
-    let results = if hybrid {
-        if !cfg.embedding.enabled {
-            return Err(ApiError::from(StatusCode::PRECONDITION_FAILED));
-        }
-        let model_dir = cfg.model_path();
-        if !embedder::is_model_downloaded(&model_dir) {
-            return Err(ApiError::from(StatusCode::PRECONDITION_FAILED));
-        }
-        let mut model =
-            embedder::create_model(&model_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let q_emb = model
-            .embed(vec![params.q.as_str()], None)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .remove(0);
-        let vector_index = std::sync::Arc::new(
-            aikd_indexer::VectorIndex::load_from_db(database.conn(), embedder::MODEL_NAME)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        );
-        if vector_index.is_empty() {
-            tantivy
-                .search(&params.q, limit, &filters)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        } else {
-            let searcher = aikd_indexer::HybridSearcher::new(state.tantivy.clone(), vector_index);
-            searcher
-                .hybrid_search(&params.q, &q_emb, limit, &filters, 60)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        }
-    } else {
-        tantivy
-            .search(&params.q, limit, &filters)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    let req = aikd_context::QueryRequest {
+        query: params.q.clone(),
+        filters,
+        limit,
+        hybrid,
+        budget: aikd_context::ContextBudget::default(),
     };
+    let outcome = aikd_context::run_query(
+        &database,
+        state.tantivy.clone(),
+        &cfg.model_path(),
+        cfg.embedding.enabled,
+        &req,
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let results = outcome.results;
 
     // Store in cache
     state.query_cache.insert(cache_key, results.clone()).await;

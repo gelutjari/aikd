@@ -11,6 +11,7 @@ aikd-indexer = { path = "../indexer" }
 aikd-embedder = { path = "../embedder" }
 aikd-scanner = { path = "../scanner" }
 aikd-session = { path = "../session" }
+aikd-context = { path = "../context" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }

@@ -146,62 +146,34 @@ impl AikdServer {
         let limit = params.limit.unwrap_or(10);
         let hybrid = params.hybrid.unwrap_or(false);
 
-        if hybrid {
-            if !cfg.embedding.enabled {
-                return "Semantic embedding is disabled (embedding.enabled=false). Set embedding.enabled=true in config to opt in, then run: aikd model download && aikd embed. Falling back: query without hybrid for lexical search.".to_string();
-            }
-            let model_dir = cfg.model_path();
-            if !embedder::is_model_downloaded(&model_dir) {
-                return "Embedding model not downloaded (semantic is opt-in). Run: aikd model download && aikd embed".to_string();
-            }
-            let mut model = match embedder::create_model(&model_dir) {
-                Ok(m) => m,
-                Err(e) => return format!("Error loading model: {e}"),
-            };
-            let q_emb = match model.embed(vec![params.query.as_str()], None) {
-                Ok(mut e) => e.remove(0),
-                Err(e) => return format!("Error embedding query: {e}"),
-            };
-            let vector_index = std::sync::Arc::new(
-                match aikd_indexer::VectorIndex::load_from_db(database.conn(), embedder::MODEL_NAME)
-                {
-                    Ok(v) => v,
-                    Err(e) => return format!("Error loading embeddings: {e}"),
-                },
-            );
-            if vector_index.is_empty() {
-                let results = match tantivy.search(&params.query, limit, &filters) {
-                    Ok(r) => r,
-                    Err(e) => return format!("Error: {e}"),
-                };
-                let enriched = match enrich_lines(database.conn(), &results) {
-                    Ok(r) => r,
-                    Err(e) => return format!("Error: {e}"),
-                };
-                return format_results(&enriched);
-            }
-            let searcher =
-                aikd_indexer::HybridSearcher::new(std::sync::Arc::new(tantivy), vector_index);
-            let results = match searcher.hybrid_search(&params.query, &q_emb, limit, &filters, 60) {
-                Ok(r) => r,
-                Err(e) => return format!("Error: {e}"),
-            };
-            let enriched = match enrich_lines(database.conn(), &results) {
-                Ok(r) => r,
-                Err(e) => return format!("Error: {e}"),
-            };
-            format_results(&enriched)
-        } else {
-            let results = match tantivy.search(&params.query, limit, &filters) {
-                Ok(r) => r,
-                Err(e) => return format!("Error: {e}"),
-            };
-            let enriched = match enrich_lines(database.conn(), &results) {
-                Ok(r) => r,
-                Err(e) => return format!("Error: {e}"),
-            };
-            format_results(&enriched)
+        let req = aikd_context::QueryRequest {
+            query: params.query.clone(),
+            filters,
+            limit,
+            hybrid,
+            budget: aikd_context::ContextBudget::default(),
+        };
+        let outcome = match aikd_context::run_query(
+            &database,
+            std::sync::Arc::new(tantivy),
+            &cfg.model_path(),
+            cfg.embedding.enabled,
+            &req,
+        ) {
+            Ok(o) => o,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let mut head = String::new();
+        if let aikd_context::RetrievalKind::LexicalFallback { reason } = &outcome.retrieval {
+            head.push_str(&format!("(Hybrid unavailable: {reason}; used lexical search.)\n"));
         }
+        if outcome.truncated_chars > 0 {
+            head.push_str(&format!(
+                "(Context budget cut {} chars.)\n",
+                outcome.truncated_chars
+            ));
+        }
+        format!("{head}{}", format_results(&outcome.results))
     }
 
     #[tool(description = "Get statistics about the knowledge base")]
@@ -385,38 +357,6 @@ impl AikdServer {
             Err(e) => format!("Error: {e}"),
         }
     }
-}
-
-fn enrich_lines(
-    conn: &rusqlite::Connection,
-    results: &[aikd_core::SearchResult],
-) -> Result<Vec<aikd_core::SearchResult>> {
-    let mut enriched = Vec::with_capacity(results.len());
-    for r in results {
-        let lines = conn
-            .query_row(
-                "SELECT line_start, line_end FROM chunks WHERE id=?1",
-                rusqlite::params![r.chunk_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as usize,
-                        row.get::<_, i64>(1)? as usize,
-                    ))
-                },
-            )
-            .unwrap_or((0, 0));
-        enriched.push(aikd_core::SearchResult {
-            chunk_id: r.chunk_id.clone(),
-            file_path: r.file_path.clone(),
-            heading_hierarchy: r.heading_hierarchy.clone(),
-            heading_text: r.heading_text.clone(),
-            content: r.content.clone(),
-            line_start: lines.0,
-            line_end: lines.1,
-            score: r.score,
-        });
-    }
-    Ok(enriched)
 }
 
 fn format_results(results: &[aikd_core::SearchResult]) -> String {

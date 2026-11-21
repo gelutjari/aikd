@@ -1,0 +1,17 @@
+[package]
+name = "aikd-context"
+version.workspace = true
+edition.workspace = true
+description = "AIKD unified retrieval service: one query path for CLI, MCP and REST"
+
+[dependencies]
+aikd-core = { path = "../core" }
+aikd-storage = { path = "../storage" }
+aikd-indexer = { path = "../indexer" }
+aikd-embedder = { path = "../embedder" }
+anyhow = { workspace = true }
+log = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

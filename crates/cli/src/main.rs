@@ -725,35 +725,42 @@ fn cmd_query(config_path: &str, query: &str, params: &QueryParams) -> Result<()>
         file_types: params.file_type.map(|ft| vec![ft.to_string()]),
         heading_contains: params.heading_filter.map(String::from),
     };
-    let start = std::time::Instant::now();
-
-    if params.hybrid {
-        let model_dir = cfg.model_path();
-        if !embedder::is_model_downloaded(&model_dir) {
-            anyhow::bail!("Embedding model not downloaded (semantic is opt-in). Run: aikd model download && aikd embed. Falling back: omit --hybrid for lexical search.");
+    let req = aikd_context::QueryRequest {
+        query: query.to_string(),
+        filters,
+        limit: params.limit,
+        hybrid: params.hybrid,
+        budget: aikd_context::ContextBudget::default(),
+    };
+    let outcome = aikd_context::run_query(
+        &database,
+        std::sync::Arc::new(tantivy),
+        &cfg.model_path(),
+        cfg.embedding.enabled,
+        &req,
+    );
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) if params.hybrid => {
+            anyhow::bail!("{e}. Semantic is opt-in: run `aikd model download && aikd embed`, or omit --hybrid for lexical search.");
         }
-        let mut model = embedder::create_model(&model_dir)?;
-        let q_emb = model.embed(vec![query], None)?.remove(0);
-        let vector_index = std::sync::Arc::new(aikd_indexer::VectorIndex::load_from_db(
-            database.conn(),
-            embedder::MODEL_NAME,
-        )?);
-        if vector_index.is_empty() {
-            let tantivy_results = tantivy.search(query, params.limit, &filters)?;
-            let results = enrich_with_line_numbers(database.conn(), &tantivy_results)?;
-            print_results(query, &results, start.elapsed(), params.json);
-            return Ok(());
-        }
-        let searcher =
-            aikd_indexer::HybridSearcher::new(std::sync::Arc::new(tantivy), vector_index);
-        let results = searcher.hybrid_search(query, &q_emb, params.limit, &filters, 60)?;
-        let results = enrich_with_line_numbers(database.conn(), &results)?;
-        print_results(query, &results, start.elapsed(), params.json);
-    } else {
-        let tantivy_results = tantivy.search(query, params.limit, &filters)?;
-        let results = enrich_with_line_numbers(database.conn(), &tantivy_results)?;
-        print_results(query, &results, start.elapsed(), params.json);
+        Err(e) => anyhow::bail!("{e}"),
+    };
+    if let aikd_context::RetrievalKind::LexicalFallback { reason } = &outcome.retrieval {
+        einfo!("[aikd] Hybrid unavailable ({reason}); used lexical search.");
     }
+    if outcome.truncated_chars > 0 {
+        einfo!(
+            "[aikd] Context budget cut {} chars.",
+            outcome.truncated_chars
+        );
+    }
+    print_results(
+        query,
+        &outcome.results,
+        std::time::Duration::from_millis(outcome.elapsed_ms as u64),
+        params.json,
+    );
     Ok(())
 }
 
@@ -1046,38 +1053,6 @@ fn cmd_status(config_path: &str, json: bool) -> Result<()> {
         println!("REST Port:   {}", cfg.server.rest_port);
     }
     Ok(())
-}
-
-fn enrich_with_line_numbers(
-    conn: &rusqlite::Connection,
-    results: &[aikd_core::SearchResult],
-) -> Result<Vec<aikd_core::SearchResult>> {
-    let mut enriched = Vec::with_capacity(results.len());
-    for r in results {
-        let lines = conn
-            .query_row(
-                "SELECT line_start, line_end FROM chunks WHERE id=?1",
-                rusqlite::params![r.chunk_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as usize,
-                        row.get::<_, i64>(1)? as usize,
-                    ))
-                },
-            )
-            .unwrap_or((0, 0));
-        enriched.push(aikd_core::SearchResult {
-            chunk_id: r.chunk_id.clone(),
-            file_path: r.file_path.clone(),
-            heading_hierarchy: r.heading_hierarchy.clone(),
-            heading_text: r.heading_text.clone(),
-            content: r.content.clone(),
-            line_start: lines.0,
-            line_end: lines.1,
-            score: r.score,
-        });
-    }
-    Ok(enriched)
 }
 
 fn print_results(
