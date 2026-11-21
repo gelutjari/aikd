@@ -872,6 +872,71 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         config: std::sync::Arc::new(governor_conf),
     };
 
+/// Local dashboard (attachment P7): read-only HTML rendered from live core
+/// data. No separate data logic — every number below queries the same
+/// storage the CLI/MCP paths use. Localhost only (server binds 127.0.0.1).
+async fn handle_ui(State(state): State<RestState>, headers: HeaderMap) -> impl IntoResponse {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+    let database = state.database.lock().await;
+    let conn = database.conn();
+    let q = |sql: &str| -> String {
+        conn.query_row(sql, [], |r| r.get::<_, String>(0))
+            .map(|v| html_escape(&v))
+            .unwrap_or_else(|_| "?".to_string())
+    };
+    let qi = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(-1) };
+    let files = qi("SELECT COUNT(*) FROM files");
+    let chunks = qi("SELECT COUNT(*) FROM chunks");
+    let symbols = qi("SELECT COUNT(*) FROM code_symbols");
+    let mem_active = qi("SELECT COUNT(*) FROM memory WHERE status='active'");
+    let mem_super = qi("SELECT COUNT(*) FROM memory WHERE status='superseded'");
+    let events = qi("SELECT COUNT(*) FROM events");
+    let sessions = qi("SELECT COUNT(*) FROM sessions");
+    let schema_v = q("SELECT version FROM schema_version LIMIT 1");
+    let db_mb = std::fs::metadata(cfg.db_path())
+        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(-1.0);
+    let cover: Vec<(String, String, i64)> = aikd_storage::events::adapter_coverage(conn, "%", "default").unwrap_or_default();
+    let mut cover_rows = String::new();
+    for (agent, etype, n) in cover.iter().take(20) {
+        cover_rows.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{n}</td></tr>", html_escape(agent), html_escape(etype)));
+    }
+    let mem_rows: String = conn
+        .prepare("SELECT kind, title, source, status, updated_at FROM memory ORDER BY updated_at DESC LIMIT 15")
+        .and_then(|mut s| {
+            s.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
+            })
+            .and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>())
+        })
+        .unwrap_or_default()
+        .iter()
+        .map(|(k, t, s, st, u)| format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", html_escape(k), html_escape(t), html_escape(s), html_escape(st), html_escape(u)))
+        .collect();
+    let body = format!(
+        "<!doctype html><html><head><meta charset=utf-8><title>AIKD Control Center</title></head>\
+        <body><h1>AIKD Control Center</h1>\
+        <p>DB schema v{schema_v} · {db_mb:.1} MB · files {files} · chunks {chunks} · symbols {symbols} · sessions {sessions}</p>\
+        <h2>Memory</h2><p>active {mem_active} · superseded {mem_super}</p>\
+        <table border=1><tr><th>kind</th><th>title</th><th>source</th><th>status</th><th>updated</th></tr>{mem_rows}</table>\
+        <h2>Event journal</h2><p>total events {events}</p>\
+        <table border=1><tr><th>agent</th><th>type</th><th>count</th></tr>{cover_rows}</table>\
+        <h2>Compaction coverage</h2><p>Checkpoints and task state persist in <code>memory</code> per workstream; \
+        resume any agent with <code>aikd handoff --workstream &lt;name&gt;</code> or the MCP <code>handoff</code> tool. \
+        No compaction event from an adapter is claimed as protection without a verified lifecycle integration.</p>\
+        <h2>Resources</h2><p>Semantic embedding default OFF · indexes incremental · queries served by one service (CLI/MCP/REST share <code>aikd-context</code>).</p>\
+        </body></html>"
+    );
+    ([(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\"', "&quot;")
+}
+
     let app = Router::new()
         .route("/api/health", get(handle_health))
         .route("/api/metrics", get(handle_metrics))
@@ -885,6 +950,7 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         .route("/api/remember", post(handle_remember))
         .route("/api/recall", post(handle_recall))
         .route("/api/sessions", get(handle_sessions))
+        .route("/ui", get(handle_ui))
         .layer(rate_limiter)
         .layer(cors)
         .with_state(state);
