@@ -455,7 +455,7 @@ impl BenchmarkRunner {
 
             let vec_scored = aikd_embedder::vector_search(&q_emb, &all_embs, 20);
             let vec_ids: Vec<String> = vec_scored.iter().map(|(id, _)| id.clone()).collect();
-            let _fused = aikd_embedder::reciprocal_rank_fusion(&kw_ids, &vec_ids, 60);
+            let _fused = aikd_embedder::reciprocal_rank_fusion(&kw_ids, &vec_ids, aikd_core::fusion::DEFAULT_RRF_K);
 
             total_latency += t0.elapsed();
         }

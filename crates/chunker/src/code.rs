@@ -134,7 +134,11 @@ fn chunk_by_function(
         current_content.push('\n');
 
         let est = current_content.len() / 4;
-        if est >= config.max_tokens {
+        // R4: never cut mid-declaration. At max, only cut on a symbol or
+        // blank line; otherwise overflow up to 2x max, then cut anyway
+        // (bounded — a 10k-line function still terminates).
+        let at_boundary = trimmed.is_empty() || is_symbol;
+        if est >= config.max_tokens && (at_boundary || est >= config.max_tokens * 2) {
             chunks.push(make_code_chunk(
                 file_path,
                 chunk_index,
@@ -367,4 +371,28 @@ const world = () => {
         assert!(!chunks.is_empty());
         assert!(chunks[0].content.contains("fn main"));
     }
+    #[test]
+    fn test_max_cut_never_splits_declaration() {
+        // R4: a long function must not be cut mid-body when max_tokens hits.
+        let mut body = String::from("fn big() {\n");
+        for i in 0..20 {
+            body.push_str(&format!("    let x{i} = {i};\n"));
+        }
+        body.push_str("}\n\nfn next() {}\n");
+        let cfg = ChunkConfig { max_tokens: 50, min_tokens: 1, overlap_tokens: 0 };
+        let chunks = chunk_source_code("t.rs", &body, &cfg, HashMap::new());
+        assert!(chunks.len() >= 2);
+        // No chunk may end in the middle of a statement: every chunk except
+        // possibly the last must end at a blank line, closing brace, or symbol.
+        for c in &chunks[..chunks.len() - 1] {
+            let last = c.content.lines().last().unwrap_or("").trim();
+            assert!(
+                last.is_empty() || last == "}" || last.ends_with('{'),
+                "chunk cut mid-declaration, ends with: {last:?}"
+            );
+        }
+        // The trailing function survives intact.
+        assert!(chunks.last().unwrap().content.contains("fn next"));
+    }
+
 }

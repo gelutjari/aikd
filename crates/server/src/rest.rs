@@ -344,7 +344,7 @@ async fn handle_query(
 
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return error_response("Unauthorized", StatusCode::UNAUTHORIZED);
+        return error_response("Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.", StatusCode::UNAUTHORIZED);
     }
 
     let limit = params.limit.unwrap_or(10);
@@ -632,7 +632,7 @@ async fn handle_health(State(state): State<RestState>) -> Json<ApiResponse<serde
 async fn handle_metrics(State(state): State<RestState>, headers: HeaderMap) -> impl IntoResponse {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.").into_response();
     }
     let db_size = std::fs::metadata(cfg.db_path())
         .map(|m| m.len())
@@ -691,7 +691,7 @@ async fn handle_status(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return error_response("Unauthorized", StatusCode::UNAUTHORIZED);
+        return error_response("Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.", StatusCode::UNAUTHORIZED);
     }
     let profile = aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode);
     Ok(Json(ApiResponse {
@@ -716,7 +716,7 @@ async fn handle_embed(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return error_response("Unauthorized", StatusCode::UNAUTHORIZED);
+        return error_response("Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.", StatusCode::UNAUTHORIZED);
     }
 
     let database = state.database.lock().await;
@@ -746,7 +746,7 @@ async fn handle_sessions(
 ) -> Result<Json<ApiResponse<Vec<aikd_core::Session>>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return error_response("Unauthorized", StatusCode::UNAUTHORIZED);
+        return error_response("Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.", StatusCode::UNAUTHORIZED);
     }
 
     let database = state.database.lock().await;
@@ -904,7 +904,7 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
 async fn handle_ui(State(state): State<RestState>, headers: HeaderMap, Query(qp): Query<GraphParams>) -> impl IntoResponse {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.").into_response();
     }
     let database = state.database.lock().await;
     let conn = database.conn();

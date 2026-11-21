@@ -503,7 +503,7 @@ mod tests {
     fn test_reciprocal_rank_fusion() {
         let kw = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let ann = vec!["b".to_string(), "a".to_string(), "d".to_string()];
-        let fused = reciprocal_rank_fusion(&kw, &ann, 60);
+        let fused = reciprocal_rank_fusion(&kw, &ann, aikd_core::fusion::DEFAULT_RRF_K);
         assert_eq!(fused.len(), 4);
         assert!(fused[0].1 > fused[2].1);
     }
@@ -536,7 +536,7 @@ mod tests {
         let searcher = HybridSearcher::new(Arc::new(tantivy), vector_idx);
         let filters = SearchFilters::default();
         let results = searcher
-            .hybrid_search("rust", &[1.0, 0.0, 0.0], 10, &filters, 60)
+            .hybrid_search("rust", &[1.0, 0.0, 0.0], 10, &filters, aikd_core::fusion::DEFAULT_RRF_K)
             .unwrap();
         assert!(!results.is_empty());
     }

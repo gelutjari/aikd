@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 11;
+const SCHEMA_VERSION: i32 = 12;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -59,6 +59,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if current < 11 {
         migrate_v11(conn)?;
+    }
+
+    if current < 12 {
+        migrate_v12(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -450,6 +454,25 @@ fn migrate_v11(conn: &Connection) -> Result<()> {
     }
     conn.execute("UPDATE files SET path = replace(path, '\\', '/')", [])?;
     log::info!("Migration v11 applied — canonical slash paths ({} dup groups merged)", groups.len());
+    Ok(())
+}
+
+fn migrate_v12(conn: &Connection) -> Result<()> {
+    // R1: Tantivy is the single lexical engine. The SQLite FTS5 mirror
+    // (chunks_fts + 3 triggers) was write-amplification with zero readers —
+    // no query path ever called fts_search. Drop it all.
+    // DROP TABLE on FTS5 removes the data and shadow tables; triggers go
+    // explicitly for older SQLite builds.
+    conn.execute_batch(
+        "
+        DROP TRIGGER IF EXISTS chunks_fts_insert;
+        DROP TRIGGER IF EXISTS chunks_fts_delete;
+        DROP TRIGGER IF EXISTS chunks_fts_update;
+        DROP TABLE IF EXISTS chunks_fts;
+        ",
+    )?;
+
+    log::info!("Migration v12 applied — FTS5 mirror removed (Tantivy is the lexical engine)");
     Ok(())
 }
 

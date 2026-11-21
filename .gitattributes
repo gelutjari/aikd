@@ -1,0 +1,16 @@
+# X1: normalize line endings so bash scripts never break on CRLF again.
+* text=auto
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+# Windows-only or binary artifacts stay as-is.
+*.exe binary
+*.db binary
+*.mp4 binary
+*.gif binary
+*.png binary

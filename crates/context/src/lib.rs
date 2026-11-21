@@ -250,7 +250,7 @@ fn try_hybrid(
     let searcher =
         aikd_indexer::HybridSearcher::new(tantivy, std::sync::Arc::new(vector_index));
     let results = searcher
-        .hybrid_search(&req.query, &q_emb, limit, &req.filters, 60)
+        .hybrid_search(&req.query, &q_emb, limit, &req.filters, aikd_core::fusion::DEFAULT_RRF_K)
         .map_err(|_| "hybrid search failed")?;
     let results = enrich(db, &results).map_err(|_| "enrich failed")?;
     Ok((results, RetrievalKind::Hybrid))

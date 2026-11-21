@@ -67,17 +67,38 @@ fn detect_file_type(path: &str) -> FileType {
         || path.ends_with(".tsx")
         || path.ends_with(".js")
         || path.ends_with(".jsx")
+        || path.ends_with(".mjs")
+        || path.ends_with(".cjs")
         || path.ends_with(".go")
         || path.ends_with(".java")
+        || path.ends_with(".cs")
         || path.ends_with(".c")
         || path.ends_with(".cpp")
-        || path.ends_with(".h")
         || path.ends_with(".hpp")
     {
         FileType::SourceCode
     } else {
         FileType::Text
     }
+}
+
+fn cut_at_boundary(lines: &[&str], end: usize, min_keep: usize) -> usize {
+    // R4: never cut a declaration in half. Walk back from the max-token
+    // cut point to the nearest blank line or symbol start; if that would
+    // keep too little, cut at max after all (bounded, never infinite).
+    let mut i = end;
+    while i > min_keep {
+        let t = lines[i].trim_start();
+        if t.is_empty()
+            || t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("pub ") || t.starts_with("struct ") || t.starts_with("impl ")
+            || t.starts_with("def ") || t.starts_with("class ") || t.starts_with("async def ")
+            || t.starts_with("function ") || t.starts_with("export ")
+        {
+            return i;
+        }
+        i -= 1;
+    }
+    end
 }
 
 fn chunk_plain_text(file_path: &str, content: &str, max_tokens: usize) -> Vec<Chunk> {

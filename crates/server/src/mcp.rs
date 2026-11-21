@@ -582,7 +582,7 @@ impl AikdServer {
 
 fn format_results(results: &[aikd_core::SearchResult]) -> String {
     if results.is_empty() {
-        return "No results found.".to_string();
+        return "No results found. Hint: run `stats` (is this the right DB?), `project show`-equivalent memory check, or narrow filters. If nothing is indexed yet, run `scan` first.".to_string();
     }
     let mut out = String::new();
     for (i, r) in results.iter().enumerate() {

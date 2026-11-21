@@ -455,6 +455,15 @@ impl Config {
             }
         }
 
+        // X5: SQLite over network filesystems risks SQLITE_CORRUPT / missed
+        // watcher events (notify has no backend there; locks don't hold).
+        for (label, p) in [("db_path", self.index.db_path.clone()), ("tantivy_path", self.index.tantivy_path.clone())] {
+            let low = p.replace('\\', "/").to_lowercase();
+            if low.starts_with("//") || low.starts_with("/mnt/") || low.starts_with("/media/") || low.starts_with("/volumes/") {
+                warnings.push(format!("{label} looks like a network/mounted path ({p}): SQLite may corrupt and the watcher may miss events — keep the DB on a local disk"));
+            }
+        }
+
         warnings
     }
 }
@@ -493,7 +502,7 @@ pub fn generate_smart_config(project_root: &Path) -> Config {
         || project_root.join("tsconfig.json").exists()
     {
         config.scan.include_extensions =
-            vec!["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml"]
+            vec!["ts", "tsx", "js", "jsx", "mjs", "cjs", "md", "json", "yaml", "yml"]
                 .into_iter()
                 .map(String::from)
                 .collect();

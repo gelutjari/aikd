@@ -22,9 +22,12 @@ struct QueryParams<'a> {
 static QUIET: AtomicBool = AtomicBool::new(false);
 
 macro_rules! info {
+    // M1: ALL human chatter goes to stderr. stdout is reserved for MCP
+    // stdio JSON-RPC and --json output (a single println elsewhere breaks
+    // the protocol stream and is the #1 local-MCP failure in the wild).
     ($($arg:tt)*) => {
         if !QUIET.load(Ordering::Relaxed) {
-            println!($($arg)*);
+            eprintln!($($arg)*);
         }
     };
 }
@@ -410,9 +413,9 @@ enum DbAction {
         #[arg(short, long)]
         file: String,
     },
-    #[command(about = "Reclaim space (VACUUM); optionally rebuild the FTS index")]
+    #[command(about = "Reclaim space (VACUUM); --rebuild-fts is a no-op since v12 (Tantivy is the lexical engine)")]
     Compact {
-        #[arg(long)]
+        #[arg(long, help = "No-op since v12 (kept for back-compat)")]
         rebuild_fts: bool,
     },
 }
@@ -436,7 +439,7 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "model": embedder::MODEL_NAME,
-                "db_schema": 11,
+                "db_schema": 12,
             }))
             .unwrap_or_default()
         );
@@ -550,7 +553,7 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
 
     // Embedding is opt-in (ADR-0001): never auto-download the model here.
     // Enable explicitly with: aikd model download && aikd embed
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let model_dir = cfg.model_path();
     if !aikd_embedder::is_model_downloaded(&model_dir) {
         info!("  Embedding model not present (opt-in). Run: aikd model download && aikd embed");
@@ -684,21 +687,22 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         // the daemon down with it via the select! below.
         if std::env::var("AIKD_DAEMON_BG").as_deref() == Ok("1") {
             return aikd_server::run_rest_server(config_path).await;
-        } else {
-            let config_path_owned = config_path.to_string();
-            let rest_handle = tokio::spawn(async move {
-                aikd_server::run_rest_server(&config_path_owned).await
-            });
-
-            let config_path_owned2 = config_path.to_string();
-            let mcp_handle =
-                tokio::spawn(async move { aikd_server::run_mcp_server(&config_path_owned2).await });
-
-            tokio::select! {
-                r = rest_handle => { let _ = r?; }
-                r = mcp_handle => { let _ = r?; }
-            }
         }
+        let config_path_owned = config_path.to_string();
+        let rest_handle = tokio::spawn(async move {
+            aikd_server::run_rest_server(&config_path_owned).await
+        });
+
+        let config_path_owned2 = config_path.to_string();
+        let mcp_handle =
+            tokio::spawn(async move { aikd_server::run_mcp_server(&config_path_owned2).await });
+
+        tokio::select! {
+            r = rest_handle => { let _ = r?; }
+            r = mcp_handle => { let _ = r?; }
+        }
+        return Ok(());
+    }
         let pid_dir = shellexpand::tilde("~/.aikd");
         let pid_path = format!("{pid_dir}/aikd.pid");
         std::fs::create_dir_all(pid_dir.as_ref())?;
@@ -756,14 +760,23 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
             println!("AIKD daemon started (PID {})", child.id());
             println!("Log: {log_path}");
         }
-    }
     Ok(())
 }
 
 fn cmd_daemon_stop() -> Result<()> {
+    // D2: check the port first (cross-platform). A stale PID file from a
+    // crashed daemon must not block a fresh start, and killing a recycled
+    // PID would hit an unrelated process.
+    let probe = "127.0.0.1:9090";
+    if std::net::TcpStream::connect_timeout(&probe.parse().unwrap(), std::time::Duration::from_millis(500)).is_err() {
+        let pid_path = shellexpand::tilde("~/.aikd/aikd.pid");
+        let _ = std::fs::remove_file(pid_path.as_ref());
+        eprintln!("No daemon listening on {probe} (stale PID file cleaned). Nothing to stop.");
+        return Ok(());
+    }
     let pid_path = shellexpand::tilde("~/.aikd/aikd.pid");
     if !std::path::Path::new(pid_path.as_ref()).exists() {
-        eprintln!("No daemon PID file found. Daemon may not be running.");
+        eprintln!("Daemon is listening on {probe} but no PID file exists (started externally?). Stop it manually or restart it via `aikd daemon`.");
         return Ok(());
     }
     let pid_str = std::fs::read_to_string(pid_path.as_ref())?;
@@ -844,7 +857,7 @@ fn cmd_daemon_pid() -> Result<()> {
 }
 
 fn cmd_scan(config_path: &str, override_path: Option<&str>) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     // Enforce worker cap: bound the global rayon pool to the resource profile.
     // (One-shot CLI process; `build_global` no-ops if already initialized.)
     let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
@@ -871,7 +884,7 @@ fn cmd_scan(config_path: &str, override_path: Option<&str>) -> Result<()> {
 }
 
 fn cmd_query(config_path: &str, query: &str, params: &QueryParams) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
 
@@ -885,8 +898,11 @@ fn cmd_query(config_path: &str, query: &str, params: &QueryParams) -> Result<()>
         )
         .unwrap_or(0);
     if file_count == 0 {
-        if !params.json {
-            einfo!("[aikd] No files indexed yet. Run: aikd scan");
+        let msg = "No files indexed in this database. Run: aikd scan (or aikd init for a smart config first).";
+        if params.json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({"results": [], "hint": msg})).unwrap_or_default());
+        } else {
+            einfo!("[aikd] {msg}");
         }
         return Ok(());
     }
@@ -939,7 +955,7 @@ fn cmd_query(config_path: &str, query: &str, params: &QueryParams) -> Result<()>
 }
 
 fn cmd_export(config_path: &str, output: &str) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let expanded = shellexpand::tilde(output);
     let count = embedder::export_chunks_for_embedding(database.conn(), expanded.as_ref())?;
@@ -948,7 +964,7 @@ fn cmd_export(config_path: &str, output: &str) -> Result<()> {
 }
 
 fn cmd_import(config_path: &str, file: &str) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let expanded = shellexpand::tilde(file);
     let count = embedder::import_embeddings_json(database.conn(), expanded.as_ref())?;
@@ -957,7 +973,7 @@ fn cmd_import(config_path: &str, file: &str) -> Result<()> {
 }
 
 fn cmd_stats(config_path: &str) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let fc: i64 = database.conn().query_row(
         "SELECT COUNT(*) FROM files WHERE status='active'",
@@ -1025,7 +1041,7 @@ fn cmd_embed_external(_config_path: &str, cfg: &aikd_core::Config) -> Result<()>
 }
 
 fn cmd_embed(config_path: &str, _model: &str, _batch_size: usize) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     if !cfg.embedding.enabled {
         anyhow::bail!("Semantic embedding is disabled (embedding.enabled=false). Set embedding.enabled=true in config to opt in");
     }
@@ -1128,7 +1144,7 @@ fn cmd_remember(
     content: &str,
     json: bool,
 ) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let sid = match session_id {
         Some(id) => id.to_string(),
@@ -1179,7 +1195,7 @@ fn cmd_recall(
     limit: usize,
     json: bool,
 ) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let sid = match session_id {
         Some(id) => id.to_string(),
@@ -1215,7 +1231,7 @@ fn cmd_recall(
 }
 
 fn cmd_status(config_path: &str, json: bool) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
     if json {
         let status = serde_json::json!({
@@ -1261,7 +1277,7 @@ fn cmd_status(config_path: &str, json: bool) -> Result<()> {
 /// Every line comes from real state; warnings name the fix command.
 fn cmd_doctor(config_path: &str) -> Result<()> {
     use sysinfo::{Pid, System};
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let conn = database.conn();
     let qi = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(-1) };
@@ -1303,8 +1319,17 @@ fn cmd_doctor(config_path: &str) -> Result<()> {
     if db_mb > 500.0 {
         warnings.push(format!("DB is {db_mb:.0} MB; consider `aikd db backup` then `aikd gc`/`aikd db compact`"));
     }
-    if !aikd_embedder::SEMANTIC_COMPILED && cfg.embedding.enabled {
-        warnings.push("config enables embedding but this is a zero-ONNX build; set embedding.enabled=false or rebuild with --features semantic".to_string());
+    // M2: is THIS binary resolvable the way agents spawn it? PATH lookup
+    // fails inside GUI apps with minimal PATH (the #1 MCP setup failure).
+    // D3: running version vs shim pointer — a stale daemon after `update`
+    // is normal (old file keeps running) but must be visible.
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let active_ver = std::fs::read_to_string(shellexpand::tilde("~/.aikd/active-version").as_ref())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "(none — pre-shim install?)".into());
+    println!("Binary: {exe} (v{}) · active-version: {active_ver}", env!("CARGO_PKG_VERSION"));
+    if !active_ver.starts_with(env!("CARGO_PKG_VERSION")) && !active_ver.starts_with("(none") {
+        warnings.push(format!("running v{} but shim points at {active_ver}; restart sessions/daemon to pick it up (old file keeps running by design)", env!("CARGO_PKG_VERSION")));
     }
     println!("=== AIKD Doctor ===");
     println!("Process RSS:  {rss_mb:.1} MB (host RAM {host_gb:.1} GB, {cores} cores, mode {mode:?})",
@@ -1364,6 +1389,7 @@ fn print_results(
     }
     if results.is_empty() {
         println!("No results for: {query}");
+        println!("Hint: check `aikd stats` (is this the right DB?), `aikd project show` (what is indexed?), or narrow filters (--path/--type).");
         return;
     }
     println!(
@@ -1400,14 +1426,38 @@ fn print_results(
 }
 
 fn load_or_default(p: &str) -> Config {
-    Config::load(p).unwrap_or_else(|_| {
-        log::warn!("Using defaults");
-        Config::default()
-    })
+    match Config::load(p) {
+        Ok(c) => c,
+        Err(e) => {
+            // C1: an EXPLICIT --config that cannot be read must fail loudly.
+            // Silently falling back to ~/.aikd defaults once caused gc to
+            // delete another database's index. Only the built-in default
+            // path may fall back (first-run UX).
+            let expanded = shellexpand::tilde(p);
+            let is_default = expanded.as_ref() == shellexpand::tilde("~/.aikd/config.yaml").as_ref();
+            if !is_default {
+                eprintln!("error: cannot read config '{p}': {e}");
+                eprintln!("Refusing to run against the wrong database. Fix the path or create it with: aikd init");
+                std::process::exit(2);
+            }
+            log::warn!("Using defaults (no config at {p})");
+            Config::default()
+        }
+    }
+}
+
+/// Load config + surface `Config::validate` warnings (C3). Invalid values
+/// (bad port, max<min, missing paths) no longer pass silently.
+fn load_validated(p: &str) -> Config {
+    let cfg = load_or_default(p);
+    for w in cfg.validate() {
+        log::warn!("config: {w}");
+    }
+    cfg
 }
 
 fn cmd_session(config_path: &str, action: SessionAction, json: bool) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
 
     match action {
@@ -1468,7 +1518,7 @@ fn cmd_session(config_path: &str, action: SessionAction, json: bool) -> Result<(
 }
 
 fn cmd_model(config_path: &str, action: ModelAction) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let model_dir = cfg.model_path();
 
     match action {
@@ -1530,7 +1580,7 @@ fn cmd_model(config_path: &str, action: ModelAction) -> Result<()> {
 
 fn cmd_db(config_path: &str, action: DbAction, json: bool) -> Result<()> {
     use aikd_storage::maintenance::{db_backup, db_check, db_compact, db_restore, db_status};
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let db_path = cfg.db_path();
     match action {
         DbAction::Status => {
@@ -1546,8 +1596,8 @@ fn cmd_db(config_path: &str, action: DbAction, json: bool) -> Result<()> {
                     st.files, st.chunks, st.embeddings, st.sessions, st.conversations
                 );
                 println!(
-                    "FTS docs: {} | pages: {} x {} bytes | freelist: {}",
-                    st.fts_docs, st.page_count, st.page_size, st.freelist_pages
+                    "Pages: {} x {} bytes | freelist: {}",
+                    st.page_count, st.page_size, st.freelist_pages
                 );
             }
         }
@@ -1619,15 +1669,24 @@ fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Resu
     }
     let src = file.ok_or_else(|| anyhow::anyhow!("provide --file <new aikd binary> (explicit, never auto-downloaded)"))?;
     // Ask the binary itself for its version when no label is given.
+    // X3: never trust raw output — sanitize to [A-Za-z0-9._-], fallback to
+    // timestamped label instead of "unknown" (which would collide).
     let ver = match version {
         Some(v) => v,
         None => {
             let out = std::process::Command::new(&src).arg("--version").output()?;
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            s.split_whitespace().last().unwrap_or("unknown").to_string()
+            let raw = s.split_whitespace().last().unwrap_or("").to_string();
+            let clean: String = raw.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).collect();
+            let clean = clean.trim_matches(|c| c == '.' || c == '-').to_string();
+            if clean.is_empty() {
+                format!("manual-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"))
+            } else {
+                clean
+            }
         }
     };
-    if ver.is_empty() || ver.contains(['/', '\\', '.']) && ver.contains('/') {
+    if ver.is_empty() || ver.contains(['/', '\\']) || ver == "." || ver == ".." {
         anyhow::bail!("invalid version label: {ver}");
     }
     let dest_dir = vdir.join(&ver);
@@ -1652,7 +1711,7 @@ fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Resu
 }
 
 fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
     // Collect stale chunk IDs for the index before rows disappear.
@@ -1701,7 +1760,7 @@ fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
 }
 
 fn cmd_symbol(config_path: &str, name: &str, limit: usize, json: bool) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let symbols = aikd_storage::symbols::find_symbols(database.conn(), name, limit)?;
     if json {
@@ -1734,7 +1793,7 @@ fn cmd_symbol(config_path: &str, name: &str, limit: usize, json: bool) -> Result
 
 fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()> {
     use aikd_storage::memory::{active_tasks, latest_checkpoint, list_memory, save_memory, supersede};
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let project = cfg
         .scan
@@ -1831,7 +1890,7 @@ fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()>
 }
 
 fn cmd_event(config_path: &str, action: EventAction, json: bool) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
     match action {
@@ -1868,7 +1927,7 @@ fn cmd_event(config_path: &str, action: EventAction, json: bool) -> Result<()> {
 /// Context inspector (§25): show exactly what would be sent and why.
 fn cmd_context_inspect(config_path: &str, query: &str, limit: usize, hybrid: bool) -> Result<()> {
     use aikd_core::SearchFilters;
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
     let req = aikd_context::QueryRequest {
@@ -1907,7 +1966,7 @@ fn cmd_context_inspect(config_path: &str, query: &str, limit: usize, hybrid: boo
 /// Context package for session resume / cross-agent handoff (attachment P5).
 /// Assembled by `aikd_context::assemble_handoff` — same constructor as MCP.
 fn cmd_handoff(config_path: &str, workstream: &str, recent_events: usize, json: bool) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
     let pkg = aikd_context::assemble_handoff(database.conn(), &project, workstream, recent_events)?;
@@ -1920,7 +1979,7 @@ fn cmd_handoff(config_path: &str, workstream: &str, recent_events: usize, json: 
 }
 
 fn cmd_project(config_path: &str, action: ProjectAction, json: bool) -> Result<()> {
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let resolve = |p: &Option<String>| -> String {
         match p {
@@ -2071,7 +2130,7 @@ fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
 
-    let cfg = load_or_default(config_path);
+    let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
 
     let session_id = session::get_or_create_session(

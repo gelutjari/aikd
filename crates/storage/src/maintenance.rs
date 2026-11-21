@@ -18,7 +18,6 @@ pub struct DbStatus {
     pub embeddings: i64,
     pub sessions: i64,
     pub conversations: i64,
-    pub fts_docs: i64,
     pub freelist_pages: i64,
     pub page_size: i64,
     pub page_count: i64,
@@ -42,7 +41,6 @@ pub fn db_status(conn: &Connection, db_path: &Path) -> Result<DbStatus> {
         embeddings: q("SELECT COUNT(*) FROM embeddings"),
         sessions: q("SELECT COUNT(*) FROM sessions"),
         conversations: q("SELECT COUNT(*) FROM conversations"),
-        fts_docs: q("SELECT COUNT(*) FROM chunks_fts"),
         freelist_pages: q("PRAGMA freelist_count"),
         page_size: q("PRAGMA page_size"),
         page_count: q("PRAGMA page_count"),
@@ -50,8 +48,8 @@ pub fn db_status(conn: &Connection, db_path: &Path) -> Result<DbStatus> {
     })
 }
 
-/// Run `PRAGMA integrity_check` plus a row-count cross-check between
-/// `chunks` and the FTS index. Returns a list of problems (empty = healthy).
+/// Run `PRAGMA integrity_check` plus orphan detection. Tantivy (outside
+/// SQLite) is verified by query smoke, not row counts. Empty = healthy.
 pub fn db_check(conn: &Connection) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     let ic: String = conn
@@ -59,17 +57,6 @@ pub fn db_check(conn: &Connection) -> Result<Vec<String>> {
         .unwrap_or_else(|_| "failed to run".to_string());
     if ic.to_lowercase() != "ok" {
         problems.push(format!("integrity_check: {ic}"));
-    }
-    let chunks: i64 = conn
-        .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
-        .unwrap_or(-1);
-    let fts: i64 = conn
-        .query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))
-        .unwrap_or(-2);
-    if chunks != fts {
-        problems.push(format!(
-            "fts drift: chunks={chunks} fts_docs={fts} (run: aikd db compact --rebuild-fts)"
-        ));
     }
     let orphan_chunks: i64 = conn
         .query_row(
@@ -114,13 +101,11 @@ pub fn db_restore(backup: &Path, db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Compact: remove stale index rows, VACUUM to reclaim space, optionally
-/// rebuild the FTS index from scratch.
+/// Compact: VACUUM to reclaim space. (The old FTS5 mirror is gone since v12;
+/// `rebuild_fts` is kept as a no-op flag for CLI back-compat and warns.)
 pub fn db_compact(conn: &Connection, rebuild_fts: bool) -> Result<String> {
     if rebuild_fts {
-        let n = super::fts::rebuild_fts(conn)?;
-        conn.execute_batch("VACUUM")?;
-        return Ok(format!("fts rebuilt ({n} docs), vacuumed"));
+        log::warn!("--rebuild-fts is a no-op since v12 (Tantivy is the lexical engine)");
     }
     conn.execute_batch("VACUUM")?;
     Ok("vacuumed".to_string())
@@ -244,7 +229,7 @@ mod tests {
         let db_path = dir.path().join("t.db");
         let db = crate::Database::open(&db_path).unwrap();
         let st = db_status(db.conn(), &db_path).unwrap();
-        assert_eq!(st.schema_version, 11);
+        assert_eq!(st.schema_version, 12);
         assert_eq!(st.files, 0);
         assert!(db_check(db.conn()).unwrap().is_empty());
         let dest = dir.path().join("b.db");

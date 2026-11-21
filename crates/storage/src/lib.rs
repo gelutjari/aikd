@@ -1,7 +1,6 @@
 pub mod atlas;
 pub mod cascade;
 pub mod events;
-pub mod fts;
 pub mod graph;
 pub mod maintenance;
 pub mod schema;

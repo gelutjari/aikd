@@ -16,21 +16,39 @@ pub struct ScanProgress {
     pub files_skipped: usize,
     pub chunks_created: usize,
     pub elapsed: Duration,
+    pub skipped_ext: usize,
+    pub skipped_filter: usize,
+    pub skipped_dir: usize,
+    pub skipped_size: usize,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ScanOptions {
     pub override_path: Option<PathBuf>,
 }
+/// Discovery outcome: matched files plus WHY others were skipped, so a
+/// "found 1 files" surprise is always explainable (C2).
+#[derive(Debug, Default)]
+pub struct Discovery {
+    pub files: Vec<PathBuf>,
+    pub skipped_ext: usize,
+    pub skipped_filter: usize,
+    pub skipped_dir: usize,
+    pub skipped_size: usize,
+}
 
 pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
+    discover_files_report(cfg, opts).files
+}
+
+pub fn discover_files_report(cfg: &Config, opts: &ScanOptions) -> Discovery {
     let scan_paths: Vec<String> = opts
         .override_path
         .as_ref()
         .map(|p| vec![aikd_core::platform::canonical_path(p)])
         .unwrap_or_else(|| cfg.scan.include_paths.iter().map(|s| s.replace('\\', "/")).collect());
 
-    let mut files = Vec::new();
+    let mut out = Discovery::default();
     for sp in &scan_paths {
         let expanded = shellexpand::tilde(sp);
         let root = Path::new(expanded.as_ref());
@@ -52,10 +70,12 @@ pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
                     .map(|n| cfg.should_exclude_dir(n))
                     .unwrap_or(false)
             }) {
+                out.skipped_dir += 1;
                 continue;
             }
             let fname = entry.file_name().to_str().unwrap_or("");
             if cfg.should_exclude_file(fname) || !cfg.matches_filename_filter(fname) {
+                out.skipped_filter += 1;
                 continue;
             }
             if !cfg.scan.include_extensions.iter().any(|ext| {
@@ -66,17 +86,19 @@ pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
                     .map(|s| s == ext.as_str())
                     .unwrap_or(false)
             }) {
+                out.skipped_ext += 1;
                 continue;
             }
             if let Ok(m) = entry.metadata() {
                 if !cfg.check_file_size(m.len()) {
+                    out.skipped_size += 1;
                     continue;
                 }
             }
-            files.push(entry.into_path());
+            out.files.push(entry.into_path());
         }
     }
-    files
+    out
 }
 
 pub fn filter_changed(files: Vec<PathBuf>, db: &Database) -> Vec<PathBuf> {
@@ -236,9 +258,14 @@ pub fn run_scan(
     let start = Instant::now();
 
     eprint!("[aikd] Discovering files...");
-    let files = discover_files(cfg, opts);
+    let disc = discover_files_report(cfg, opts);
+    let files = disc.files;
     let total_files = files.len();
     eprintln!(" found {total_files} files");
+    if disc.skipped_ext + disc.skipped_filter + disc.skipped_dir + disc.skipped_size > 0 {
+        eprintln!("[aikd] Skipped: {} by extension, {} by filter, {} by dir, {} by size — run `aikd init` for a smart config if code files are missing",
+            disc.skipped_ext, disc.skipped_filter, disc.skipped_dir, disc.skipped_size);
+    }
 
     eprint!("[aikd] Checking for changes...");
     let files_to_index = filter_changed(files, db);
@@ -247,14 +274,19 @@ pub fn run_scan(
 
     log::info!("Discovered {total_files} files, {files_found} to index");
 
+    let skipped = || ScanProgress {
+        files_found: 0,
+        files_indexed: 0,
+        files_skipped: total_files,
+        chunks_created: 0,
+        elapsed: start.elapsed(),
+        skipped_ext: disc.skipped_ext,
+        skipped_filter: disc.skipped_filter,
+        skipped_dir: disc.skipped_dir,
+        skipped_size: disc.skipped_size,
+    };
     if files_found == 0 {
-        return Ok(ScanProgress {
-            files_found: 0,
-            files_indexed: 0,
-            files_skipped: total_files,
-            chunks_created: 0,
-            elapsed: start.elapsed(),
-        });
+        return Ok(skipped());
     }
 
     let pb = ProgressBar::new(files_found as u64);
@@ -310,6 +342,10 @@ pub fn run_scan(
         files_skipped,
         chunks_created,
         elapsed: start.elapsed(),
+        skipped_ext: disc.skipped_ext,
+        skipped_filter: disc.skipped_filter,
+        skipped_dir: disc.skipped_dir,
+        skipped_size: disc.skipped_size,
     })
 }
 
