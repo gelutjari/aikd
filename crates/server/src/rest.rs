@@ -380,6 +380,9 @@ async fn handle_query(
     };
 
     let results = if hybrid {
+        if !cfg.embedding.enabled {
+            return Err(StatusCode::PRECONDITION_FAILED);
+        }
         let model_dir = cfg.model_path();
         if !embedder::is_model_downloaded(&model_dir) {
             return Err(StatusCode::PRECONDITION_FAILED);

@@ -134,7 +134,6 @@ name = "aikd-indexer"
 version = "2.0.0"
 dependencies = [
  "aikd-core",
- "aikd-embedder",
  "anndists",
  "anyhow",
  "hnsw_rs",

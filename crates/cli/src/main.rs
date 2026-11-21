@@ -344,18 +344,12 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
         info!("  Config created at {}", expanded);
     }
 
-    // Auto-download model
+    // Embedding is opt-in (ADR-0001): never auto-download the model here.
+    // Enable explicitly with: aikd model download && aikd embed
     let cfg = load_or_default(config_path);
     let model_dir = cfg.model_path();
     if !aikd_embedder::is_model_downloaded(&model_dir) {
-        info!("  Downloading embedding model...");
-        match aikd_embedder::download_model(&model_dir) {
-            Ok(()) => info!("  Model downloaded ({})", embedder::MODEL_NAME),
-            Err(e) => einfo!(
-                "  Warning: Failed to download model: {}. Run: aikd model download",
-                e
-            ),
-        }
+        info!("  Embedding model not present (opt-in). Run: aikd model download && aikd embed");
     } else {
         info!("  Model already downloaded ({})", embedder::MODEL_NAME);
     }
@@ -688,8 +682,7 @@ fn cmd_query(config_path: &str, query: &str, params: &QueryParams) -> Result<()>
     if params.hybrid {
         let model_dir = cfg.model_path();
         if !embedder::is_model_downloaded(&model_dir) {
-            eprintln!("[aikd] Model not downloaded. Run: aikd model download");
-            return Ok(());
+            anyhow::bail!("Embedding model not downloaded (semantic is opt-in). Run: aikd model download && aikd embed. Falling back: omit --hybrid for lexical search.");
         }
         let mut model = embedder::create_model(&model_dir)?;
         let q_emb = model.embed(vec![query], None)?.remove(0);
@@ -782,6 +775,9 @@ fn cmd_stats(config_path: &str) -> Result<()> {
 
 fn cmd_embed(config_path: &str, _model: &str, _batch_size: usize) -> Result<()> {
     let cfg = load_or_default(config_path);
+    if !cfg.embedding.enabled {
+        anyhow::bail!("Semantic embedding is disabled (embedding.enabled=false). Set embedding.enabled=true in config to opt in, then run: aikd model download && aikd embed");
+    }
     let database = Database::open(&cfg.db_path())?;
     let count: i64 = database
         .conn()
@@ -890,9 +886,9 @@ fn cmd_remember(
     };
     let conv = session::remember(database.conn(), &sid, role, content, &[])?;
 
-    // Embed conversations if model is available
+    // Semantic is opt-in (ADR-0001): only embed when explicitly enabled in config.
     let model_dir = cfg.model_path();
-    if embedder::is_model_downloaded(&model_dir) {
+    if cfg.embedding.enabled && embedder::is_model_downloaded(&model_dir) {
         if let Err(e) = session::embed_conversations(database.conn(), &model_dir, &sid) {
             eprintln!("[aikd] Warning: failed to embed conversations: {e}");
         }

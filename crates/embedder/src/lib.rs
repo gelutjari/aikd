@@ -6,8 +6,7 @@ use std::path::Path;
 
 pub use aikd_core::fusion::reciprocal_rank_fusion;
 
-pub const MODEL_NAME: &str = "all-MiniLM-L6-v2";
-pub const DIMENSIONS: usize = 384;
+pub use aikd_core::{bytes_to_f32, f32_to_bytes, EMBEDDING_DIMENSIONS as DIMENSIONS, EMBEDDING_MODEL as MODEL_NAME};
 
 const HF_MODEL_URLS: &[(&str, &str)] = &[
     ("model.onnx", "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"),
@@ -264,20 +263,6 @@ pub fn export_chunks_for_embedding(conn: &Connection, output_path: &str) -> Resu
     Ok(items.len())
 }
 
-pub fn f32_to_bytes(v: &[f32]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(v.len() * 4);
-    for &f in v {
-        b.extend_from_slice(&f.to_le_bytes());
-    }
-    b
-}
-
-pub fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
-}
 
 pub struct EmbeddingCache {
     cache: parking_lot::Mutex<lru::LruCache<String, Vec<f32>>>,

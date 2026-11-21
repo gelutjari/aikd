@@ -175,14 +175,14 @@ impl VectorIndex {
 
     /// Load all embeddings from the database into the vector index.
     pub fn load_from_db(conn: &rusqlite::Connection, model_name: &str) -> Result<Self> {
-        let index = Self::new(aikd_embedder::DIMENSIONS);
+        let index = Self::new(aikd_core::EMBEDDING_DIMENSIONS);
         let mut stmt = conn.prepare("SELECT chunk_id, vector FROM embeddings WHERE model = ?1")?;
         let rows = stmt.query_map(rusqlite::params![model_name], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
         for row in rows {
             let (id, bytes) = row?;
-            let vec = aikd_embedder::bytes_to_f32(&bytes);
+            let vec = aikd_core::bytes_to_f32(&bytes);
             index.insert(&id, &vec);
         }
         Ok(index)

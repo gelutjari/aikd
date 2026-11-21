@@ -54,7 +54,7 @@ pub struct ChunkConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub enabled: bool,
     #[serde(default = "default_model")]
     pub model: String,
@@ -154,8 +154,8 @@ fn default_model_path() -> String {
         .to_string_lossy()
         .to_string()
 }
-fn default_true() -> bool {
-    true
+fn default_false() -> bool {
+    false
 }
 fn default_rest_port() -> u16 {
     9090
@@ -208,7 +208,7 @@ impl Default for ChunkConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
+            enabled: default_false(),
             model: default_model(),
             batch_size: default_auto(),
             device: default_device(),

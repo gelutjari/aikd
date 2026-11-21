@@ -132,9 +132,12 @@ impl AikdServer {
         let hybrid = params.hybrid.unwrap_or(false);
 
         if hybrid {
+            if !cfg.embedding.enabled {
+                return "Semantic embedding is disabled (embedding.enabled=false). Set embedding.enabled=true in config to opt in, then run: aikd model download && aikd embed. Falling back: query without hybrid for lexical search.".to_string();
+            }
             let model_dir = cfg.model_path();
             if !embedder::is_model_downloaded(&model_dir) {
-                return "Model not downloaded. Run: aikd model download".to_string();
+                return "Embedding model not downloaded (semantic is opt-in). Run: aikd model download && aikd embed".to_string();
             }
             let mut model = match embedder::create_model(&model_dir) {
                 Ok(m) => m,
