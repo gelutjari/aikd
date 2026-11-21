@@ -152,16 +152,27 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
 
                 // Batch store new/changed files using scanner
                 if !to_index.is_empty() {
+                    let wpaths: Vec<String> = to_index.iter().map(|(p, _)| p.clone()).collect();
+                    let stale = aikd_scanner::replaced_chunk_ids(&database, &wpaths);
                     if let Err(e) = aikd_scanner::store_chunks(&to_index, &database) {
                         log::warn!("Failed to store chunks: {e}");
                     }
-                    // Update Tantivy index for changed files
-                    if let Err(e) = aikd_scanner::update_tantivy(&to_index, &tantivy) {
+                    // Incremental index replace (never clear the whole index)
+                    if let Err(e) =
+                        aikd_scanner::update_tantivy_incremental(&to_index, &stale, &tantivy)
+                    {
                         log::warn!("Failed to update tantivy: {e}");
                     }
                 }
-
-                // Remove deleted files
+                // Remove deleted files: drop their docs from the search index
+                // first (chunk IDs must be read before DB rows are gone),
+                // then delete their rows from the database.
+                if !to_remove.is_empty() {
+                    if let Err(e) = aikd_scanner::remove_from_tantivy(&database, &tantivy, &to_remove)
+                    {
+                        log::warn!("Failed to remove docs from tantivy: {e}");
+                    }
+                }
                 for ps in &to_remove {
                     let tx = database.begin_transaction()?;
                     if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(

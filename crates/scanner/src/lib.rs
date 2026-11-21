@@ -169,8 +169,29 @@ pub fn store_chunks(indexed: &[(String, Vec<Chunk>)], db: &Database) -> Result<(
     Ok(())
 }
 
-pub fn update_tantivy(indexed: &[(String, Vec<Chunk>)], tantivy: &TantivyEngine) -> Result<()> {
-    tantivy.clear()?;
+pub fn replaced_chunk_ids(db: &Database, paths: &[String]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for ps in paths {
+        if let Ok(fid) = db.conn().query_row::<i64, _, _>(
+            "SELECT id FROM files WHERE path=?1",
+            rusqlite::params![ps],
+            |r| r.get(0),
+        ) {
+            if let Ok(mut stmt) = db
+                .conn()
+                .prepare("SELECT id FROM chunks WHERE file_id=?1")
+            {
+                if let Ok(rows) = stmt.query_map(rusqlite::params![fid], |r| r.get::<_, String>(0)) {
+                    ids.extend(rows.filter_map(|r| r.ok()));
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Add freshly chunked documents to the search index (no deletion, no clear).
+pub fn add_to_tantivy(indexed: &[(String, Vec<Chunk>)], tantivy: &TantivyEngine) -> Result<()> {
     let tc: Vec<(String, String, String, String)> = indexed
         .iter()
         .flat_map(|(p, cs)| {
@@ -187,6 +208,23 @@ pub fn update_tantivy(indexed: &[(String, Vec<Chunk>)], tantivy: &TantivyEngine)
     tantivy.index_chunks(&tc)?;
     Ok(())
 }
+
+pub fn update_tantivy_incremental(
+    indexed: &[(String, Vec<Chunk>)],
+    stale_ids: &[String],
+    tantivy: &TantivyEngine,
+) -> Result<()> {
+    tantivy.delete_chunks(stale_ids)?;
+    add_to_tantivy(indexed, tantivy)?;
+    Ok(())
+}
+
+pub fn remove_from_tantivy(db: &Database, tantivy: &TantivyEngine, paths: &[String]) -> Result<()> {
+    let ids = replaced_chunk_ids(db, paths);
+    tantivy.delete_chunks(&ids)?;
+    Ok(())
+}
+
 
 pub fn run_scan(
     cfg: &Config,
@@ -252,10 +290,14 @@ pub fn run_scan(
         chunks_created,
         indexed.len()
     );
+    // Collect stale chunk IDs BEFORE store_chunks deletes them, so the
+    // search index can drop exactly the replaced documents (no clear()).
+    let paths: Vec<String> = indexed.iter().map(|(p, _)| p.clone()).collect();
+    let stale_ids = replaced_chunk_ids(db, &paths);
     store_chunks(&indexed, db)?;
 
     eprint!("[aikd] Updating search index...");
-    update_tantivy(&indexed, tantivy)?;
+    update_tantivy_incremental(&indexed, &stale_ids, tantivy)?;
     eprintln!(" done");
 
     let files_indexed = indexed.len();

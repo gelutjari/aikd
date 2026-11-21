@@ -266,6 +266,21 @@ impl TantivyEngine {
         Ok(())
     }
 
+    /// Delete documents for the given chunk IDs without touching the rest of the index.
+    /// Uses the `chunk_id` STRING field so terms match exactly.
+    pub fn delete_chunks(&self, chunk_ids: &[String]) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+        let mut writer: IndexWriter = self.index.writer(50_000_000)?;
+        for id in chunk_ids {
+            writer.delete_term(Term::from_field_text(self.field_chunk_id, id));
+        }
+        writer.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
     pub fn clear(&self) -> Result<()> {
         self.clear_with_heap(50_000_000)
     }
@@ -681,5 +696,29 @@ mod tests {
         let filters = SearchFilters::default();
         let results = engine.search("content", 10, &filters).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_delete_chunks_keeps_other_docs() {
+        // Regression: incremental scan must not wipe the whole index.
+        let dir = tempfile::tempdir().unwrap();
+        let engine = TantivyEngine::open(dir.path()).unwrap();
+        engine
+            .index_chunks(&[
+                ("c1".into(), "/a.md".into(), "H".into(), "alpha content".into()),
+                ("c2".into(), "/b.md".into(), "H".into(), "beta content".into()),
+            ])
+            .unwrap();
+        engine.delete_chunks(&["c1".to_string()]).unwrap();
+        engine
+            .index_chunks(&[("c3".into(), "/a.md".into(), "H".into(), "alpha revised".into())])
+            .unwrap();
+        let filters = SearchFilters::default();
+        let beta = engine.search("beta", 10, &filters).unwrap();
+        assert_eq!(beta.len(), 1);
+        assert_eq!(beta[0].chunk_id, "c2");
+        let alpha = engine.search("revised", 10, &filters).unwrap();
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(alpha[0].chunk_id, "c3");
     }
 }
