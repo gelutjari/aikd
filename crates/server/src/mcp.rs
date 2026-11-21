@@ -298,7 +298,7 @@ impl AikdServer {
         if count == 0 {
             return "No chunks to embed. Run scan first.".to_string();
         }
-        let batch_size = params.batch_size.unwrap_or(32);
+        let batch_size = params.batch_size.unwrap_or_else(|| aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode).batch_size);
         let model_dir = cfg.model_path();
         match embedder::embed_and_store(database.conn(), &model_dir, batch_size) {
             Ok(n) => format!("Embedded {n} chunks. Hybrid search now available."),

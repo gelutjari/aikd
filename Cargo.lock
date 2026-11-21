@@ -89,9 +89,11 @@ dependencies = [
  "indicatif 0.17.11",
  "log",
  "num_cpus",
+ "rayon",
  "rusqlite",
  "serde_json",
  "shellexpand",
+ "sysinfo",
  "tokio",
  "tracing-subscriber",
 ]

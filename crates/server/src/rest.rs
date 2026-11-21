@@ -697,7 +697,8 @@ async fn handle_embed(
     let database = state.database.lock().await;
     let model_dir = cfg.model_path();
     let start = std::time::Instant::now();
-    match embedder::embed_and_store(database.conn(), &model_dir, 32) {
+    let batch = aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode).batch_size;
+    match embedder::embed_and_store(database.conn(), &model_dir, batch) {
         Ok(n) => Ok(Json(ApiResponse {
             success: true,
             data: Some(serde_json::json!({

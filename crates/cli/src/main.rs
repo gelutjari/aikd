@@ -181,6 +181,8 @@ enum Commands {
     },
     #[command(about = "[CLI] Show system status (JSON)")]
     Status,
+    #[command(about = "[CLI] Diagnose health, resources, growth and stale state")]
+    Doctor,
     #[command(about = "[CLI] Wrap command with AIKD context injection")]
     Inject {
         #[arg(trailing_var_arg = true, required = true)]
@@ -505,6 +507,7 @@ async fn main() -> Result<()> {
             limit,
         } => cmd_recall(&cli.config, &query, session.as_deref(), limit, json_mode),
         Commands::Status => cmd_status(&cli.config, json_mode),
+        Commands::Doctor => cmd_doctor(&cli.config),
         Commands::Inject { command } => cmd_inject(&cli.config, &command),
         Commands::Benchmark => cmd_benchmark(&cli.config).await,
         Commands::Session { action } => cmd_session(&cli.config, action, json_mode),
@@ -825,6 +828,10 @@ fn cmd_daemon_pid() -> Result<()> {
 
 fn cmd_scan(config_path: &str, override_path: Option<&str>) -> Result<()> {
     let cfg = load_or_default(config_path);
+    // Enforce worker cap: bound the global rayon pool to the resource profile.
+    // (One-shot CLI process; `build_global` no-ops if already initialized.)
+    let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
+    let _ = rayon::ThreadPoolBuilder::new().num_threads(profile.parallelism.max(1)).build_global();
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
 
@@ -1201,6 +1208,99 @@ fn cmd_status(config_path: &str, json: bool) -> Result<()> {
         println!("REST Port:   {}", cfg.server.rest_port);
     }
     Ok(())
+}
+
+/// Doctor (§19): live diagnostics — process RSS, DB/index/model sizes,
+/// index health, Atlas freshness, memory conflicts, integrity check.
+/// Every line comes from real state; warnings name the fix command.
+fn cmd_doctor(config_path: &str) -> Result<()> {
+    use sysinfo::{Pid, System};
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let conn = database.conn();
+    let qi = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(-1) };
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let rss_mb = sys.process(Pid::from(std::process::id() as usize))
+        .map(|p| p.memory() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(-1.0);
+    sys.refresh_memory();
+    let host_gb = sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+    let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
+    let db_mb = std::fs::metadata(cfg.db_path()).map(|m| m.len() as f64 / (1024.0 * 1024.0)).unwrap_or(-1.0);
+    let tantivy_mb = dir_mb(&cfg.tantivy_path());
+    let model_mb = dir_mb(&cfg.model_path());
+    let files = qi("SELECT COUNT(*) FROM files");
+    let chunks = qi("SELECT COUNT(*) FROM chunks");
+    let symbols = qi("SELECT COUNT(*) FROM code_symbols");
+    let events = qi("SELECT COUNT(*) FROM events");
+    let mem_rows: Vec<(String, i64)> = conn.prepare("SELECT status, COUNT(*) FROM memory GROUP BY status")
+        .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>()))
+        .unwrap_or_default();
+    let atlases: Vec<(String, String)> = conn.prepare("SELECT project_path, status FROM atlas")
+        .and_then(|mut s| s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>()))
+        .unwrap_or_default();
+    let integrity = aikd_storage::maintenance::db_check(conn).unwrap_or_default();
+    let mut warnings: Vec<String> = Vec::new();
+    if !integrity.is_empty() {
+        warnings.push(format!("integrity check found {} issue(s); run `aikd db check` for detail", integrity.len()));
+    }
+    for (p, st) in &atlases {
+        if st == "stale" {
+            warnings.push(format!("Atlas STALE for {p}; run `aikd project analyze --path {p}`"));
+        }
+    }
+    let conf: i64 = mem_rows.iter().find(|(s, _)| s == "conflicted").map(|(_, n)| *n).unwrap_or(0);
+    if conf > 0 {
+        warnings.push(format!("{conf} conflicted memor(ies); resolve with `aikd memory` supersede/archive, see `aikd handoff`"));
+    }
+    if db_mb > 500.0 {
+        warnings.push(format!("DB is {db_mb:.0} MB; consider `aikd db backup` then `aikd gc`/`aikd db compact`"));
+    }
+    if !aikd_embedder::SEMANTIC_COMPILED && cfg.embedding.enabled {
+        warnings.push("config enables embedding but this is a zero-ONNX build; set embedding.enabled=false or rebuild with --features semantic".to_string());
+    }
+    println!("=== AIKD Doctor ===");
+    println!("Process RSS:  {rss_mb:.1} MB (host RAM {host_gb:.1} GB, {cores} cores, mode {mode:?})",
+        cores = profile.cpu_cores, mode = cfg.resource.mode);
+    println!("Enforced caps: parallelism={} batch={} tantivy_heap={}MB cache={}MB debounce={}ms",
+        profile.parallelism, profile.batch_size, profile.tantivy_heap_mb, profile.cache_size_mb, profile.watcher_debounce_ms);
+    println!("DB: {db_mb:.1} MB (schema v{}) · tantivy {tantivy_mb:.1} MB · model dir {model_mb:.1} MB · semantic_compiled={}",
+        qi("SELECT version FROM schema_version LIMIT 1"), aikd_embedder::SEMANTIC_COMPILED);
+    println!("Index: files={files} chunks={chunks} symbols={symbols} events={events}");
+    print!("Memory:");
+    for (s, n) in &mem_rows {
+        print!(" {s}={n}");
+    }
+    println!();
+    println!("Atlas snapshots: {}", if atlases.is_empty() { "(none)".to_string() } else { atlases.iter().map(|(p, s)| format!("{p}[{s}]")).collect::<Vec<_>>().join(", ") });
+    println!("Integrity: {}", if integrity.is_empty() { "OK".to_string() } else { format!("{} issue(s)", integrity.len()) });
+    if warnings.is_empty() {
+        println!("Warnings: none — all healthy.");
+    } else {
+        println!("Warnings ({}):", warnings.len());
+        for w in &warnings {
+            println!("  ! {w}");
+        }
+    }
+    Ok(())
+}
+
+fn dir_mb(path: &std::path::Path) -> f64 {
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        if let Ok(md) = std::fs::metadata(&p) {
+            if md.is_file() {
+                total += md.len();
+            } else if let Ok(rd) = std::fs::read_dir(&p) {
+                for e in rd.flatten() {
+                    stack.push(e.path());
+                }
+            }
+        }
+    }
+    total as f64 / (1024.0 * 1024.0)
 }
 
 fn print_results(
