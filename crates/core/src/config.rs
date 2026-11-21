@@ -22,6 +22,8 @@ pub struct Config {
     pub filter: FilterConfig,
     #[serde(default)]
     pub resource: ResourceConfig,
+    #[serde(default)]
+    pub retention: RetentionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +102,24 @@ pub struct FilterConfig {
     pub content_exclude: Vec<String>,
     #[serde(default)]
     pub max_file_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Keep at most this many journal events per (project, workstream).
+    /// 0 = unlimited. Oldest by sequence are archived first.
+    #[serde(default = "default_events_max")]
+    pub events_max_per_workstream: usize,
+    /// Archive events older than this many days. 0 = disabled.
+    #[serde(default)]
+    pub events_max_age_days: u64,
+    /// Mark active memory STALE after this many days untouched. 0 = disabled.
+    #[serde(default)]
+    pub memory_stale_days: u64,
+}
+
+fn default_events_max() -> usize {
+    5000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +277,16 @@ impl Default for FilterConfig {
     }
 }
 
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            events_max_per_workstream: default_events_max(),
+            events_max_age_days: 0,
+            memory_stale_days: 0,
+        }
+    }
+}
+
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
@@ -276,6 +306,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             filter: FilterConfig::default(),
             resource: ResourceConfig::default(),
+            retention: RetentionConfig::default(),
         }
     }
 }

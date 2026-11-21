@@ -129,6 +129,71 @@ pub fn db_compact(conn: &Connection, rebuild_fts: bool) -> Result<String> {
 /// Garbage collect: drop DB rows for files that no longer exist on disk,
 /// drop orphan chunks/embeddings left by interrupted scans, then VACUUM.
 /// Returns (files_removed, chunks_removed).
+#[derive(Debug, Default)]
+pub struct RetentionReport {
+    pub events_archived: i64,
+    pub memory_marked_stale: i64,
+}
+
+/// Enforce the retention policy (§A): archive oldest journal events beyond
+/// `events_max_per_workstream` per (project, workstream), and mark active
+/// memory STALE after `memory_stale_days` untouched. Archiving deletes rows
+/// but only AFTER the Atlas snapshot for the project is refreshed, so the
+/// counts survive in `atlas` and the resume watermark (`MAX(sequence)`)
+/// stays valid — `list_events(since)` simply returns fewer old rows.
+pub fn enforce_retention(conn: &Connection, policy: &aikd_core::RetentionConfig) -> Result<RetentionReport> {
+    let mut report = RetentionReport::default();
+    if policy.events_max_per_workstream > 0 {
+        let streams: Vec<(String, String)> = conn
+            .prepare("SELECT DISTINCT project_id, workstream FROM events")
+            .and_then(|mut s| {
+                s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>())
+            })
+            .unwrap_or_default();
+        for (project, ws) in streams {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE project_id=?1 AND workstream=?2",
+                rusqlite::params![project, ws],
+                |r| r.get(0),
+            )?;
+            let over = count.saturating_sub(policy.events_max_per_workstream as i64);
+            if over > 0 {
+                // Refresh Atlas first so the archived knowledge is not lost.
+                let _ = crate::atlas::refresh_atlas(conn, &project);
+                report.events_archived += conn.execute(
+                    "DELETE FROM events WHERE (project_id, workstream, sequence) IN (
+                        SELECT project_id, workstream, sequence FROM events
+                        WHERE project_id=?1 AND workstream=?2 ORDER BY sequence ASC LIMIT ?3)",
+                    rusqlite::params![project, ws, over],
+                )? as i64;
+            }
+        }
+    }
+    if policy.events_max_age_days > 0 {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(policy.events_max_age_days as i64)).to_rfc3339();
+        let streams: Vec<String> = conn
+            .prepare("SELECT DISTINCT project_id FROM events WHERE timestamp < ?1")
+            .and_then(|mut s| {
+                s.query_map(rusqlite::params![cutoff], |r| r.get(0))
+                    .and_then(|rows| rows.collect::<std::result::Result<Vec<String>, _>>())
+            })
+            .unwrap_or_default();
+        for p in &streams {
+            let _ = crate::atlas::refresh_atlas(conn, p);
+        }
+        report.events_archived += conn.execute("DELETE FROM events WHERE timestamp < ?1", rusqlite::params![cutoff])? as i64;
+    }
+    if policy.memory_stale_days > 0 {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(policy.memory_stale_days as i64)).to_rfc3339();
+        report.memory_marked_stale += conn.execute(
+            "UPDATE memory SET status='stale', updated_at=?1 WHERE status='active' AND updated_at < ?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), cutoff],
+        )? as i64;
+    }
+    Ok(report)
+}
+
 pub fn gc(conn: &Connection, disk_check: bool) -> Result<(i64, i64)> {
     let paths: Vec<(i64, String)> = {
         let mut stmt = conn.prepare("SELECT id, path FROM files")?;
@@ -190,5 +255,39 @@ mod tests {
         db_restore(&dest, &r2).unwrap();
         let db2 = crate::Database::open(&r2).unwrap();
         assert!(db_check(db2.conn()).unwrap().is_empty());
+    }
+    #[test]
+    fn retention_archives_oldest_keeps_watermark_valid() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::run_migrations(&conn).unwrap();
+        for i in 0..10 {
+            crate::events::append_event(&conn, "/p", "ws", "agy", "s", "tool_call", &format!("src{i}"), "{}").unwrap();
+        }
+        assert_eq!(crate::events::latest_sequence(&conn, "/p", "ws").unwrap(), 10);
+        let policy = aikd_core::RetentionConfig { events_max_per_workstream: 4, events_max_age_days: 0, memory_stale_days: 0 };
+        let rep = enforce_retention(&conn, &policy).unwrap();
+        assert_eq!(rep.events_archived, 6);
+        // Newest 4 survive; watermark still the max sequence; resume works.
+        let all = crate::events::list_events(&conn, "/p", "ws", None, 0, 100).unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all.last().unwrap().sequence, 10);
+        // Memory untouched by event-only policy.
+        crate::memory::save_memory(&conn, "/p", "ws", "fact", "F", "b", "explicit", 1.0).unwrap();
+        let rep2 = enforce_retention(&conn, &policy).unwrap();
+        assert_eq!(rep2.memory_marked_stale, 0);
+    }
+
+    #[test]
+    fn retention_marks_stale_memory_by_age() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::run_migrations(&conn).unwrap();
+        let m = crate::memory::save_memory(&conn, "/p", "ws", "fact", "F", "b", "explicit", 1.0).unwrap();
+        // Backdate below the threshold.
+        conn.execute("UPDATE memory SET updated_at='2000-01-01T00:00:00+00:00' WHERE id=?1", rusqlite::params![m.id]).unwrap();
+        let policy = aikd_core::RetentionConfig { events_max_per_workstream: 0, events_max_age_days: 0, memory_stale_days: 30 };
+        let rep = enforce_retention(&conn, &policy).unwrap();
+        assert_eq!(rep.memory_marked_stale, 1);
+        let act = crate::memory::list_memory(&conn, "/p", Some("ws"), Some("fact"), false).unwrap();
+        assert!(act.is_empty());
     }
 }

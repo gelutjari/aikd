@@ -1570,6 +1570,7 @@ fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
     }
     let (files_removed, orphan_chunks) =
         aikd_storage::maintenance::gc(database.conn(), true)?;
+    let retention = aikd_storage::maintenance::enforce_retention(database.conn(), &cfg.retention)?;
     if json {
         println!(
             "{}",
@@ -1577,6 +1578,8 @@ fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
                 "files_removed": files_removed,
                 "orphan_chunks_removed": orphan_chunks,
                 "index_docs_removed": stale.len(),
+                "events_archived": retention.events_archived,
+                "memory_marked_stale": retention.memory_marked_stale,
             }))
             .unwrap_or_default()
         );
@@ -1584,6 +1587,10 @@ fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
         println!(
             "GC: {files_removed} file(s), {orphan_chunks} orphan chunk(s), {} index doc(s) removed",
             stale.len()
+        );
+        println!(
+            "Retention: {} event(s) archived, {} memor(ies) marked stale",
+            retention.events_archived, retention.memory_marked_stale
         );
     }
     Ok(())
