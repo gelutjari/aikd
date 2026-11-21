@@ -1,62 +1,64 @@
 # AIKD Implementation Status (single source of truth)
 
-Mulai: 2026-11-21 · Baseline commit: `a9c2495` (clean tree).
+Mulai: 2026-11-21 · Baseline commit: `a9c2495`.
 
-## P0 — Audit & baseline
+## P0 — Audit & baseline: DONE
 
-| Item | Status | Bukti |
-|---|---|---|
-| Baseline audit | DONE | `docs/audit/BASELINE_AUDIT.md` (§1–17) |
-| Dependency map | DONE | `docs/audit/DEPENDENCY_MAP.md` |
-| Baseline benchmark | IN PROGRESS | `cargo check` berjalan; `docs/benchmarks/BASELINE.md` menyusul |
-| Risk register | DONE | audit §16 (7 risiko top) |
+- `docs/audit/BASELINE_AUDIT.md` (§1–17), `DEPENDENCY_MAP.md`, `docs/benchmarks/BASELINE.md`, ADR-0001.
+- Baseline terukur: `cargo check` PASS, 87 test PASS / 0 FAIL.
 
-Temuan P0 (wajib diperbaiki sebelum klaim apa pun): incremental scan menghancurkan index BM25; auth fail-open + CORS `*` + scan arbitrer; daemon background broken; chunk < min_tokens hilang; hybrid ANN-only kosong; model auto-download di `init`; tanpa feature flags.
+## P1 — Semantic opt-in: DONE (`c1bb1a6`)
 
-## P1 — Core simplification
+- `embedding.enabled` default OFF; `init` tanpa auto-download; gate di CLI/MCP/REST; hybrid tanpa model = error jelas; `core::vector` pisahkan `indexer→embedder`; MCP terverifikasi tanpa model.
 
-| Item | Status |
-|---|---|
-| Embedding default OFF + no auto-download + lazy load | NOT STARTED |
-| Putus `indexer → embedder` (pindah DIMENSIONS/bytes util ke core) | NOT STARTED |
-| Feature-gate embedder/server/benchmark | NOT STARTED |
-| Verifikasi CLI/MCP tanpa semantic | NOT STARTED |
+## P2 — Storage & search: DONE (`6724f6a`, `f421e33`)
 
-Rencana slice pertama (kecil, aman, tanpa breaking): (1) hapus auto-download dari `cmd_init` + default `embedding.enabled=false`; (2) pindah `DIMENSIONS`/`f32_to_bytes`/`bytes_to_f32` ke `aikd-core`, hapus dep `indexer→embedder`; (3) verifikasi `cargo check` + scan/query BM25 offline.
+- Incremental index tanpa `clear()` (+regression test); migrasi v5 (FTS5 + trigger + UNIQUE sesi + guard versi); `aikd db status|check|backup|restore|compact`, `aikd gc`; ADR-0002.
+- Insiden uji teratasi: data bench dibersihkan, index pengguna di-rebuild (25.551 chunk), `--config` tidak mengisolasi `db_path` (didokumentasikan).
 
-## P2 — Storage & search
+## S1 — REST security: DONE (`764829b`)
 
-| Item | Status |
-|---|---|
-| Perbaiki `update_tantivy` incremental (delete-by-term, bukan clear) | NOT STARTED |
-| Satu service query dipakai CLI/MCP/REST | NOT STARTED |
-| FTS5 vs Tantivy benchmark | NOT STARTED (FTS5 belum dipakai sama sekali) |
-| `delete_file_cascade` + migrasi v5 (cascade, UNIQUE sesi, guard versi) | NOT STARTED |
-| DB diagnostics/backup/compact (`aikd db …`, `aikd gc`) | NOT STARTED |
+- Fail-closed auth, metrics di belakang auth, ApiError (status benar), rate limiter diperbaiki (ConnectInfo), sanitasi path scan, CORS localhost-only, secret excludes. Verifikasi live: 401s, token 200, traversal 400.
 
-## P3–P10
+## S2 — Daemon/UTF-8/hybrid guard: DONE (`ca7ecaf`)
 
-Belum dimulai. Pintu masuk P3 (symbol index) bergantung pada chunk ID deterministik — tanpa itu relasi symbol↔chunk tidak stabil lintas rescan.
+- Background daemon diperbaiki (REST-only, lifecycle start/pid/stop terverifikasi); UTF-8 char-safe; hybrid tanpa provenance dibuang + fallback BM25.
 
-## Aturan pelaporan
+## S3 — Cascade deletes: DONE (`c45de50`)
 
-Status hanya: PASS / FAIL / SKIPPED / NOT IMPLEMENTED. SKIPPED tidak dihitung PASS. Tidak ada benchmark palsu.
+- `storage::cascade` dipakai scanner/watcher/session-delete; bug FK session-delete terverifikasi sembuh.
 
-## Insiden uji (2026-11-21, sudah dimitigasi)
+## S4 — Correctness & cleanup: DONE (`6715674`)
 
-- Scan uji P1 (200 file sintetis) tanpa sadar memakai DB pengguna `~/.aikd/aikd.db` + bug `clear()` menghapus index Tantivy pengguna.
-- Mitigasi: 200 file uji + chunk + embedding dihapus dari DB (4196 file/25551 chunk tersisa, 0 bench); backup pra-kerja di `/tmp/aikd-rescue/`; Tantivy di-rebuild penuh dari SQLite (25.551 chunk) dan query terverifikasi kembali lintas-file.
-- Akar masalah: `--config` BEKERJA, tetapi `db_path`/`tantivy_path` default selalu global (`~/.aikd/`) — tidak ada isolasi data per config. Semua uji berikutnya WAJIB config terisolasi dengan db_path eksplisit; P2 perlu mode test terisolasi.
+- Chunk ID deterministik (blake3); bug min_tokens (merge, bukan buang); hapus MmapVectorIndex, validate_jwt, stream stub, 8 dep mati. 15/15 chunker.
 
-## P2-1 DONE (2026-11-21, commit 6724f6a)
+## P3 — Symbol index: DONE (`5f7ebc1`)
 
-- Incremental scan/watcher tidak lagi `clear()` seluruh index: `delete_chunks` per chunk_id + `update_tantivy_incremental` + `remove_from_tantivy`.
-- Regression test `test_delete_chunks_keeps_other_docs` (indexer 9/9 PASS); verifikasi live terisolasi: update 1 file, file lain tetap ketemu.
-- Sisa P2 (belum mulai): search backend abstraction + FTS5-vs-Tantivy benchmark; `delete_file_cascade` + migrasi v5; `aikd db …` + `aikd gc`; mode config terisolasi untuk uji.
+- `chunker::symbols` (scan isi baris, EXTRACTED, keyword ≤4 token, komentar dilewati); migrasi v6 (line_start/line_end); scanner mengisi `code_symbols`; CLI `aikd symbol` + MCP `symbol` dengan provenance file:line. Verifikasi live: `struct Vehicle 6-6`, `impl 10-10`.
 
-## P2 DONE (2026-11-21, commit f421e33)
+## P4 — Unified retrieval: DONE (`3123d26`)
 
-- Migrasi v5 live pada DB pengguna (4196 file / 25.551 chunk / FTS sinkron, `db check` OK). Harga: +12MB (+16%) pada DB 78MB.
-- `aikd db status|check|backup|restore|compact`, `aikd gc` — terverifikasi pada salinan terisolasi.
-- ADR-0002: Tantivy default, FTS5 backend kedua (fallback + fondasi session recall).
-- Temuan: DB pengguna punya 685 row basi (cache sementara yang sudah dihapus). `aikd gc` pada DB pengguna BELUM dijalankan — butuh persetujuan eksplisit.
+- Crate baru `aikd-context`: satu `run_query` untuk CLI/MCP/REST; lexical default, hybrid opt-in + `LexicalFallback` eksplisit; `ContextBudget` (max results + max chars, truncation dilaporkan). Duplikasi 3× dihapus. Verifikasi live CLI+MCP.
+
+## P5 — Structured memory: DONE (`979e150`)
+
+- Migrasi v7 (`memory`: kind/source/status/confidence/workstream/supersedes); `storage::memory` (save/list/supersede/active_tasks/latest_checkpoint); CLI `aikd memory save|list|supersede|task`; MCP memory_save/memory_list/memory_task (10 tools). Verifikasi live: supersede menutup keputusan lama.
+
+## ATT — Event journal, adapters, handoff, GUI: DONE (`4718364`, `fa324a8`)
+
+- Migrasi v8 (`events`: event_id PK idempoten, sequence monotonik); `storage::events` (append/list/resume/coverage); CLI `aikd event append|list` + `aikd handoff`; MCP `event_append` + `handoff` (15 tools); log ke stderr (stdio bersih); `/ui` dashboard data live; ADR-0003.
+- **Acceptance scenario PASS**: AGY via MCP (session_start, tool_call duplikat ter-dedupe, decision, task, checkpoint) → DSH via CLI `handoff` (tasks, checkpoint, decisions, events, next actions, watermark seq).
+
+## Keadaan akhir terverifikasi
+
+- `cargo check --workspace --all-targets`: 0 error, 0 warning.
+- `cargo test --workspace`: **109 passed / 0 failed**.
+- 15 commit di atas baseline, tree bersih.
+
+## Sisa jujur (tidak diklaim selesai)
+
+- P6 resource guard: profil ada tapi belum enforce batas RAM/worker; retention policy otomatis belum ada.
+- P8 GUI penuh (system-tray Windows): hanya `/ui` dashboard; tray + graph explorer belum.
+- P9 semantic specialist: masih model tunggal MiniLM, belum feature-gate crate (binary tetap link ONNX); lazy load = per-request, belum cache proses.
+- P10 release hardening: belum rilis Windows/Linux installer, belum security audit eksternal.
+- Simultaneous-write race (`get_or_create_session`) belum diperbaiki; `code_symbols` belum diisi untuk DB lama tanpa rescan (perlu `aikd scan` ulang).
