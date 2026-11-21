@@ -10,6 +10,9 @@ default = []
 # `semantic` links ONNX (fastembed/ort). Default builds are zero-ONNX:
 # semantic entry points fail honestly instead of downloading or inferring.
 semantic = ["dep:fastembed", "dep:reqwest", "dep:tokio"]
+# `semantic-ext` calls an external embedding HTTP endpoint (OpenAI
+# compatible). No ONNX, no model download — the provider owns inference.
+semantic-ext = ["dep:reqwest", "dep:tokio"]
 
 [dependencies]
 aikd-core = { path = "../core" }

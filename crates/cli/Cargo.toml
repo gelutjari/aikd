@@ -16,6 +16,9 @@ required-features = ["tray"]
 [features]
 default = []
 tray = ["dep:tray-icon", "dep:muda", "dep:winit"]
+semantic = ["aikd-embedder/semantic"]
+semantic-ext = ["aikd-embedder/semantic-ext"]
+
 [dependencies]
 aikd-core = { path = "../core" }
 aikd-storage = { path = "../storage" }

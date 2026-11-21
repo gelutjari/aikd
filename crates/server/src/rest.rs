@@ -394,11 +394,13 @@ async fn handle_query(
         hybrid,
         budget: aikd_context::ContextBudget::default(),
     };
-    let outcome = aikd_context::run_query(
+    let model_dir = cfg.model_path();
+    let (source, enabled) = aikd_context::SemanticSource::from_config(&cfg, &model_dir);
+    let outcome = aikd_context::run_query_with_source(
         &database,
         state.tantivy.clone(),
-        &cfg.model_path(),
-        cfg.embedding.enabled,
+        source,
+        enabled,
         &req,
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

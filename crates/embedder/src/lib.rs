@@ -13,6 +13,134 @@ use std::path::Path;
 /// semantic entry point must fail honestly instead of downloading or stubbing.
 pub const SEMANTIC_COMPILED: bool = cfg!(feature = "semantic");
 
+/// True when the `semantic-ext` HTTP provider backend is compiled in.
+/// Zero-ONNX: inference happens in an external process behind HTTP.
+pub const SEMANTIC_EXT_COMPILED: bool = cfg!(feature = "semantic-ext");
+
+/// External embedding provider (OpenAI-compatible HTTP endpoint).
+/// Implements the core [`aikd_core::SemanticProvider`] contract: AIKD owns
+/// schemas/provenance/lifecycle, the provider only fills inference.
+#[cfg(feature = "semantic-ext")]
+pub struct ExternalProvider {
+    pub name: String,
+    pub model_id: String,
+    pub dimensions: usize,
+    pub endpoint: String,
+    pub api_key: String,
+}
+
+#[cfg(feature = "semantic-ext")]
+impl ExternalProvider {
+    pub fn from_env(endpoint: &str, model: &str, api_key_env: &str) -> Result<Self> {
+        let api_key = std::env::var(api_key_env)
+            .map_err(|_| anyhow::anyhow!("env {api_key_env} is not set (key never lives in config)"))?;
+        if endpoint.is_empty() {
+            anyhow::bail!("embedding.endpoint is empty; set it to an OpenAI-compatible /embeddings URL");
+        }
+        Ok(Self { name: "external-http".into(), model_id: model.into(), dimensions: 0, endpoint: endpoint.into(), api_key })
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        // Never use reqwest::blocking inside a tokio runtime (panics on drop).
+        // Run the async fetch on a plain thread with its own runtime.
+        let endpoint = self.endpoint.clone();
+        let api_key = self.api_key.clone();
+        let model_id = self.model_id.clone();
+        let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
+        let job = move || -> Result<Vec<Vec<f32>>> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(Self::embed_batch_async(&endpoint, &api_key, &model_id, &owned))
+        };
+        match tokio::runtime::Handle::try_current() {
+            // Inside async context: escape to a plain OS thread and run the
+            // fetch there (no nesting: this thread drives no runtime).
+            Ok(_) => std::thread::spawn(job)
+                .join()
+                .map_err(|_| anyhow::anyhow!("embed thread panicked"))?,
+            Err(_) => job(),
+        }
+    }
+
+    async fn embed_batch_async(endpoint: &str, api_key: &str, model_id: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
+        let resp = client
+            .post(endpoint)
+            .bearer_auth(api_key)
+            .json(&serde_json::json!({"model": model_id, "input": texts}))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("embedding endpoint {endpoint} returned HTTP {}", resp.status());
+        }
+        let v: serde_json::Value = resp.json().await?;
+        let arr = v["data"].as_array().ok_or_else(|| anyhow::anyhow!("bad embeddings response: no data[]"))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let emb: Vec<f32> = item["embedding"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+                .unwrap_or_default();
+            if emb.is_empty() {
+                anyhow::bail!("bad embeddings response: empty vector");
+            }
+            out.push(emb);
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(feature = "semantic-ext")]
+impl aikd_core::SemanticProvider for ExternalProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+    fn is_available(&self) -> bool {
+        !self.endpoint.is_empty() && !self.api_key.is_empty()
+    }
+    fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.embed_batch(texts)
+    }
+}
+
+/// Store vectors from an external provider for chunks missing them.
+/// Dimensions are learned from the first response (provider-declared).
+#[cfg(feature = "semantic-ext")]
+pub fn embed_and_store_external(conn: &Connection, provider: &ExternalProvider, batch_size: usize) -> Result<usize> {
+    let mut stmt = conn.prepare("SELECT id, content FROM chunks WHERE id NOT IN (SELECT chunk_id FROM embeddings WHERE model = ?1)")?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map(rusqlite::params![provider.model_id()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut total = 0;
+    for chunk in rows.chunks(batch_size.max(1)) {
+        let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
+        let embeddings = provider.embed_batch(&texts)?;
+        for ((id, _), emb) in chunk.iter().zip(embeddings.iter()) {
+            conn.execute(
+                "INSERT OR REPLACE INTO embeddings (chunk_id, model, dimensions, vector) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, provider.model_id(), emb.len() as i64, aikd_core::f32_to_bytes(emb)],
+            )?;
+            total += 1;
+        }
+    }
+    Ok(total)
+}
+
 const HF_MODEL_URLS: &[(&str, &str)] = &[
     ("model.onnx", "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"),
     ("tokenizer.json", "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"),
@@ -226,5 +354,29 @@ mod tests {
         assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
         let hits = vector_search(&[1.0, 0.0], &[("a".to_string(), vec![1.0, 0.0])], 1);
         assert_eq!(hits.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod ext_tests {
+    #[test]
+    #[cfg(feature = "semantic-ext")]
+    fn external_provider_contract_holds() {
+        use aikd_core::SemanticProvider;
+        // Missing env → honest error, never a silent stub.
+        assert!(super::ExternalProvider::from_env("http://127.0.0.1:9/embed", "m", "AIKD_TEST_MISSING_KEY_XYZ").is_err());
+        // Empty endpoint → honest error even with key present.
+        std::env::set_var("AIKD_TEST_KEY_TMP", "k");
+        assert!(super::ExternalProvider::from_env("", "m", "AIKD_TEST_KEY_TMP").is_err());
+        std::env::remove_var("AIKD_TEST_KEY_TMP");
+        assert!(super::SEMANTIC_EXT_COMPILED);
+        assert!(!super::SEMANTIC_COMPILED);
+    }
+
+    #[test]
+    #[cfg(not(any(feature = "semantic-ext", feature = "semantic")))]
+    fn zero_onnx_stays_zero() {
+        assert!(!super::SEMANTIC_COMPILED);
+        assert!(!super::SEMANTIC_EXT_COMPILED);
     }
 }

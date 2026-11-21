@@ -887,11 +887,13 @@ fn cmd_query(config_path: &str, query: &str, params: &QueryParams) -> Result<()>
         hybrid: params.hybrid,
         budget: aikd_context::ContextBudget::default(),
     };
-    let outcome = aikd_context::run_query(
+    let model_dir = cfg.model_path();
+    let (source, enabled) = aikd_context::SemanticSource::from_config(&cfg, &model_dir);
+    let outcome = aikd_context::run_query_with_source(
         &database,
         std::sync::Arc::new(tantivy),
-        &cfg.model_path(),
-        cfg.embedding.enabled,
+        source,
+        enabled,
         &req,
     );
     let outcome = match outcome {
@@ -983,10 +985,37 @@ fn cmd_stats(config_path: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "semantic-ext")]
+fn cmd_embed_external(_config_path: &str, cfg: &aikd_core::Config) -> Result<()> {
+    use aikd_core::SemanticProvider;
+    let database = Database::open(&cfg.db_path())?;
+    let provider = embedder::ExternalProvider::from_env(&cfg.embedding.endpoint, &cfg.embedding.model, &cfg.embedding.api_key_env)?;
+    if !provider.is_available() {
+        anyhow::bail!("external provider unavailable (endpoint/key)");
+    }
+    let batch: usize = cfg.embedding.batch_size.parse().unwrap_or(32);
+    let n = embedder::embed_and_store_external(database.conn(), &provider, batch)?;
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "status": "ok", "provider": provider.name(), "model": provider.model_id(), "embeddings_created": n,
+    })).unwrap_or_default());
+    Ok(())
+}
+
+#[cfg(not(feature = "semantic-ext"))]
+fn cmd_embed_external(_config_path: &str, cfg: &aikd_core::Config) -> Result<()> {
+    let _ = cfg;
+    anyhow::bail!("provider=external needs the semantic-ext build: cargo build --features semantic-ext (zero-ONNX HTTP provider, no model download)")
+}
+
 fn cmd_embed(config_path: &str, _model: &str, _batch_size: usize) -> Result<()> {
     let cfg = load_or_default(config_path);
     if !cfg.embedding.enabled {
-        anyhow::bail!("Semantic embedding is disabled (embedding.enabled=false). Set embedding.enabled=true in config to opt in, then run: aikd model download && aikd embed");
+        anyhow::bail!("Semantic embedding is disabled (embedding.enabled=false). Set embedding.enabled=true in config to opt in");
+    }
+    // External HTTP provider: zero-ONNX, no model download. The provider
+    // owns inference behind the SemanticProvider contract (§E).
+    if cfg.embedding.provider == "external" {
+        return cmd_embed_external(config_path, &cfg);
     }
     let database = Database::open(&cfg.db_path())?;
     let count: i64 = database
@@ -1774,11 +1803,13 @@ fn cmd_context_inspect(config_path: &str, query: &str, limit: usize, hybrid: boo
         hybrid,
         budget: aikd_context::ContextBudget::default(),
     };
+    let model_dir = cfg.model_path();
+    let (source, enabled) = aikd_context::SemanticSource::from_config(&cfg, &model_dir);
     let insp = aikd_context::inspect_context(
         &database,
         std::sync::Arc::new(tantivy),
-        &cfg.model_path(),
-        cfg.embedding.enabled,
+        source,
+        enabled,
         &req,
     )?;
     println!("CONTEXT REQUEST\n  Task: {query}\n");

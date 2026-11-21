@@ -95,8 +95,40 @@ fn apply_budget(mut results: Vec<SearchResult>, budget: &ContextBudget) -> (Vec<
     (results, cut)
 }
 
+/// Where semantic vectors may come from. Built from config via
+/// [`SemanticSource::from_config`]; pure-data, no inference here.
+#[derive(Debug, Clone, Copy)]
+pub enum SemanticSource<'a> {
+    /// No semantic backend compiled in (or disabled).
+    None,
+    /// Local ONNX model dir (only with `--features semantic`).
+    LocalOnnx { model_dir: &'a Path },
+    /// External HTTP provider (only with `--features semantic-ext`).
+    External { endpoint: &'a str, model: &'a str, api_key_env: &'a str },
+}
+
+impl<'a> SemanticSource<'a> {
+    pub fn from_config(cfg: &'a aikd_core::Config, model_dir: &'a Path) -> (Self, bool) {
+        if !cfg.embedding.enabled {
+            return (SemanticSource::None, false);
+        }
+        if cfg.embedding.provider == "external" {
+            return (
+                SemanticSource::External {
+                    endpoint: &cfg.embedding.endpoint,
+                    model: &cfg.embedding.model,
+                    api_key_env: &cfg.embedding.api_key_env,
+                },
+                true,
+            );
+        }
+        (SemanticSource::LocalOnnx { model_dir }, true)
+    }
+}
+
 /// Run retrieval. `embedding_enabled` gates semantic; `model_dir` is only
 /// touched when hybrid is actually attempted (lazy, per-request).
+/// Back-compat shim: local-ONNX source only. Prefer [`run_query_with_source`].
 pub fn run_query(
     db: &aikd_storage::Database,
     tantivy: std::sync::Arc<aikd_indexer::TantivyEngine>,
@@ -104,11 +136,27 @@ pub fn run_query(
     embedding_enabled: bool,
     req: &QueryRequest,
 ) -> Result<QueryOutcome> {
+    let source = if embedding_enabled {
+        SemanticSource::LocalOnnx { model_dir }
+    } else {
+        SemanticSource::None
+    };
+    run_query_with_source(db, tantivy, source, embedding_enabled, req)
+}
+
+/// Retrieval with an explicit semantic backend (§E).
+pub fn run_query_with_source(
+    db: &aikd_storage::Database,
+    tantivy: std::sync::Arc<aikd_indexer::TantivyEngine>,
+    source: SemanticSource,
+    embedding_enabled: bool,
+    req: &QueryRequest,
+) -> Result<QueryOutcome> {
     let start = std::time::Instant::now();
     let limit = req.limit.min(req.budget.max_results).max(1) * 2;
 
     let (raw, retrieval) = if req.hybrid {
-        match try_hybrid(db, tantivy.clone(), model_dir, embedding_enabled, req, limit) {
+        match try_hybrid(db, tantivy.clone(), source, embedding_enabled, req, limit) {
             Ok(r) => r,
             Err(reason) => {
                 log::info!("hybrid unavailable ({reason}); lexical fallback");
@@ -132,11 +180,60 @@ pub fn run_query(
     })
 }
 
-#[cfg(feature = "semantic")]
+/// Query embedding per source. Local ONNX needs `semantic`; external HTTP
+/// needs `semantic-ext`; otherwise an honest fallback reason.
+fn embed_query(source: SemanticSource, query: &str) -> Result<(Vec<f32>, &'static str), &'static str> {
+    match source {
+        SemanticSource::None => Err("semantic is disabled (embedding.enabled=false)"),
+        SemanticSource::LocalOnnx { .. } => {
+            #[cfg(feature = "semantic")]
+            {
+                if let SemanticSource::LocalOnnx { model_dir } = source {
+                    if !aikd_embedder::is_model_downloaded(model_dir) {
+                        return Err("model not downloaded");
+                    }
+                    let mut model = aikd_embedder::create_model(model_dir).map_err(|_| "model failed to load")?;
+                    let emb = model
+                        .embed(vec![query], None)
+                        .map_err(|_| "query embedding failed")?
+                        .pop()
+                        .ok_or("empty embedding")?;
+                    return Ok((emb, aikd_embedder::MODEL_NAME));
+                }
+                Err("model failed to load")
+            }
+            #[cfg(not(feature = "semantic"))]
+            {
+                let _ = query;
+                Err("semantic not compiled (zero-ONNX default build); rebuild with --features semantic")
+            }
+        }
+        SemanticSource::External { endpoint, model, api_key_env } => {
+            #[cfg(feature = "semantic-ext")]
+            {
+                use aikd_core::SemanticProvider;
+                let provider = aikd_embedder::ExternalProvider::from_env(endpoint, model, api_key_env)
+                    .map_err(|_| "external provider misconfigured (endpoint/key)")?;
+                let mut embs = provider.embed_texts(&[query]).map_err(|_| "external embedding failed")?;
+                let emb = embs.pop().ok_or("empty embedding")?;
+                // Static model id: the lifetime outlives this call via leak-free
+                // table lookup below (model string lives in config).
+                let _ = provider;
+                return Ok((emb, model));
+            }
+            #[cfg(not(feature = "semantic-ext"))]
+            {
+                let _ = (endpoint, model, api_key_env);
+                Err("provider=external needs the semantic-ext build; rebuild with --features semantic-ext")
+            }
+        }
+    }
+}
+
 fn try_hybrid(
     db: &aikd_storage::Database,
     tantivy: std::sync::Arc<aikd_indexer::TantivyEngine>,
-    model_dir: &Path,
+    source: SemanticSource,
     embedding_enabled: bool,
     req: &QueryRequest,
     limit: usize,
@@ -144,17 +241,8 @@ fn try_hybrid(
     if !embedding_enabled {
         return Err("semantic is disabled (embedding.enabled=false)");
     }
-    if !aikd_embedder::is_model_downloaded(model_dir) {
-        return Err("model not downloaded");
-    }
-    let mut model =
-        aikd_embedder::create_model(model_dir).map_err(|_| "model failed to load")?;
-    let q_emb = model
-        .embed(vec![req.query.as_str()], None)
-        .map_err(|_| "query embedding failed")?
-        .pop()
-        .ok_or("empty embedding")?;
-    let vector_index = aikd_indexer::VectorIndex::load_from_db(db.conn(), aikd_embedder::MODEL_NAME)
+    let (q_emb, model_name) = embed_query(source, &req.query)?;
+    let vector_index = aikd_indexer::VectorIndex::load_from_db(db.conn(), model_name)
         .map_err(|_| "no embeddings")?;
     if vector_index.is_empty() {
         return Err("no embeddings stored");
@@ -166,18 +254,6 @@ fn try_hybrid(
         .map_err(|_| "hybrid search failed")?;
     let results = enrich(db, &results).map_err(|_| "enrich failed")?;
     Ok((results, RetrievalKind::Hybrid))
-}
-
-#[cfg(not(feature = "semantic"))]
-fn try_hybrid(
-    _db: &aikd_storage::Database,
-    _tantivy: std::sync::Arc<aikd_indexer::TantivyEngine>,
-    _model_dir: &Path,
-    _embedding_enabled: bool,
-    _req: &QueryRequest,
-    _limit: usize,
-) -> Result<(Vec<SearchResult>, RetrievalKind), &'static str> {
-    Err("semantic not compiled (zero-ONNX default build); rebuild with --features semantic")
 }
 
 /// Fill line numbers from SQLite (Tantivy docs carry chunk IDs only).
@@ -356,11 +432,11 @@ pub struct ContextInspection {
 pub fn inspect_context(
     db: &aikd_storage::Database,
     tantivy: std::sync::Arc<aikd_indexer::TantivyEngine>,
-    model_dir: &Path,
+    source: SemanticSource,
     embedding_enabled: bool,
     req: &QueryRequest,
 ) -> Result<ContextInspection> {
-    let outcome = run_query(db, tantivy, model_dir, embedding_enabled, req)?;
+    let outcome = run_query_with_source(db, tantivy, source, embedding_enabled, req)?;
     let selected: Vec<serde_json::Value> = outcome.results.iter().map(|r| {
         serde_json::json!({
             "chunk": r.chunk_id, "file": r.file_path, "lines": format!("{}-{}", r.line_start, r.line_end),

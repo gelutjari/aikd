@@ -225,11 +225,13 @@ impl AikdServer {
             hybrid,
             budget: aikd_context::ContextBudget::default(),
         };
-        let outcome = match aikd_context::run_query(
+        let model_dir = cfg.model_path();
+        let (source, enabled) = aikd_context::SemanticSource::from_config(&cfg, &model_dir);
+        let outcome = match aikd_context::run_query_with_source(
             &database,
             std::sync::Arc::new(tantivy),
-            &cfg.model_path(),
-            cfg.embedding.enabled,
+            source,
+            enabled,
             &req,
         ) {
             Ok(o) => o,

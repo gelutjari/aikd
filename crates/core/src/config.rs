@@ -66,6 +66,24 @@ pub struct EmbeddingConfig {
     pub device: String,
     #[serde(default = "default_compute_threads")]
     pub compute_threads: usize,
+    /// Inference backend: "none" (local ONNX via --features semantic),
+    /// "external" (HTTP endpoint below, zero-ONNX). Default "none".
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// OpenAI-compatible embeddings URL, e.g. https://api.example/v1/embeddings
+    #[serde(default)]
+    pub endpoint: String,
+    /// Env var holding the bearer key (never store the key in config).
+    #[serde(default = "default_key_env")]
+    pub api_key_env: String,
+}
+
+fn default_provider() -> String {
+    "none".to_string()
+}
+
+fn default_key_env() -> String {
+    "AIKD_EMBEDDING_KEY".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +258,9 @@ impl Default for EmbeddingConfig {
             batch_size: default_auto(),
             device: default_device(),
             compute_threads: default_compute_threads(),
+            provider: default_provider(),
+            endpoint: String::new(),
+            api_key_env: default_key_env(),
         }
     }
 }

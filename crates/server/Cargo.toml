@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 description = "AIKD MCP server and REST API"
 
+[features]
+default = []
+semantic = ["aikd-context/semantic"]
+semantic-ext = ["aikd-context/semantic-ext"]
+
 [dependencies]
 aikd-core = { path = "../core" }
 aikd-storage = { path = "../storage" }
