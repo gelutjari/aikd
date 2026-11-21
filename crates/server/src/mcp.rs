@@ -73,6 +73,36 @@ pub struct SymbolParams {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemorySaveParams {
+    #[schemars(description = "Kind: fact, decision, constraint, discovery, task, checkpoint")]
+    pub kind: String,
+    #[schemars(description = "Short title")]
+    pub title: String,
+    #[schemars(description = "Full body")]
+    pub body: String,
+    #[schemars(description = "Workstream (default)")]
+    pub workstream: Option<String>,
+    #[schemars(description = "Provenance: explicit, agent-asserted, inferred")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemoryListParams {
+    #[schemars(description = "Kind filter (optional)")]
+    pub kind: Option<String>,
+    #[schemars(description = "Workstream (default)")]
+    pub workstream: Option<String>,
+    #[schemars(description = "Include superseded")]
+    pub all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemoryTaskParams {
+    #[schemars(description = "Workstream (default)")]
+    pub workstream: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AikdServer {
     state: AppState,
@@ -356,6 +386,79 @@ impl AikdServer {
             }
             Err(e) => format!("Error: {e}"),
         }
+    }
+
+    #[tool(description = "Save structured memory: fact, decision, constraint, discovery, task, or checkpoint with provenance")]
+    async fn memory_save(&self, Parameters(params): Parameters<MemorySaveParams>) -> String {
+        let cfg = self.state.config.lock().await.clone();
+        let database = match Database::open(&cfg.db_path()) {
+            Ok(db) => db,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let ws = params.workstream.unwrap_or_else(|| "default".to_string());
+        let source = params.source.unwrap_or_else(|| "agent-asserted".to_string());
+        const KINDS: [&str; 6] = ["fact", "decision", "constraint", "discovery", "task", "checkpoint"];
+        if !KINDS.contains(&params.kind.as_str()) {
+            return format!("Error: invalid kind '{}'", params.kind);
+        }
+        match aikd_storage::memory::save_memory(database.conn(), &project, &ws, &params.kind, &params.title, &params.body, &source, 0.9) {
+            Ok(m) => format!("Saved {} '{}' [{}] (id {})", m.kind, m.title, m.source, m.id),
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    #[tool(description = "List structured memory with provenance and lifecycle status")]
+    async fn memory_list(&self, Parameters(params): Parameters<MemoryListParams>) -> String {
+        let cfg = self.state.config.lock().await.clone();
+        let database = match Database::open(&cfg.db_path()) {
+            Ok(db) => db,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let ws = params.workstream.unwrap_or_else(|| "default".to_string());
+        match aikd_storage::memory::list_memory(database.conn(), &project, Some(&ws), params.kind.as_deref(), params.all.unwrap_or(false)) {
+            Ok(items) if items.is_empty() => "No memory items.".to_string(),
+            Ok(items) => {
+                let mut out = String::new();
+                for m in &items {
+                    out.push_str(&format!("[{}] {} — {} [{}|{}]\n  {}\n", m.kind, m.title, m.id, m.source, m.status, m.body.lines().next().unwrap_or("")));
+                }
+                out
+            }
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    #[tool(description = "Get active tasks and latest checkpoint for a workstream (resume point after compaction)")]
+    async fn memory_task(&self, Parameters(params): Parameters<MemoryTaskParams>) -> String {
+        let cfg = self.state.config.lock().await.clone();
+        let database = match Database::open(&cfg.db_path()) {
+            Ok(db) => db,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let ws = params.workstream.unwrap_or_else(|| "default".to_string());
+        let tasks = match aikd_storage::memory::active_tasks(database.conn(), &project, &ws) {
+            Ok(t) => t,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let cp = match aikd_storage::memory::latest_checkpoint(database.conn(), &project, &ws) {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let mut out = format!("Workstream: {ws}\n");
+        for t in &tasks {
+            out.push_str(&format!("\nTASK {} — {}\n{}\n", t.id, t.title, t.body));
+        }
+        if tasks.is_empty() {
+            out.push_str("(no active tasks)\n");
+        }
+        match &cp {
+            Some(c) => out.push_str(&format!("\nCHECKPOINT {} — {}\n{}\n", c.id, c.title, c.body)),
+            None => out.push_str("\n(no checkpoint)\n"),
+        }
+        out
     }
 }
 

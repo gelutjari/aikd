@@ -3,6 +3,7 @@ pub mod fts;
 pub mod maintenance;
 pub mod schema;
 pub mod symbols;
+pub mod memory;
 
 use anyhow::Result;
 use rusqlite::Connection;

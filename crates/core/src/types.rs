@@ -106,6 +106,24 @@ pub struct CodeSymbol {
     pub chunk_id: String,
 }
 
+/// Structured memory item (P5): typed knowledge with provenance, scope,
+/// confidence and lifecycle — separate from raw conversation archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryItem {
+    pub id: String,
+    pub project_path: String,
+    pub workstream: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub source: String,
+    pub status: String,
+    pub confidence: f64,
+    pub supersedes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

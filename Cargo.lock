@@ -236,6 +236,7 @@ dependencies = [
  "aikd-core",
  "anyhow",
  "blake3",
+ "chrono",
  "log",
  "r2d2",
  "r2d2_sqlite",
@@ -243,6 +244,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

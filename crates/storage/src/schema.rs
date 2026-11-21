@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -41,6 +41,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
     if current < 6 {
         migrate_v6(conn)?;
+    }
+    if current < 7 {
+        migrate_v7(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -285,6 +288,34 @@ fn migrate_v6(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(symbol_name);")?;
 
     log::info!("Migration v6 applied — code_symbols line ranges");
+    Ok(())
+}
+
+fn migrate_v7(conn: &Connection) -> Result<()> {
+    // Structured memory (P5): typed knowledge with provenance, scope,
+    // confidence and lifecycle. Source records stay in `conversations`;
+    // this table holds compiled durable memory.
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS memory (
+            id TEXT PRIMARY KEY,
+            project_path TEXT NOT NULL,
+            workstream TEXT NOT NULL DEFAULT 'default',
+            kind TEXT NOT NULL CHECK(kind IN ('fact','decision','constraint','discovery','task','checkpoint')),
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'explicit' CHECK(source IN ('explicit','agent-asserted','inferred')),
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','superseded','archived')),
+            confidence REAL NOT NULL DEFAULT 1.0,
+            supersedes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_project ON memory(project_path, workstream, kind, status);
+        ",
+    )?;
+
+    log::info!("Migration v7 applied — structured memory table");
     Ok(())
 }
 

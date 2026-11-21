@@ -216,6 +216,53 @@ enum Commands {
         #[arg(short, long, default_value = "20")]
         limit: usize,
     },
+
+    #[command(about = "[CLI] Structured memory: facts, decisions, constraints, tasks, checkpoints")]
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    #[command(about = "Save a memory item (kind: fact|decision|constraint|discovery|task|checkpoint)")]
+    Save {
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long, default_value = "default")]
+        workstream: String,
+        #[arg(long, default_value = "explicit")]
+        source: String,
+        #[arg(long, default_value = "1.0")]
+        confidence: f64,
+    },
+    #[command(about = "List memory items with optional kind filter")]
+    List {
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long, default_value = "default")]
+        workstream: String,
+        #[arg(long)]
+        all: bool,
+    },
+    #[command(about = "Retire a memory item and record its replacement")]
+    Supersede {
+        id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: String,
+    },
+    #[command(about = "Show active tasks and latest checkpoint for a workstream")]
+    Task {
+        #[arg(long, default_value = "default")]
+        workstream: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -281,7 +328,7 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "model": embedder::MODEL_NAME,
-                "db_schema": 6,
+                "db_schema": 7,
             }))
             .unwrap_or_default()
         );
@@ -369,6 +416,7 @@ async fn main() -> Result<()> {
         Commands::Db { action } => cmd_db(&cli.config, action, json_mode),
         Commands::Gc => cmd_gc(&cli.config, json_mode),
         Commands::Symbol { name, limit } => cmd_symbol(&cli.config, &name, limit, json_mode),
+        Commands::Memory { action } => cmd_memory(&cli.config, action, json_mode),
     }
 }
 
@@ -1367,6 +1415,89 @@ fn cmd_symbol(config_path: &str, name: &str, limit: usize, json: bool) -> Result
             );
             if !s.signature.is_empty() {
                 println!("    {}", s.signature);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()> {
+    use aikd_storage::memory::{active_tasks, latest_checkpoint, list_memory, save_memory, supersede};
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let project = cfg
+        .scan
+        .include_paths
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    match action {
+        MemoryAction::Save { kind, title, body, workstream, source, confidence } => {
+            const KINDS: [&str; 6] = ["fact", "decision", "constraint", "discovery", "task", "checkpoint"];
+            if !KINDS.contains(&kind.as_str()) {
+                anyhow::bail!("Invalid kind '{kind}'. Use one of: fact, decision, constraint, discovery, task, checkpoint");
+            }
+            if !["explicit", "agent-asserted", "inferred"].contains(&source.as_str()) {
+                anyhow::bail!("Invalid source '{source}'. Use: explicit, agent-asserted, inferred");
+            }
+            let m = save_memory(database.conn(), &project, &workstream, &kind, &title, &body, &source, confidence)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&m).unwrap_or_default());
+            } else {
+                println!("Saved {} '{}' [{}] (id {})", m.kind, m.title, m.source, m.id);
+            }
+        }
+        MemoryAction::List { kind, workstream, all } => {
+            let items = list_memory(database.conn(), &project, Some(&workstream), kind.as_deref(), all)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&items).unwrap_or_default());
+            } else if items.is_empty() {
+                println!("No memory items.");
+            } else {
+                for m in &items {
+                    println!("[{}] {} — {} [{}|{}|conf {:.2}]", m.kind, m.title, m.id, m.source, m.status, m.confidence);
+                    println!("    {}", m.body.lines().next().unwrap_or(""));
+                }
+            }
+        }
+        MemoryAction::Supersede { id, title, body } => {
+            // Carry over kind/project/workstream/source from the retired item.
+            let old: Option<aikd_core::MemoryItem> = list_memory(database.conn(), &project, None, None, true)?
+                .into_iter()
+                .find(|m| m.id == id);
+            let old = old.ok_or_else(|| anyhow::anyhow!("No memory item with id {id}"))?;
+            let m = supersede(database.conn(), &id, &project, &old.workstream, &old.kind, &title, &body, &old.source, old.confidence)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&m).unwrap_or_default());
+            } else {
+                println!("Superseded {} -> {} ('{}')", id, m.id, m.title);
+            }
+        }
+        MemoryAction::Task { workstream } => {
+            let tasks = active_tasks(database.conn(), &project, &workstream)?;
+            let cp = latest_checkpoint(database.conn(), &project, &workstream)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "workstream": workstream,
+                        "tasks": tasks,
+                        "checkpoint": cp,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                println!("Workstream: {workstream}");
+                for t in &tasks {
+                    println!("\nTASK {} — {}\n{}", t.id, t.title, t.body);
+                }
+                if tasks.is_empty() {
+                    println!("(no active tasks)");
+                }
+                match &cp {
+                    Some(c) => println!("\nCHECKPOINT {} — {}\n{}", c.id, c.title, c.body),
+                    None => println!("\n(no checkpoint)"),
+                }
             }
         }
     }
