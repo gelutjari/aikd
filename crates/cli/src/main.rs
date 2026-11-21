@@ -502,21 +502,28 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         let cfg = Config::load(config_path).unwrap_or_default();
         let port = cfg.server.rest_port;
 
-        let config_path_owned = config_path.to_string();
-        let rest_handle = tokio::spawn(async move {
-            aikd_server::rest::run_rest_server(&config_path_owned, port).await
-        });
+        // Background mode (AIKD_DAEMON_BG=1, stdin is null): run REST only.
+        // The MCP stdio server would exit immediately on EOF stdin and take
+        // the daemon down with it via the select! below.
+        if std::env::var("AIKD_DAEMON_BG").as_deref() == Ok("1") {
+            return aikd_server::rest::run_rest_server(config_path, port).await;
+        } else {
+            let config_path_owned = config_path.to_string();
+            let rest_handle = tokio::spawn(async move {
+                aikd_server::rest::run_rest_server(&config_path_owned, port).await
+            });
 
-        let config_path_owned2 = config_path.to_string();
-        let mcp_handle =
-            tokio::spawn(async move { aikd_server::mcp::run_server(&config_path_owned2).await });
+            let config_path_owned2 = config_path.to_string();
+            let mcp_handle =
+                tokio::spawn(async move { aikd_server::mcp::run_server(&config_path_owned2).await });
 
-        tokio::select! {
-            r = rest_handle => { let _ = r?; }
-            r = mcp_handle => { let _ = r?; }
-        }
+            tokio::select! {
+                r = rest_handle => { let _ = r?; }
+                r = mcp_handle => { let _ = r?; }
+            }
+            Ok::<(), anyhow::Error>(())
+        };
     } else {
-        // Write PID file for daemon management
         let pid_dir = shellexpand::tilde("~/.aikd");
         let pid_path = format!("{pid_dir}/aikd.pid");
         std::fs::create_dir_all(pid_dir.as_ref())?;
@@ -549,7 +556,7 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         #[cfg(unix)]
         {
             let child = std::process::Command::new(&aikd_path)
-                .args(["--config", config_path, "daemon", "--foreground"])
+                .args(["--config", config_path, "daemon", "foreground"]).env("AIKD_DAEMON_BG", "1")
                 .stdout(std::fs::File::create(&log_path)?)
                 .stderr(std::process::Stdio::null())
                 .stdin(std::process::Stdio::null())
@@ -564,7 +571,7 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         {
             use std::os::windows::process::CommandExt;
             let child = std::process::Command::new(&aikd_path)
-                .args(["--config", config_path, "daemon", "--foreground"])
+                .args(["--config", config_path, "daemon", "foreground"]).env("AIKD_DAEMON_BG", "1")
                 .stdout(std::fs::File::create(&log_path)?)
                 .stderr(std::process::Stdio::null())
                 .stdin(std::process::Stdio::null())
@@ -944,7 +951,7 @@ fn cmd_remember(
             "Remembered in session {}: [{}] {}",
             conv.session_id,
             conv.role,
-            &conv.content[..conv.content.len().min(100)]
+            conv.content.chars().take(100).collect::<String>()
         );
     }
     Ok(())
@@ -985,7 +992,7 @@ fn cmd_recall(
                 i + 1,
                 c.created_at,
                 c.role,
-                &c.content[..c.content.len().min(200)]
+                c.content.chars().take(200).collect::<String>()
             );
         }
     }
@@ -1376,7 +1383,7 @@ fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
     let context = session::recall(database.conn(), &session_id, "", 5)
         .unwrap_or_default()
         .iter()
-        .map(|c| format!("[{}]: {}", c.role, &c.content[..c.content.len().min(200)]))
+        .map(|c| format!("[{}]: {}", c.role, c.content.chars().take(200).collect::<String>()))
         .collect::<Vec<_>>()
         .join("\n");
 

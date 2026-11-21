@@ -284,7 +284,7 @@ impl AikdServer {
                 "Remembered [{}] {}: {}",
                 conv.session_id,
                 conv.role,
-                &conv.content[..conv.content.len().min(100)]
+                conv.content.chars().take(100).collect::<String>()
             ),
             Err(e) => format!("Error: {e}"),
         }
@@ -322,7 +322,7 @@ impl AikdServer {
                         i + 1,
                         c.created_at,
                         c.role,
-                        &c.content[..c.content.len().min(200)]
+                        c.content.chars().take(200).collect::<String>()
                     ));
                 }
                 out

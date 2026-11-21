@@ -434,23 +434,18 @@ impl HybridSearcher {
         // Fuse results using RRF
         let fused = reciprocal_rank_fusion(&bm25_ids, &ann_ids, k);
 
-        // Build final results using HashMap lookups (O(1) per item)
+        // Build final results using HashMap lookups (O(1) per item).
+        // ANN-only hits have no provenance (no path/content); they are
+        // skipped rather than returned as empty objects. If nothing with
+        // provenance survives, fall back to pure BM25.
         let mut results = Vec::with_capacity(limit);
         for (id, _score) in fused.iter().take(limit) {
             if let Some(r) = bm25_map.get(id.as_str()) {
                 results.push((*r).clone());
-            } else if let Some(ann_score) = ann_map.get(id.as_str()) {
-                results.push(SearchResult {
-                    chunk_id: id.clone(),
-                    file_path: String::new(),
-                    heading_hierarchy: String::new(),
-                    heading_text: String::new(),
-                    content: String::new(),
-                    line_start: 0,
-                    line_end: 0,
-                    score: *ann_score,
-                });
             }
+        }
+        if results.is_empty() && !bm25_results.is_empty() {
+            results = bm25_results.into_iter().take(limit).collect();
         }
 
         Ok(results)
