@@ -36,13 +36,6 @@ pub fn append_event(
     source_ref: &str,
     payload: &str,
 ) -> Result<AgentEvent> {
-    if let Ok(ev) = conn.query_row(
-        "SELECT event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence FROM events WHERE event_id = ?1",
-        rusqlite::params![format!("{project_id}:{agent_id}:{agent_session_id}:{event_type}:{source_ref}:{payload}")],
-        map_row,
-    ) {
-        return Ok(ev);
-    }
     // Deterministic ID = content hash, so retries dedupe naturally.
     let event_id = blake3::hash(
         format!("{project_id}\0{workstream}\0{agent_id}\0{agent_session_id}\0{event_type}\0{source_ref}\0{payload}").as_bytes(),
@@ -56,25 +49,53 @@ pub fn append_event(
     ) {
         return Ok(ev);
     }
+    // BEGIN IMMEDIATE serializes concurrent writers: the second blocks until
+    // the first commits, so MAX(sequence)+1 always sees the latest value.
+    // If the caller already holds a transaction, proceed best-effort.
+    let own_tx = conn.execute_batch("BEGIN IMMEDIATE").is_ok();
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let sequence: i64 = conn
-        .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |r| r.get(0))?;
-    conn.execute(
-        "INSERT INTO events (event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-        rusqlite::params![event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence],
-    )?;
-    Ok(AgentEvent {
-        event_id,
-        project_id: project_id.into(),
-        workstream: workstream.into(),
-        agent_id: agent_id.into(),
-        agent_session_id: agent_session_id.into(),
-        event_type: event_type.into(),
-        timestamp,
-        source_ref: source_ref.into(),
-        payload: payload.into(),
-        sequence,
-    })
+    let result = (|| -> Result<AgentEvent> {
+        let sequence: i64 = conn
+            .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |r| r.get(0))?;
+        // OR IGNORE: a racing duplicate event_id converges instead of failing.
+        conn.execute(
+            "INSERT OR IGNORE INTO events (event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            rusqlite::params![event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence],
+        )?;
+        Ok(AgentEvent {
+            event_id: event_id.clone(),
+            project_id: project_id.into(),
+            workstream: workstream.into(),
+            agent_id: agent_id.into(),
+            agent_session_id: agent_session_id.into(),
+            event_type: event_type.into(),
+            timestamp,
+            source_ref: source_ref.into(),
+            payload: payload.into(),
+            sequence,
+        })
+    })();
+    if own_tx {
+        match result {
+            Ok(ev) => {
+                conn.execute_batch("COMMIT")?;
+                // Re-read: a racing duplicate may have won; return the stored row.
+                if let Ok(stored) = conn.query_row(
+                    "SELECT event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence FROM events WHERE event_id = ?1",
+                    rusqlite::params![event_id],
+                    map_row,
+                ) {
+                    return Ok(stored);
+                }
+                return Ok(ev);
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+    }
+    result
 }
 
 /// List events for a (project, workstream), optionally filtered by type and
@@ -172,5 +193,45 @@ mod tests {
         let conn = setup();
         append_event(&conn, "/p", "ws1", "agy", "s1", "session_start", "", "{}").unwrap();
         assert!(list_events(&conn, "/p", "ws2", None, 0, 100).unwrap().is_empty());
+    }
+    #[test]
+    fn concurrent_appends_converge_with_unique_sequences() {
+        // 8 threads hammering the same stream on one shared file DB.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            super::super::schema::run_migrations(&conn).unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let conn = Connection::open(&path).unwrap();
+                    conn.execute_batch("PRAGMA busy_timeout=10000").unwrap();
+                    barrier.wait();
+                    for i in 0..10 {
+                        append_event(
+                            &conn, "/p", "ws", "agy", "s", "tool_call",
+                            &format!("t{t}-i{i}"), "{\"tool\":\"edit\"}",
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        let all = list_events(&conn, "/p", "ws", None, 0, 1000).unwrap();
+        assert_eq!(all.len(), 80);
+        let mut seqs: Vec<i64> = all.iter().map(|e| e.sequence).collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), 80, "sequences must be unique under concurrency");
+        assert_eq!(seqs, (1..=80).collect::<Vec<_>>());
     }
 }

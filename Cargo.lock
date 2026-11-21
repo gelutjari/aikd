@@ -227,6 +227,7 @@ dependencies = [
  "log",
  "rusqlite",
  "serde_json",
+ "tempfile",
  "uuid",
 ]
 

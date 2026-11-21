@@ -19,8 +19,17 @@ pub fn create_session(conn: &Connection, name: &str, project_path: &str) -> Resu
     })
 }
 
+/// Idempotent under concurrency: a UNIQUE index on `project_path` plus
+/// `INSERT OR IGNORE` means two racing writers converge on one row instead
+/// of one of them failing (or forking a duplicate session).
 pub fn get_or_create_session(conn: &Connection, project_path: &str) -> Result<Session> {
-    let existing = conn.query_row(
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO sessions (id, name, project_path, created_at, last_active) VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![id, format!("Session for {project_path}"), project_path, now, now],
+    )?;
+    let mut session: Session = conn.query_row(
         "SELECT id, name, project_path, created_at, last_active FROM sessions WHERE project_path = ?1 ORDER BY last_active DESC LIMIT 1",
         rusqlite::params![project_path],
         |row| Ok(Session {
@@ -30,20 +39,14 @@ pub fn get_or_create_session(conn: &Connection, project_path: &str) -> Result<Se
             created_at: row.get(3)?,
             last_active: row.get(4)?,
         }),
-    );
-
-    match existing {
-        Ok(mut session) => {
-            let now = chrono::Utc::now().to_rfc3339();
-            conn.execute(
-                "UPDATE sessions SET last_active = ?1 WHERE id = ?2",
-                rusqlite::params![now, session.id],
-            )?;
-            session.last_active = now;
-            Ok(session)
-        }
-        Err(_) => create_session(conn, &format!("Session for {project_path}"), project_path),
-    }
+    )?;
+    let now2 = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE sessions SET last_active = ?1 WHERE id = ?2",
+        rusqlite::params![now2, session.id],
+    )?;
+    session.last_active = now2;
+    Ok(session)
 }
 
 pub fn list_sessions(conn: &Connection) -> Result<Vec<Session>> {
@@ -262,5 +265,36 @@ mod tests {
         let (sc, cc, _ec) = get_session_stats(&conn).unwrap();
         assert_eq!(sc, 1);
         assert_eq!(cc, 1);
+    }
+    #[test]
+    fn test_concurrent_get_or_create_converges() {
+        // Racing writers on one file DB must converge on a single session row.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sess.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            schema::run_migrations(&conn).unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let conn = Connection::open(&path).unwrap();
+                    conn.execute_batch("PRAGMA busy_timeout=10000").unwrap();
+                    barrier.wait();
+                    get_or_create_session(&conn, "/project").unwrap().id
+                })
+            })
+            .collect();
+        let mut ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 1, "all racers must get the same session");
+        let conn = Connection::open(&path).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions WHERE project_path='/project'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }
