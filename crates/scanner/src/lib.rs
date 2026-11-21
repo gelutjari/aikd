@@ -133,16 +133,7 @@ pub fn store_chunks(indexed: &[(String, Vec<Chunk>)], db: &Database) -> Result<(
             rusqlite::params![ps],
             |r| r.get(0),
         ) {
-            tx.conn().execute(
-                "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)",
-                rusqlite::params![old_fid],
-            )?;
-            tx.conn().execute(
-                "DELETE FROM chunks WHERE file_id=?1",
-                rusqlite::params![old_fid],
-            )?;
-            tx.conn()
-                .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid])?;
+            aikd_storage::cascade::delete_file_id_cascade(tx.conn(), old_fid)?;
         }
 
         tx.conn().execute(

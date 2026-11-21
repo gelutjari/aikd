@@ -175,26 +175,17 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                 }
                 for ps in &to_remove {
                     let tx = database.begin_transaction()?;
-                    if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(
-                        "SELECT id FROM files WHERE path=?1",
-                        rusqlite::params![ps],
-                        |r| r.get(0),
-                    ) {
-                        if let Err(e) = tx.conn().execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)", rusqlite::params![old_fid]) {
-                            log::warn!("Failed to delete embeddings for {ps}: {e}");
-                        }
-                        if let Err(e) = tx.conn().execute(
-                            "DELETE FROM chunks WHERE file_id=?1",
-                            rusqlite::params![old_fid],
+                    if let Err(e) = (|| -> anyhow::Result<()> {
+                        if let Ok(old_fid) = tx.conn().query_row::<i64, _, _>(
+                            "SELECT id FROM files WHERE path=?1",
+                            rusqlite::params![ps],
+                            |r| r.get(0),
                         ) {
-                            log::warn!("Failed to delete chunks for {ps}: {e}");
+                            aikd_storage::cascade::delete_file_id_cascade(tx.conn(), old_fid)?;
                         }
-                        if let Err(e) = tx
-                            .conn()
-                            .execute("DELETE FROM files WHERE id=?1", rusqlite::params![old_fid])
-                        {
-                            log::warn!("Failed to delete file {ps}: {e}");
-                        }
+                        Ok(())
+                    })() {
+                        log::warn!("Failed to remove {ps}: {e}");
                     }
                     tx.commit()?;
                 }

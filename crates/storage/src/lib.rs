@@ -1,3 +1,4 @@
+pub mod cascade;
 pub mod fts;
 pub mod maintenance;
 pub mod schema;

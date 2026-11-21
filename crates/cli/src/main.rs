@@ -1180,13 +1180,7 @@ fn cmd_session(config_path: &str, action: SessionAction, json: bool) -> Result<(
             }
         }
         SessionAction::Delete { id } => {
-            database.conn().execute(
-                "DELETE FROM conversations WHERE session_id = ?1",
-                rusqlite::params![id],
-            )?;
-            database
-                .conn()
-                .execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![id])?;
+            aikd_storage::cascade::delete_session_cascade(database.conn(), &id)?;
             if json {
                 println!("{}", serde_json::json!({"deleted": id}));
             } else {
