@@ -209,6 +209,16 @@ enum Commands {
         action: DbAction,
     },
 
+    #[command(about = "[CLI] Install a new binary version side-by-side and switch the shim pointer (never touches a running file)")]
+    Update {
+        #[arg(long, help = "Local binary file to install as a new version")]
+        file: Option<String>,
+        #[arg(long, help = "Version label (default: binary's own --version)")]
+        version: Option<String>,
+        #[arg(long, help = "List installed versions and the active one")]
+        list: bool,
+    },
+
     #[command(about = "[CLI] Garbage-collect rows for deleted files and reclaim space")]
     Gc,
 
@@ -514,6 +524,7 @@ async fn main() -> Result<()> {
         Commands::Model { action } => cmd_model(&cli.config, action.unwrap_or(ModelAction::Status)),
         Commands::Db { action } => cmd_db(&cli.config, action, json_mode),
         Commands::Gc => cmd_gc(&cli.config, json_mode),
+        Commands::Update { file, version, list } => cmd_update(file, version, list),
         Commands::Symbol { name, limit } => cmd_symbol(&cli.config, &name, limit, json_mode),
         Commands::Memory { action } => cmd_memory(&cli.config, action, json_mode),
         Commands::Event { action } => cmd_event(&cli.config, action, json_mode),
@@ -656,32 +667,38 @@ aikd_auto_start"#
 }
 
 async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
+    // Cross-platform pre-check: is the REST port already served? This stops
+    // double daemons on Windows too (the old code only checked PID via `kill` on unix).
+    if !foreground {
+        let cfg = Config::load(config_path).unwrap_or_default();
+        let probe = format!("127.0.0.1:{}", cfg.server.rest_port);
+        if std::net::TcpStream::connect_timeout(&probe.parse().unwrap(), std::time::Duration::from_millis(500)).is_ok() {
+            eprintln!("AIKD daemon already running on {probe} — multi agent share ONE instance.");
+            return Ok(());
+        }
+    }
     if foreground {
         println!("Starting AIKD daemon in foreground...");
-        let cfg = Config::load(config_path).unwrap_or_default();
-        let port = cfg.server.rest_port;
-
         // Background mode (AIKD_DAEMON_BG=1, stdin is null): run REST only.
         // The MCP stdio server would exit immediately on EOF stdin and take
         // the daemon down with it via the select! below.
         if std::env::var("AIKD_DAEMON_BG").as_deref() == Ok("1") {
-            return aikd_server::rest::run_rest_server(config_path, port).await;
+            return aikd_server::run_rest_server(config_path).await;
         } else {
             let config_path_owned = config_path.to_string();
             let rest_handle = tokio::spawn(async move {
-                aikd_server::rest::run_rest_server(&config_path_owned, port).await
+                aikd_server::run_rest_server(&config_path_owned).await
             });
 
             let config_path_owned2 = config_path.to_string();
             let mcp_handle =
-                tokio::spawn(async move { aikd_server::mcp::run_server(&config_path_owned2).await });
+                tokio::spawn(async move { aikd_server::run_mcp_server(&config_path_owned2).await });
 
             tokio::select! {
                 r = rest_handle => { let _ = r?; }
                 r = mcp_handle => { let _ = r?; }
             }
         }
-    } else {
         let pid_dir = shellexpand::tilde("~/.aikd");
         let pid_path = format!("{pid_dir}/aikd.pid");
         std::fs::create_dir_all(pid_dir.as_ref())?;
@@ -1573,6 +1590,64 @@ fn cmd_db(config_path: &str, action: DbAction, json: bool) -> Result<()> {
             println!("Compact: {msg}");
         }
     }
+    Ok(())
+}
+
+/// Self-update without touching a running file: install the new binary as
+/// versions/<v>/aikd(.exe), then atomically rewrite the `active-version`
+/// pointer. Running sessions keep the old file; new spawns use the new one.
+/// PATH holds only the tiny shim, which never needs replacing.
+fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Result<()> {
+    let home = shellexpand::tilde("~/.aikd");
+    let vdir = std::path::PathBuf::from(home.as_ref()).join("versions");
+    std::fs::create_dir_all(&vdir)?;
+    if list {
+        let active = std::fs::read_to_string(std::path::PathBuf::from(home.as_ref()).join("active-version"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "(none)".into());
+        println!("Active: {active}");
+        if let Ok(rd) = std::fs::read_dir(&vdir) {
+            for e in rd.flatten() {
+                let bin = e.path().join(if cfg!(windows) { "aikd.exe" } else { "aikd" });
+                if bin.is_file() {
+                    let mark = if Some(e.file_name().to_string_lossy().to_string()) == Some(active.clone()) { " (active)" } else { "" };
+                    println!("  {}{mark}", e.file_name().to_string_lossy());
+                }
+            }
+        }
+        return Ok(());
+    }
+    let src = file.ok_or_else(|| anyhow::anyhow!("provide --file <new aikd binary> (explicit, never auto-downloaded)"))?;
+    // Ask the binary itself for its version when no label is given.
+    let ver = match version {
+        Some(v) => v,
+        None => {
+            let out = std::process::Command::new(&src).arg("--version").output()?;
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            s.split_whitespace().last().unwrap_or("unknown").to_string()
+        }
+    };
+    if ver.is_empty() || ver.contains(['/', '\\', '.']) && ver.contains('/') {
+        anyhow::bail!("invalid version label: {ver}");
+    }
+    let dest_dir = vdir.join(&ver);
+    std::fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join(if cfg!(windows) { "aikd.exe" } else { "aikd" });
+    // Fresh file, never a running one: copy to temp then atomic rename.
+    let tmp = dest_dir.join(if cfg!(windows) { ".aikd.exe.tmp" } else { ".aikd.tmp" });
+    std::fs::copy(&src, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&tmp, &dest)?;
+    // Atomic pointer switch (rename over the old pointer).
+    let ptr = std::path::PathBuf::from(home.as_ref()).join("active-version");
+    let ptr_tmp = std::path::PathBuf::from(home.as_ref()).join(".active-version.tmp");
+    std::fs::write(&ptr_tmp, format!("{ver}\n"))?;
+    std::fs::rename(&ptr_tmp, &ptr)?;
+    println!("Installed {ver} → {dest}; active pointer switched. Running sessions keep the old file; new spawns use {ver}.", dest = dest.display());
     Ok(())
 }
 

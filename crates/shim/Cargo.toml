@@ -1,0 +1,11 @@
+[package]
+name = "aikd-shim"
+version.workspace = true
+edition.workspace = true
+description = "AIKD version shim: tiny stable launcher that execs the active versioned binary"
+
+[[bin]]
+name = "aikd-shim"
+path = "src/main.rs"
+
+[dependencies]

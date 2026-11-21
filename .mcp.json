@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "aikd": {
-      "command": "aikd",
+      "command": "C:/Users/hp/.local/bin/aikd-new.exe",
       "args": ["serve"],
       "description": "AIKD — Indexed semantic & BM25 code search for AI agents. Gives your AI instant memory of your codebase.",
       "env": {}
