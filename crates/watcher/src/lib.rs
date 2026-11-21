@@ -89,7 +89,7 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                 let mut to_remove: Vec<String> = Vec::new();
 
                 for (path, kind) in &events {
-                    let ps = path.to_string_lossy().to_string();
+                    let ps = aikd_core::platform::canonical_path(path);
 
                     // Skip if hash unchanged (incremental check)
                     if matches!(kind, notify::EventKind::Modify(_)) && path.exists() {

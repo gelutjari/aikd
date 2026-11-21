@@ -318,7 +318,7 @@ impl AikdServer {
             Some(id) => id,
             None => match session::get_or_create_session(
                 database.conn(),
-                &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+                &aikd_core::platform::canonical_project(&cfg.scan.include_paths),
             ) {
                 Ok(s) => s.id,
                 Err(e) => return format!("Error: {e}"),
@@ -354,7 +354,7 @@ impl AikdServer {
             Some(id) => id,
             None => match session::get_or_create_session(
                 database.conn(),
-                &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+                &aikd_core::platform::canonical_project(&cfg.scan.include_paths),
             ) {
                 Ok(s) => s.id,
                 Err(e) => return format!("Error: {e}"),
@@ -437,7 +437,7 @@ impl AikdServer {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
-        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
         let source = params.source.unwrap_or_else(|| "agent-asserted".to_string());
         const KINDS: [&str; 6] = ["fact", "decision", "constraint", "discovery", "task", "checkpoint"];
@@ -457,7 +457,7 @@ impl AikdServer {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
-        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
         match aikd_storage::memory::list_memory(database.conn(), &project, Some(&ws), params.kind.as_deref(), params.all.unwrap_or(false)) {
             Ok(items) if items.is_empty() => "No memory items.".to_string(),
@@ -479,7 +479,7 @@ impl AikdServer {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
-        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
         let tasks = match aikd_storage::memory::active_tasks(database.conn(), &project, &ws) {
             Ok(t) => t,
@@ -542,7 +542,7 @@ impl AikdServer {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
-        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let payload = params.payload.unwrap_or_else(|| "{}".to_string());
         if serde_json::from_str::<serde_json::Value>(&payload).is_err() {
             return "Error: payload must be JSON".to_string();
@@ -568,7 +568,7 @@ impl AikdServer {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
-        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
         let recent = params.recent_events.unwrap_or(30);
         match aikd_context::assemble_handoff(database.conn(), &project, &ws, recent) {

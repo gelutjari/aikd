@@ -519,7 +519,7 @@ async fn handle_remember(
         Some(id) => id,
         None => match session::get_or_create_session(
             database.conn(),
-            &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+            &aikd_core::platform::canonical_project(&cfg.scan.include_paths),
         ) {
             Ok(s) => s.id,
             Err(e) => {
@@ -561,7 +561,7 @@ async fn handle_recall(
         Some(id) => id,
         None => match session::get_or_create_session(
             database.conn(),
-            &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+            &aikd_core::platform::canonical_project(&cfg.scan.include_paths),
         ) {
             Ok(s) => s.id,
             Err(e) => {

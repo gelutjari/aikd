@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -55,6 +55,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if current < 10 {
         migrate_v10(conn)?;
+    }
+
+    if current < 11 {
+        migrate_v11(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -410,6 +414,42 @@ fn migrate_v10(conn: &Connection) -> Result<()> {
     )?;
 
     log::info!("Migration v10 applied — memory governance (stale/archived/conflicted)");
+    Ok(())
+}
+
+fn migrate_v11(conn: &Connection) -> Result<()> {
+    // Canonical paths (§21): forward slashes everywhere. Older DBs may hold
+    // the same file twice (`C:\\x` + `C:/x`) from mixed-separator scans.
+    // Keep the oldest row per canonical path (cascade removes its chunks),
+    // then rewrite remaining backslashes. Tantivy docs carry chunk IDs
+    // only, so no search-index rewrite is needed.
+    // NOTE: MIN(id) keeps the oldest; delete every OTHER row in those groups.
+    let groups: Vec<String> = conn
+        .prepare("SELECT replace(path, '\\', '/') FROM files GROUP BY replace(path, '\\', '/') HAVING COUNT(*) > 1")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get(0))
+                .and_then(|rows| rows.collect::<std::result::Result<Vec<String>, _>>())
+        })
+        .unwrap_or_default();
+    for g in &groups {
+        let keep: i64 = conn.query_row(
+            "SELECT MIN(id) FROM files WHERE replace(path, '\\', '/') = ?1",
+            rusqlite::params![g],
+            |r| r.get(0),
+        )?;
+        let victims: Vec<i64> = conn
+            .prepare("SELECT id FROM files WHERE replace(path, '\\', '/') = ?1 AND id != ?2")
+            .and_then(|mut s| {
+                s.query_map(rusqlite::params![g, keep], |r| r.get(0))
+                    .and_then(|rows| rows.collect::<std::result::Result<Vec<i64>, _>>())
+            })
+            .unwrap_or_default();
+        for v in victims {
+            crate::cascade::delete_file_id_cascade(conn, v)?;
+        }
+    }
+    conn.execute("UPDATE files SET path = replace(path, '\\', '/')", [])?;
+    log::info!("Migration v11 applied — canonical slash paths ({} dup groups merged)", groups.len());
     Ok(())
 }
 

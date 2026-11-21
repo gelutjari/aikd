@@ -426,7 +426,7 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "model": embedder::MODEL_NAME,
-                "db_schema": 10,
+                "db_schema": 11,
             }))
             .unwrap_or_default()
         );
@@ -1089,7 +1089,7 @@ fn cmd_remember(
         None => {
             session::get_or_create_session(
                 database.conn(),
-                &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+                &aikd_core::platform::canonical_project(&cfg.scan.include_paths),
             )?
             .id
         }
@@ -1140,7 +1140,7 @@ fn cmd_recall(
         None => {
             session::get_or_create_session(
                 database.conn(),
-                &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+                &aikd_core::platform::canonical_project(&cfg.scan.include_paths),
             )?
             .id
         }
@@ -1722,7 +1722,7 @@ fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()>
 fn cmd_event(config_path: &str, action: EventAction, json: bool) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
-    let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+    let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
     match action {
         EventAction::Append { event_type, workstream, agent, session, source_ref, payload } => {
             // Validate payload is JSON (canonical model stores payload as JSON text).
@@ -1796,7 +1796,7 @@ fn cmd_context_inspect(config_path: &str, query: &str, limit: usize, hybrid: boo
 fn cmd_handoff(config_path: &str, workstream: &str, recent_events: usize, json: bool) -> Result<()> {
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
-    let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+    let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
     let pkg = aikd_context::assemble_handoff(database.conn(), &project, workstream, recent_events)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&pkg).unwrap_or_default());
@@ -1811,8 +1811,8 @@ fn cmd_project(config_path: &str, action: ProjectAction, json: bool) -> Result<(
     let database = Database::open(&cfg.db_path())?;
     let resolve = |p: &Option<String>| -> String {
         match p {
-            Some(v) => v.clone(),
-            None => cfg.scan.include_paths.first().cloned().unwrap_or_else(|| ".".to_string()),
+            Some(v) => v.replace('\\', "/"),
+            None => cfg.scan.include_paths.first().cloned().unwrap_or_else(|| ".".to_string()).replace('\\', "/"),
         }
     };
     match action {
@@ -1963,7 +1963,7 @@ fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
 
     let session_id = session::get_or_create_session(
         database.conn(),
-        &cfg.scan.include_paths.first().cloned().unwrap_or_default(),
+        &aikd_core::platform::canonical_project(&cfg.scan.include_paths),
     )
     .map(|s| s.id)
     .unwrap_or_default();

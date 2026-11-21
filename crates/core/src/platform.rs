@@ -19,6 +19,18 @@ pub fn default_aikd_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".aikd")
 }
+/// Canonical DB/index path: forward slashes on every platform.
+/// Windows APIs accept `/` for file access, so one spelling prevents
+/// `C:\\x` vs `C:/x` duplicate rows when callers mix separators
+/// (CLI `--path`, watcher events, config include_paths).
+pub fn canonical_path(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+/// Canonical project identity: the first include path in slash form,
+/// so memory/events/atlas keys never fork on separator style.
+pub fn canonical_project(include_paths: &[String]) -> String {
+    include_paths.first().cloned().unwrap_or_default().replace('\\', "/")
+}
 
 pub fn detect_gpu() -> bool {
     #[cfg(target_os = "windows")]
@@ -71,5 +83,21 @@ mod tests {
     #[test]
     fn test_detect_gpu_returns_bool() {
         let _gpu = detect_gpu();
+    }
+
+    #[test]
+    fn canonical_path_unifies_separators() {
+        assert_eq!(
+            canonical_path(std::path::Path::new("C:\\tmp\\x\\main.rs")),
+            "C:/tmp/x/main.rs"
+        );
+        assert_eq!(canonical_path(std::path::Path::new("/a/b.rs")), "/a/b.rs");
+    }
+
+    #[test]
+    fn canonical_project_unifies_identity() {
+        let v = vec!["C:\\proj".to_string()];
+        assert_eq!(canonical_project(&v), "C:/proj");
+        assert_eq!(canonical_project(&[]), "");
     }
 }

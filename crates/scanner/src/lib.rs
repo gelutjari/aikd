@@ -27,8 +27,8 @@ pub fn discover_files(cfg: &Config, opts: &ScanOptions) -> Vec<PathBuf> {
     let scan_paths: Vec<String> = opts
         .override_path
         .as_ref()
-        .map(|p| vec![p.to_string_lossy().to_string()])
-        .unwrap_or(cfg.scan.include_paths.clone());
+        .map(|p| vec![aikd_core::platform::canonical_path(p)])
+        .unwrap_or_else(|| cfg.scan.include_paths.iter().map(|s| s.replace('\\', "/")).collect());
 
     let mut files = Vec::new();
     for sp in &scan_paths {
@@ -83,7 +83,7 @@ pub fn filter_changed(files: Vec<PathBuf>, db: &Database) -> Vec<PathBuf> {
     files
         .into_iter()
         .filter(|path| {
-            let ps = path.to_string_lossy().to_string();
+            let ps = aikd_core::platform::canonical_path(path);
             let new_hash = match compute_blake3(path) {
                 Ok(h) => h,
                 Err(_) => return true,
@@ -105,7 +105,7 @@ pub fn chunk_files(files: &[PathBuf], cfg: &Config) -> Vec<(String, Vec<Chunk>)>
     files
         .par_iter()
         .filter_map(|path| {
-            let ps = path.to_string_lossy().to_string();
+            let ps = aikd_core::platform::canonical_path(path);
             let content = std::fs::read_to_string(path).ok()?;
             if !cfg.matches_content_filter(&content) {
                 return None;
@@ -266,7 +266,7 @@ pub fn run_scan(
     let indexed: Vec<(String, Vec<Chunk>)> = files_to_index
         .par_iter()
         .filter_map(|path| {
-            let ps = path.to_string_lossy().to_string();
+            let ps = aikd_core::platform::canonical_path(path);
             let content = std::fs::read_to_string(path).ok()?;
             if !cfg.matches_content_filter(&content) {
                 pb.inc(1);
