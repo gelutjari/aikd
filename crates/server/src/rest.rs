@@ -419,6 +419,29 @@ async fn handle_query(
     }))
 }
 
+#[derive(Deserialize)]
+struct GraphParams {
+    path: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn handle_graph(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<GraphParams>,
+) -> Result<Json<ApiResponse<aikd_storage::graph::FileGraph>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
+    }
+    let project = params.path.unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
+    let database = state.database.lock().await;
+    match aikd_storage::graph::file_graph(database.conn(), &project, params.limit.unwrap_or(100)) {
+        Ok(g) => Ok(Json(ApiResponse { success: true, data: Some(g), error: None })),
+        Err(e) => Ok(Json(ApiResponse { success: false, data: None, error: Some(e.to_string()) })),
+    }
+}
+
 async fn handle_stats(
     State(state): State<RestState>,
     headers: HeaderMap,
@@ -876,7 +899,7 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
 /// Local dashboard (attachment P7): read-only HTML rendered from live core
 /// data. No separate data logic — every number below queries the same
 /// storage the CLI/MCP paths use. Localhost only (server binds 127.0.0.1).
-async fn handle_ui(State(state): State<RestState>, headers: HeaderMap) -> impl IntoResponse {
+async fn handle_ui(State(state): State<RestState>, headers: HeaderMap, Query(qp): Query<GraphParams>) -> impl IntoResponse {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
         return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -950,6 +973,51 @@ async fn handle_ui(State(state): State<RestState>, headers: HeaderMap) -> impl I
         s
     };
 
+    // Dependency graph: explicit ?path= wins, else first fresh Atlas, else include path.
+    let graph_project = qp.path.clone().filter(|s| !s.is_empty()).map(|s| s.replace('\\', "/"))
+        .or_else(|| atlas_rows.iter().find(|(_, s, _)| s == "fresh").map(|(p, _, _)| p.clone()))
+        .unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
+    let graph_html = match aikd_storage::graph::file_graph(conn, &graph_project, 40) {
+        Ok(g) if !g.files.is_empty() => {
+            let n = g.files.len().min(24);
+            let cx = 300.0f64;
+            let cy = 160.0f64;
+            let r = 120.0f64;
+            let mut pos = std::collections::HashMap::new();
+            let mut svg = format!("<svg viewBox=\"0 0 600 320\" width=\"100%\" style=\"max-width:600px\"><text x=\"8\" y=\"16\" font-size=\"12\" fill=\"var(--muted)\">{}</text>",
+                html_escape(&format!("{} ({} files, {} imports)", graph_project, g.files.len(), g.edges.iter().filter(|e| e.kind == "imports").count())));
+            for (i, f) in g.files.iter().take(n).enumerate() {
+                let a = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
+                pos.insert(f.id.clone(), (cx + r * a.cos(), cy + r * a.sin()));
+            }
+            for e in &g.edges {
+                if e.kind != "imports" {
+                    continue;
+                }
+                if let (Some((x1, y1)), Some((x2, y2))) = (pos.get(&e.from), pos.get(&e.to)) {
+                    svg.push_str(&format!("<line x1=\"{x1:.0}\" y1=\"{y1:.0}\" x2=\"{x2:.0}\" y2=\"{y2:.0}\" stroke=\"var(--accent)\" stroke-width=\"1.5\"/>"));
+                }
+            }
+            for (i, f) in g.files.iter().take(n).enumerate() {
+                let (x, y) = pos[&f.id];
+                let short = f.id.rsplit('/').next().unwrap_or(&f.id);
+                svg.push_str(&format!("<circle cx=\"{x:.0}\" cy=\"{y:.0}\" r=\"9\" fill=\"var(--surface)\" stroke=\"var(--accent)\"/><text x=\"{x:.0}\" y=\"{:.0}\" font-size=\"9\" text-anchor=\"middle\" fill=\"var(--fg)\">{}</text><text x=\"{x:.0}\" y=\"{:.0}\" font-size=\"8\" text-anchor=\"middle\" fill=\"var(--muted)\">{}</text>",
+                    y - 14.0, html_escape(&format!("f{i}")), y + 24.0, html_escape(short)));
+            }
+            svg.push_str("</svg>");
+            svg.push_str(&format!("<p>{}</p>", html_escape(&g.scope_note)));
+            // Legend with real filenames.
+            let mut leg = "<table border=1><tr><th>#</th><th>file</th></tr>".to_string();
+            for (i, f) in g.files.iter().take(n).enumerate() {
+                leg.push_str(&format!("<tr><td>f{i}</td><td>{}</td></tr>", html_escape(&f.id)));
+            }
+            leg.push_str("</table>");
+            svg.push_str(&leg);
+            svg
+        }
+        _ => "<p>No indexed files for graph. Run <code>aikd scan</code> first.</p>".to_string(),
+    };
+
     let body = format!(
         "<!doctype html><html><head><meta charset=utf-8><title>AIKD Control Center</title></head>\
         <body><h1>AIKD Control Center</h1>\
@@ -960,6 +1028,7 @@ async fn handle_ui(State(state): State<RestState>, headers: HeaderMap) -> impl I
         <h2>Event journal</h2><p>total events {events}</p>\
         <table border=1><tr><th>agent</th><th>type</th><th>count</th></tr>{cover_rows}</table>\
         <h2>Project Atlas</h2>{atlas_html}\
+        <h2>Dependency graph</h2>{graph_html}\
         <h2>Compaction coverage</h2><p>Checkpoints and task state persist in <code>memory</code> per workstream; \
         resume any agent with <code>aikd handoff --workstream &lt;name&gt;</code> or the MCP <code>handoff</code> tool. \
         No compaction event from an adapter is claimed as protection without a verified lifecycle integration.</p>\
@@ -986,6 +1055,7 @@ fn html_escape(s: &str) -> String {
         .route("/api/remember", post(handle_remember))
         .route("/api/recall", post(handle_recall))
         .route("/api/sessions", get(handle_sessions))
+        .route("/api/graph", get(handle_graph))
         .route("/ui", get(handle_ui))
         .layer(rate_limiter)
         .layer(cors)
