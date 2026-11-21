@@ -340,6 +340,32 @@ impl Config {
         Ok(config)
     }
 
+    /// Load with process-wide policy (C1+C3): an EXPLICIT --config that
+    /// cannot be read fails hard (exit 2, never silently operate on the
+    /// wrong database); the built-in default path may fall back for
+    /// first-run UX. Validation warnings always surface via log.
+    pub fn load_validated(path: &str) -> Self {
+        match Self::load(path) {
+            Ok(cfg) => {
+                for w in cfg.validate() {
+                    log::warn!("config: {w}");
+                }
+                cfg
+            }
+            Err(e) => {
+                let expanded = shellexpand::tilde(path);
+                let is_default = expanded.as_ref() == shellexpand::tilde("~/.aikd/config.yaml").as_ref();
+                if !is_default {
+                    eprintln!("error: cannot read config '{path}': {e}");
+                    eprintln!("Refusing to run against the wrong database. Fix the path or create it with: aikd init");
+                    std::process::exit(2);
+                }
+                log::warn!("Using defaults (no config at {path})");
+                Self::default()
+            }
+        }
+    }
+
     pub fn save(&self, path: &str) -> Result<()> {
         let expanded = shellexpand::tilde(path);
         if let Some(parent) = Path::new(expanded.as_ref()).parent() {

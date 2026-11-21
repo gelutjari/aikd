@@ -546,7 +546,11 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
         let root = scan_path
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let cfg = aikd_core::config::generate_smart_config(&root);
+        let mut cfg = aikd_core::config::generate_smart_config(&root);
+        // The project you init FOR is the project you scan: record it.
+        // (Otherwise `init --path X` writes smart extensions for X but
+        // scans "." — the #1 "found N files" confusion.)
+        cfg.scan.include_paths = vec![aikd_core::platform::canonical_path(&root)];
         cfg.save(config_path)?;
         info!("  Config created at {}", expanded);
     }
@@ -675,7 +679,7 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
     // NOTE: a starting daemon does not listen yet — the post-spawn wait
     // below (D1) closes the race instead of trusting this check alone.
     let probe_of = || -> String {
-        let cfg = Config::load(config_path).unwrap_or_default();
+        let cfg = Config::load_validated(config_path);
         format!("127.0.0.1:{}", cfg.server.rest_port)
     };
     if !foreground {
@@ -775,16 +779,22 @@ enum ChildState {
 
 #[cfg(windows)]
 fn child_try_wait(pid: u32) -> ChildState {
-    let st = std::process::Command::new("cmd")
-        .args(["/C", &format!("tasklist /FI \"PID eq {pid}\" | find \"{pid}\" >NUL")])
+    // No cmd/find pipeline: cmd.exe mangles quoting (the pipeline reported
+    // "Invalid argument 'eq'" and every live child looked dead). Run
+    // tasklist directly, capture stdout, match the PID ourselves.
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    // NOTE: NO CREATE_NO_WINDOW here — hiding the window breaks tasklist
-    // output detection in some contexts; a flash is acceptable for a helper.
-    match st {
-        Ok(s) if s.success() => ChildState::Running,
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let txt = String::from_utf8_lossy(&o.stdout);
+            if txt.contains(&format!("\"{pid}\"")) {
+                ChildState::Running
+            } else {
+                ChildState::Exited(-1)
+            }
+        }
         _ => ChildState::Exited(-1),
     }
 }
@@ -1485,36 +1495,13 @@ fn print_results(
 }
 
 fn load_or_default(p: &str) -> Config {
-    match Config::load(p) {
-        Ok(c) => c,
-        Err(e) => {
-            // C1: an EXPLICIT --config that cannot be read must fail loudly.
-            // Silently falling back to ~/.aikd defaults once caused gc to
-            // delete another database's index. Only the built-in default
-            // path may fall back (first-run UX).
-            let expanded = shellexpand::tilde(p);
-            let is_default = expanded.as_ref() == shellexpand::tilde("~/.aikd/config.yaml").as_ref();
-            if !is_default {
-                eprintln!("error: cannot read config '{p}': {e}");
-                eprintln!("Refusing to run against the wrong database. Fix the path or create it with: aikd init");
-                std::process::exit(2);
-            }
-            log::warn!("Using defaults (no config at {p})");
-            Config::default()
-        }
-    }
+    // Deprecated shim: all policy lives in Config::load_validated (core).
+    Config::load_validated(p)
 }
 
-/// Load config + surface `Config::validate` warnings (C3). Invalid values
-/// (bad port, max<min, missing paths) no longer pass silently.
 fn load_validated(p: &str) -> Config {
-    let cfg = load_or_default(p);
-    for w in cfg.validate() {
-        log::warn!("config: {w}");
-    }
-    cfg
+    Config::load_validated(p)
 }
-
 fn cmd_session(config_path: &str, action: SessionAction, json: bool) -> Result<()> {
     let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
@@ -1715,6 +1702,13 @@ fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Resu
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "(none)".into());
         println!("Active: {active}");
+        // P1: who holds the daemon lock right now? A stale pointer vs a
+        // running old version is the #1 post-update confusion.
+        let lock = std::path::PathBuf::from(home.as_ref()).join("aikd.lock");
+        match std::fs::read_to_string(&lock) {
+            Ok(s) if !s.trim().is_empty() => println!("Daemon lock held by: {}", s.trim()),
+            _ => println!("Daemon lock: free (no daemon running)"),
+        }
         if let Ok(rd) = std::fs::read_dir(&vdir) {
             for e in rd.flatten() {
                 let bin = e.path().join(if cfg!(windows) { "aikd.exe" } else { "aikd" });

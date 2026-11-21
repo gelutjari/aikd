@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
-    let cfg = Config::load(config_path).unwrap_or_default();
+    let cfg = Config::load_validated(config_path);
     println!("Starting AIKD file watcher (debounce: {debounce_ms}ms)...");
     println!("Watching paths: {:?}", cfg.scan.include_paths);
     println!("Press Ctrl+C to stop.\n");

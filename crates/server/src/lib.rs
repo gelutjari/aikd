@@ -13,7 +13,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config_path: String) -> Self {
-        let cfg = Config::load(&config_path).unwrap_or_default();
+        let cfg = Config::load_validated(&config_path);
         Self {
             config: Arc::new(Mutex::new(cfg)),
             config_path,
@@ -64,7 +64,7 @@ pub async fn run_mcp_server(config_path: &str) -> anyhow::Result<()> {
 
 pub async fn run_rest_server(config_path: &str) -> anyhow::Result<()> {
     let _guard = acquire_singleton("rest")?;
-    let cfg = Config::load(config_path).unwrap_or_default();
+    let cfg = Config::load_validated(config_path);
     let port = cfg.server.rest_port;
     rest::run_rest_server(config_path, port).await
 }

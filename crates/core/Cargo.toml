@@ -16,6 +16,7 @@ sysinfo = { workspace = true }
 rusqlite = { workspace = true }
 dirs = { workspace = true }
 lru = { workspace = true }
+log = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

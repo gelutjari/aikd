@@ -816,7 +816,7 @@ async fn handle_login(
 }
 
 pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()> {
-    let cfg = Config::load(config_path).unwrap_or_default();
+    let cfg = Config::load_validated(config_path);
     let cors_origins = cfg.server.cors_origins.clone();
 
     // Use connection pooling for better concurrent performance
