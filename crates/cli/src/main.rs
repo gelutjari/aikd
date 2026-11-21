@@ -209,6 +209,13 @@ enum Commands {
 
     #[command(about = "[CLI] Garbage-collect rows for deleted files and reclaim space")]
     Gc,
+
+    #[command(about = "[CLI] Look up code symbols (functions, structs, classes) by name")]
+    Symbol {
+        name: String,
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -274,7 +281,7 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "model": embedder::MODEL_NAME,
-                "db_schema": 4,
+                "db_schema": 6,
             }))
             .unwrap_or_default()
         );
@@ -361,6 +368,7 @@ async fn main() -> Result<()> {
         Commands::Model { action } => cmd_model(&cli.config, action.unwrap_or(ModelAction::Status)),
         Commands::Db { action } => cmd_db(&cli.config, action, json_mode),
         Commands::Gc => cmd_gc(&cli.config, json_mode),
+        Commands::Symbol { name, limit } => cmd_symbol(&cli.config, &name, limit, json_mode),
     }
 }
 
@@ -1354,6 +1362,38 @@ fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
             "GC: {files_removed} file(s), {orphan_chunks} orphan chunk(s), {} index doc(s) removed",
             stale.len()
         );
+    }
+    Ok(())
+}
+
+fn cmd_symbol(config_path: &str, name: &str, limit: usize, json: bool) -> Result<()> {
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let symbols = aikd_storage::symbols::find_symbols(database.conn(), name, limit)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "query": name,
+                "provenance": "EXTRACTED",
+                "count": symbols.len(),
+                "symbols": symbols,
+            }))
+            .unwrap_or_default()
+        );
+    } else if symbols.is_empty() {
+        println!("No symbols matching '{name}'. Run: aikd scan");
+    } else {
+        println!("{} symbol(s) for '{name}' (EXTRACTED, heuristic):", symbols.len());
+        for s in &symbols {
+            println!(
+                "  {} {} — {}:{}-{} [{}]",
+                s.kind, s.name, s.file_path, s.line_start, s.line_end, s.language
+            );
+            if !s.signature.is_empty() {
+                println!("    {}", s.signature);
+            }
+        }
     }
     Ok(())
 }

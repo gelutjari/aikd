@@ -155,6 +155,16 @@ pub fn store_chunks(indexed: &[(String, Vec<Chunk>)], db: &Database) -> Result<(
                 rusqlite::params![c.id, fid, c.chunk_index as i64, hj, c.heading_level as i64, c.heading_text, c.line_start as i64, c.line_end as i64, c.content, mj, now, now],
             )?;
         }
+
+        // Symbol index (EXTRACTED provenance — heuristic, not resolved AST).
+        // Old symbols disappear with their chunks via ON DELETE CASCADE.
+        for sym in aikd_chunker::symbols::extract_symbols(ps, chunks) {
+            let sid = format!("{}:{}:{}", sym.chunk_id, sym.name, sym.line_start);
+            tx.conn().execute(
+                "INSERT OR REPLACE INTO code_symbols (id, chunk_id, symbol_type, symbol_name, signature, visibility, language, line_start, line_end, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                rusqlite::params![sid, sym.chunk_id, sym.kind, sym.name, sym.signature, sym.visibility, sym.language, sym.line_start as i64, sym.line_end as i64, now],
+            )?;
+        }
     }
     tx.commit()?;
     Ok(())

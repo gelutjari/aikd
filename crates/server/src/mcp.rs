@@ -65,6 +65,14 @@ pub struct RecallParams {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SymbolParams {
+    #[schemars(description = "Symbol name (exact or prefix)")]
+    pub name: String,
+    #[schemars(description = "Max results")]
+    pub limit: Option<usize>,
+}
+
 #[derive(Clone)]
 pub struct AikdServer {
     state: AppState,
@@ -346,6 +354,36 @@ impl AikdServer {
             profile.hnsw_m,
             cfg.server.rest_port,
         )
+    }
+
+    #[tool(description = "Look up code symbols (functions, structs, classes) by name with file and line provenance")]
+    async fn symbol(&self, Parameters(params): Parameters<SymbolParams>) -> String {
+        let cfg = self.state.config.lock().await.clone();
+        let database = match Database::open(&cfg.db_path()) {
+            Ok(db) => db,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let limit = params.limit.unwrap_or(20);
+        match aikd_storage::symbols::find_symbols(database.conn(), &params.name, limit) {
+            Ok(symbols) if symbols.is_empty() => {
+                format!("No symbols matching '{}'. Run scan first.", params.name)
+            }
+            Ok(symbols) => {
+                let mut out = format!(
+                    "{} symbol(s) for '{}' (EXTRACTED, heuristic):\n",
+                    symbols.len(),
+                    params.name
+                );
+                for s in &symbols {
+                    out.push_str(&format!(
+                        "{} {} — {}:{}-{} [{}]\n  {}\n",
+                        s.kind, s.name, s.file_path, s.line_start, s.line_end, s.language, s.signature
+                    ));
+                }
+                out
+            }
+            Err(e) => format!("Error: {e}"),
+        }
     }
 }
 

@@ -91,6 +91,21 @@ pub struct ConversationEmbedding {
     pub vector: Vec<f32>,
 }
 
+/// A code symbol extracted from a chunk heading (heuristic, EXTRACTED
+/// provenance — not a resolved AST fact).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeSymbol {
+    pub name: String,
+    pub kind: String,
+    pub signature: String,
+    pub visibility: String,
+    pub language: String,
+    pub file_path: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub chunk_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

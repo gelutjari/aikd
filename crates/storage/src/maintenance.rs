@@ -179,7 +179,7 @@ mod tests {
         let db_path = dir.path().join("t.db");
         let db = crate::Database::open(&db_path).unwrap();
         let st = db_status(db.conn(), &db_path).unwrap();
-        assert_eq!(st.schema_version, 5);
+        assert_eq!(st.schema_version, 6);
         assert_eq!(st.files, 0);
         assert!(db_check(db.conn()).unwrap().is_empty());
         let dest = dir.path().join("b.db");

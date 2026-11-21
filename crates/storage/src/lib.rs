@@ -2,6 +2,7 @@ pub mod cascade;
 pub mod fts;
 pub mod maintenance;
 pub mod schema;
+pub mod symbols;
 
 use anyhow::Result;
 use rusqlite::Connection;

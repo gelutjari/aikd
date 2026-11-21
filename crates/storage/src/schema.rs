@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -38,6 +38,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
     if current < 5 {
         migrate_v5(conn)?;
+    }
+    if current < 6 {
+        migrate_v6(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -242,6 +245,46 @@ fn migrate_v5(conn: &Connection) -> Result<()> {
     )?;
 
     log::info!("Migration v5 applied — chunks_fts, session uniqueness, embeddings model index");
+    Ok(())
+}
+
+fn migrate_v6(conn: &Connection) -> Result<()> {
+    // Symbol line ranges: v5 indexed symbols without per-declaration lines.
+    // Defaults backfill from the owning chunk; fresh scans write exact lines.
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(code_symbols)")
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?;
+            let mut found = false;
+            for r in rows {
+                if r? == "line_start" {
+                    found = true;
+                    break;
+                }
+            }
+            Ok(found)
+        })
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE code_symbols ADD COLUMN line_start INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE code_symbols ADD COLUMN line_end INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE code_symbols SET line_start = (SELECT line_start FROM chunks WHERE chunks.id = code_symbols.chunk_id), line_end = (SELECT line_end FROM chunks WHERE chunks.id = code_symbols.chunk_id)",
+            [],
+        )?;
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(symbol_name);")?;
+
+    log::info!("Migration v6 applied — code_symbols line ranges");
     Ok(())
 }
 

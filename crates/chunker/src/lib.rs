@@ -1,5 +1,6 @@
 pub mod code;
 pub mod markdown;
+pub mod symbols;
 
 use aikd_core::Chunk;
 use std::collections::HashMap;
