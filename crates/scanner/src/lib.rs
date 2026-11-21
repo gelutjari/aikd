@@ -251,7 +251,7 @@ pub fn run_scan(
         return Ok(ScanProgress {
             files_found: 0,
             files_indexed: 0,
-            files_skipped: 0,
+            files_skipped: total_files,
             chunks_created: 0,
             elapsed: start.elapsed(),
         });

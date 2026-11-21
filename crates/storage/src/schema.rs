@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -47,6 +47,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
     if current < 8 {
         migrate_v8(conn)?;
+    }
+
+    if current < 9 {
+        migrate_v9(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -349,6 +353,29 @@ fn migrate_v8(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v9(conn: &Connection) -> Result<()> {
+    // Project Atlas (§5-8): one persistent snapshot row per project.
+    // snapshot_json is generated FROM canonical tables (files, chunks,
+    // code_symbols, memory, events) — never hand-written. fingerprint
+    // covers (path, size, mtime) of indexed files; a mismatch marks the
+    // snapshot STALE until rebuilt. No rescan of unchanged data.
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS atlas (
+            project_path TEXT PRIMARY KEY,
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            fingerprint TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'stale' CHECK(status IN ('fresh','stale','empty')),
+            updated_at TEXT NOT NULL DEFAULT '',
+            build_ms INTEGER NOT NULL DEFAULT 0
+        );
+        ",
+    )?;
+
+    log::info!("Migration v9 applied — project atlas table");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +401,9 @@ mod tests {
         assert!(tables.contains(&"embeddings".to_string()));
         assert!(tables.contains(&"code_symbols".to_string()));
         assert!(tables.contains(&"audit_log".to_string()));
+        assert!(tables.contains(&"memory".to_string()));
+        assert!(tables.contains(&"events".to_string()));
+        assert!(tables.contains(&"atlas".to_string()));
     }
 
     #[test]

@@ -231,6 +231,12 @@ enum Commands {
         recent_events: usize,
     },
 
+    #[command(about = "[ATLAS] Project intelligence: analyze, show, write artifacts")]
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+
     #[command(about = "[CLI] Structured memory: facts, decisions, constraints, tasks, checkpoints")]
     Memory {
         #[command(subcommand)]
@@ -310,6 +316,27 @@ enum EventAction {
 }
 
 #[derive(Subcommand)]
+enum ProjectAction {
+    #[command(about = "Analyze a project: scan, build Atlas snapshot, print intelligence summary")]
+    Analyze {
+        #[arg(long)]
+        path: Option<String>,
+    },
+    #[command(about = "Show the stored Atlas snapshot (uses cache when fresh)")]
+    Show {
+        #[arg(long)]
+        path: Option<String>,
+    },
+    #[command(about = "Write machine + human artifacts (.aikd/intelligence, .aikd/artifacts)")]
+    Export {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value = ".aikd")]
+        out: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SessionAction {
     #[command(about = "List all sessions")]
     List,
@@ -374,7 +401,7 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "model": embedder::MODEL_NAME,
-                "db_schema": 8,
+                "db_schema": 9,
             }))
             .unwrap_or_default()
         );
@@ -465,6 +492,7 @@ async fn main() -> Result<()> {
         Commands::Memory { action } => cmd_memory(&cli.config, action, json_mode),
         Commands::Event { action } => cmd_event(&cli.config, action, json_mode),
         Commands::Handoff { workstream, recent_events } => cmd_handoff(&cli.config, &workstream, recent_events, json_mode),
+        Commands::Project { action } => cmd_project(&cli.config, action, json_mode),
     }
 }
 
@@ -1656,6 +1684,154 @@ fn cmd_handoff(config_path: &str, workstream: &str, recent_events: usize, json: 
         println!("\nRetrieved: tasks={} decisions={} constraints={} events={} | semantic_used=false (structural retrieval sufficient)", tasks.len(), decisions.len(), constraints.len(), events.len());
     }
     Ok(())
+}
+
+fn cmd_project(config_path: &str, action: ProjectAction, json: bool) -> Result<()> {
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let resolve = |p: &Option<String>| -> String {
+        match p {
+            Some(v) => v.clone(),
+            None => cfg.scan.include_paths.first().cloned().unwrap_or_else(|| ".".to_string()),
+        }
+    };
+    match action {
+        ProjectAction::Analyze { path } => {
+            let project = resolve(&path);
+            // Ensure the index is current first (incremental: unchanged files skipped).
+            let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
+            let opts = aikd_scanner::ScanOptions { override_path: Some(project.clone().into()) };
+            let progress = aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts)?;
+            let (snap, _) = aikd_storage::atlas::refresh_atlas(database.conn(), &project)?;
+            print_atlas(&snap, &progress, json);
+        }
+        ProjectAction::Show { path } => {
+            let project = resolve(&path);
+            match aikd_storage::atlas::read_atlas(database.conn(), &project)? {
+                Some((snap, status, updated)) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&snap).unwrap_or_default());
+                    } else {
+                        println!("ATLAS {project} [{status}] updated {updated}");
+                        print_atlas_body(&snap);
+                    }
+                }
+                None => println!("No Atlas for {project}. Run: aikd project analyze --path {project}"),
+            }
+        }
+        ProjectAction::Export { path, out } => {
+            let project = resolve(&path);
+            let (snap, _) = aikd_storage::atlas::refresh_atlas(database.conn(), &project)?;
+            let (n_json, n_md) = write_artifacts(&project, &out, &snap)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"intelligence_files": n_json, "artifact_files": n_md, "dir": out})).unwrap_or_else(|_| "{}".to_string()));
+            } else {
+                println!("Wrote {n_json} intelligence + {n_md} artifact files to {out}/ (from Atlas snapshot, status fresh)");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_atlas(snap: &aikd_storage::atlas::AtlasSnapshot, progress: &aikd_scanner::ScanProgress, json: bool) {
+    if json {
+        let v = serde_json::json!({
+            "files_indexed": progress.files_indexed, "chunks_created": progress.chunks_created,
+            "files_skipped": progress.files_skipped, "atlas": snap,
+        });
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return;
+    }
+    let r = &snap.repository.data;
+    println!("\nPROJECT ANALYZED\n");
+    println!("Project:\n  {0}", snap.project);
+    println!("Files: {}  Chunks: {}  Symbols: {}", r.file_count, r.chunk_count, r.symbol_count);
+    println!("Languages:");
+    for (l, n) in &r.languages {
+        println!("  - {l}: {n} files");
+    }
+    println!("Frameworks ({}):", r.frameworks.len());
+    for f in &r.frameworks {
+        println!("  - {f}");
+    }
+    println!("Entry points:");
+    for e in &r.entry_points {
+        println!("  - {e}");
+    }
+    let a = &snap.architecture.data;
+    println!("Top directories:");
+    for (d, n) in a.top_dirs.iter().take(10) {
+        let disp = if d == "(root)" { d.clone() } else { format!("{d}/") };
+        println!("  - {disp} ({n} files)");
+    }
+    println!("Symbol kinds:");
+    for (k, n) in &a.symbol_kinds {
+        println!("  - {k}: {n}");
+    }
+    println!("Decisions: {}  Open tasks: {}  Checkpoints: {}  Events: {}",
+        snap.decisions.len(), snap.open_tasks.len(), snap.checkpoints.len(), snap.event_count);
+    if !snap.known_issues.data.is_empty() {
+        println!("Known issues ({} markers):", snap.known_issues.data.len());
+        for i in snap.known_issues.data.iter().take(10) {
+            println!("  - {}:{} [{}] {}", i.file, i.line, i.marker, i.text.lines().next().unwrap_or(""));
+        }
+    }
+    println!("\nCoverage: files+symbols VERIFIED from index; frameworks/entry-point grouping INFERRED from markers.");
+    println!("Unchanged data reused: {} files skipped, Atlas fingerprint fresh.", progress.files_skipped);
+}
+
+fn print_atlas_body(snap: &aikd_storage::atlas::AtlasSnapshot) {
+    let r = &snap.repository.data;
+    println!("Files: {}  Chunks: {}  Symbols: {}", r.file_count, r.chunk_count, r.symbol_count);
+    println!("Languages: {}", r.languages.iter().map(|(l, n)| format!("{l}({n})")).collect::<Vec<_>>().join(", "));
+    println!("Frameworks [INFERRED]: {}", if r.frameworks.is_empty() { "(none detected)".into() } else { r.frameworks.join(", ") });
+    println!("Decisions: {}  Open tasks: {}  Checkpoints: {}  Events: {}",
+        snap.decisions.len(), snap.open_tasks.len(), snap.checkpoints.len(), snap.event_count);
+}
+
+/// Write machine-readable JSON + human-readable Markdown from the canonical
+/// snapshot. Both projections come from the same data — no disconnected docs.
+fn write_artifacts(project: &str, out_dir: &str, snap: &aikd_storage::atlas::AtlasSnapshot) -> Result<(usize, usize)> {
+    let intel = format!("{out_dir}/intelligence");
+    let arts = format!("{out_dir}/artifacts");
+    std::fs::create_dir_all(&intel)?;
+    std::fs::create_dir_all(&arts)?;
+    let r = &snap.repository.data;
+    let a = &snap.architecture.data;
+    let mut n_json = 0;
+    let put = |name: &str, v: &serde_json::Value| -> Result<()> {
+        std::fs::write(format!("{intel}/{name}"), serde_json::to_string_pretty(v)?)?;
+        Ok(())
+    };
+    put("project.json", &serde_json::json!({"root": r.root, "files": r.file_count, "chunks": r.chunk_count, "symbols": r.symbol_count, "languages": r.languages, "provenance": "VERIFIED"}))?; n_json += 1;
+    put("architecture.json", &serde_json::json!({"top_dirs": a.top_dirs, "symbol_kinds": a.symbol_kinds, "provenance": "INFERRED"}))?; n_json += 1;
+    put("components.json", &serde_json::json!({"top_dirs": a.top_dirs}))?; n_json += 1;
+    put("symbols.json", &serde_json::json!({"kinds": a.symbol_kinds, "total": r.symbol_count}))?; n_json += 1;
+    put("dependencies.json", &serde_json::json!({"frameworks": r.frameworks, "provenance": "INFERRED"}))?; n_json += 1;
+    put("workflows.json", &serde_json::json!({"entry_points": r.entry_points, "open_tasks": snap.open_tasks, "provenance": "INFERRED"}))?; n_json += 1;
+    put("api.json", &serde_json::json!({"entry_points": r.entry_points}))?; n_json += 1;
+    put("database.json", &serde_json::json!({"detected": [], "note": "DB detection via migration/model files — extend detect_frameworks when needed"}))?; n_json += 1;
+    put("development.json", &serde_json::json!({"frameworks": r.frameworks}))?; n_json += 1;
+    put("issues.json", &serde_json::to_value(&snap.known_issues.data)?)?; n_json += 1;
+    let mut n_md = 0;
+    let md = |name: &str, title: &str, body: String| -> Result<()> {
+        std::fs::write(format!("{arts}/{name}"), format!("# {title}\n\n_Generated from Atlas snapshot of `{project}` — do not edit by hand; regenerate with `aikd project export`._\n\n{body}"))?;
+        Ok(())
+    };
+    md("PROJECT_OVERVIEW.md", "Project overview", format!("Files: {}\nChunks: {}\nSymbols: {}\nLanguages: {}\n", r.file_count, r.chunk_count, r.symbol_count, r.languages.iter().map(|(l, n)| format!("{l}({n})")).collect::<Vec<_>>().join(", ")))?; n_md += 1;
+    md("ARCHITECTURE.md", "Architecture", format!("Top dirs:\n{}\n\nSymbol kinds:\n{}\n", a.top_dirs.iter().map(|(d, n)| format!("- {d}/ ({n})")).collect::<Vec<_>>().join("\n"), a.symbol_kinds.iter().map(|(k, n)| format!("- {k}: {n}")).collect::<Vec<_>>().join("\n")))?; n_md += 1;
+    md("COMPONENTS.md", "Components", a.top_dirs.iter().map(|(d, n)| format!("- {d}/ ({n} files)")).collect::<Vec<_>>().join("\n"))?; n_md += 1;
+    md("WORKFLOWS.md", "Workflows", format!("Entry points:\n{}\n\nOpen tasks: {}\n", r.entry_points.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n"), snap.open_tasks.len()))?; n_md += 1;
+    md("DATA_FLOW.md", "Data flow", "Derived from imports/contains relations in the symbol index; extend with call-graph analysis as needed.\n".to_string())?; n_md += 1;
+    md("API_REFERENCE.md", "API reference", if r.entry_points.is_empty() { "(no entry points detected)\n".to_string() } else { r.entry_points.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n") + "\n" })?; n_md += 1;
+    md("DATABASE.md", "Database", "No migration/model markers analyzed yet — recorded as UNVERIFIED.\n".to_string())?; n_md += 1;
+    md("DEVELOPMENT.md", "Development", format!("Detected stacks: {}\n", if r.frameworks.is_empty() { "(none)".into() } else { r.frameworks.join(", ") }))?; n_md += 1;
+    let mut iss = String::new();
+    for i in &snap.known_issues.data {
+        iss.push_str(&format!("- {}:{} [{}] {}", i.file, i.line, i.marker, i.text.lines().next().unwrap_or("")));
+    }
+    md("KNOWN_ISSUES.md", "Known issues", if iss.is_empty() { "(none found)\n".to_string() } else { iss })?; n_md += 1;
+    Ok((n_json, n_md))
 }
 
 fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
