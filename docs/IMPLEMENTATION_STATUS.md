@@ -55,10 +55,30 @@ Mulai: 2026-11-21 · Baseline commit: `a9c2495`.
 - `cargo test --workspace`: **109 passed / 0 failed**.
 - 15 commit di atas baseline, tree bersih.
 
-## Sisa jujur (tidak diklaim selesai)
+## Phase 2 — Zero-ONNX, Atlas, governance, context, resources: DONE
 
-- P6 resource guard: profil ada tapi belum enforce batas RAM/worker; retention policy otomatis belum ada.
-- P8 GUI penuh (system-tray Windows): hanya `/ui` dashboard; tray + graph explorer belum.
-- P9 semantic specialist: masih model tunggal MiniLM, belum feature-gate crate (binary tetap link ONNX); lazy load = per-request, belum cache proses.
-- P10 release hardening: belum rilis Windows/Linux installer, belum security audit eksternal.
-- Simultaneous-write race (`get_or_create_session`) belum diperbaiki; `code_symbols` belum diisi untuk DB lama tanpa rescan (perlu `aikd scan` ulang).
+- **Zero-ONNX**: default build tanpa `ort/ort-sys/fastembed/tokenizers/ndarray`
+  (`cargo tree` nol baris ONNX). `core::vector` + `SemanticProvider`;
+  `fastembed` opsional di belakang feature `semantic`; stub jujur;
+  benchmark embedding SKIP di zero-ONNX. ADR-0004.
+- **Session/event race**: `INSERT OR IGNORE` + `BEGIN IMMEDIATE`, test
+  konkuren 8-thread (sesi konvergen, sequence 1..80 unik).
+- **Project Atlas**: migrasi v9, fingerprint isi, CLI
+  `project analyze|show|export` (10 JSON + 9 MD), diuji live.
+- **Memory governance**: migrasi v10 (stale/archived/conflicted +
+  conflict_note), CLI + MCP lifecycle/conflict (19 tools).
+- **Context**: satu `assemble_handoff` (CLI+MCP), `inspect_context` +
+  CLI `context inspect`, `/ui` lifecycle/konflik/Atlas.
+- **Resources**: cap rayon + batch profil, `aikd doctor` live.
+- **Canonical paths**: `canonical_path/project`, migrasi v11 dedup DB
+  lama (terverifikasi: 6→3 baris, integrity OK).
+- `cargo test --workspace`: **112 passed / 0 failed** (19 tool MCP).
+
+## Sisa jujur Phase 2 (tidak diklaim selesai)
+
+- System-tray Windows: belum (sengaja: satu daemon, tray duplikat proses).
+- Retention otomatis event/memory: belum; `doctor` melaporkan pertumbuhan.
+- Semantic specialist eksternal (`aikd-semantic`): kontrak `SemanticProvider`
+  siap, implementasi belum.
+- Release packaging (installer/CI artifact): belum.
+- Graph explorer di `/ui`: belum (relasi deterministik tersedia di DB).

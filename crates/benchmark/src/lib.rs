@@ -681,6 +681,16 @@ impl BenchmarkRunner {
         let name = "Embedding (500 chunks)";
         let start = Instant::now();
 
+        if !aikd_embedder::SEMANTIC_COMPILED {
+            return BenchResult {
+                name: name.to_string(),
+                success: true,
+                duration: Duration::ZERO,
+                details: "Skipped — zero-ONNX build (rebuild with --features semantic)".to_string(),
+                error: None,
+                throughput: None,
+            };
+        }
         let model_dir = self.config.model_path();
         if !aikd_embedder::is_model_downloaded(&model_dir) {
             return BenchResult {
@@ -692,7 +702,6 @@ impl BenchmarkRunner {
                 throughput: None,
             };
         }
-
         // Insert 500 test chunks into DB
         let tx = match self.db.begin_transaction() {
             Ok(tx) => tx,
