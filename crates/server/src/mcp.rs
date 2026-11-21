@@ -103,6 +103,30 @@ pub struct MemoryTaskParams {
     pub workstream: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct EventAppendParams {
+    #[schemars(description = "Event type: session_start, user_message, assistant_message, tool_call, tool_result, file_change, test_result, task_status, checkpoint")]
+    pub event_type: String,
+    #[schemars(description = "Workstream (default)")]
+    pub workstream: Option<String>,
+    #[schemars(description = "Agent id, e.g. agy")]
+    pub agent: Option<String>,
+    #[schemars(description = "Agent session id")]
+    pub session: Option<String>,
+    #[schemars(description = "Source reference (file, message id)")]
+    pub source_ref: Option<String>,
+    #[schemars(description = "JSON payload string")]
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct HandoffParams {
+    #[schemars(description = "Workstream (default)")]
+    pub workstream: Option<String>,
+    #[schemars(description = "Recent events to include")]
+    pub recent_events: Option<usize>,
+}
+
 #[derive(Clone)]
 pub struct AikdServer {
     state: AppState,
@@ -458,6 +482,78 @@ impl AikdServer {
             Some(c) => out.push_str(&format!("\nCHECKPOINT {} — {}\n{}\n", c.id, c.title, c.body)),
             None => out.push_str("\n(no checkpoint)\n"),
         }
+        out
+    }
+
+    #[tool(description = "Append a canonical agent event to the journal (AGY-style live adapter). Idempotent on content.")]
+    async fn event_append(&self, Parameters(params): Parameters<EventAppendParams>) -> String {
+        let cfg = self.state.config.lock().await.clone();
+        let database = match Database::open(&cfg.db_path()) {
+            Ok(db) => db,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let payload = params.payload.unwrap_or_else(|| "{}".to_string());
+        if serde_json::from_str::<serde_json::Value>(&payload).is_err() {
+            return "Error: payload must be JSON".to_string();
+        }
+        match aikd_storage::events::append_event(
+            database.conn(), &project,
+            &params.workstream.unwrap_or_else(|| "default".to_string()),
+            &params.agent.unwrap_or_else(|| "agy".to_string()),
+            &params.session.unwrap_or_default(),
+            &params.event_type,
+            &params.source_ref.unwrap_or_default(),
+            &payload,
+        ) {
+            Ok(ev) => format!("Event {} seq={} ({}:{})", ev.event_id, ev.sequence, ev.agent_id, ev.event_type),
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    #[tool(description = "Build the context package for a workstream: tasks, checkpoint, decisions, constraints, recent events, next actions")]
+    async fn handoff(&self, Parameters(params): Parameters<HandoffParams>) -> String {
+        let cfg = self.state.config.lock().await.clone();
+        let database = match Database::open(&cfg.db_path()) {
+            Ok(db) => db,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+        let ws = params.workstream.unwrap_or_else(|| "default".to_string());
+        let recent = params.recent_events.unwrap_or(30);
+        let tasks = match aikd_storage::memory::active_tasks(database.conn(), &project, &ws) {
+            Ok(t) => t,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let cp = match aikd_storage::memory::latest_checkpoint(database.conn(), &project, &ws) {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let decisions = aikd_storage::memory::list_memory(database.conn(), &project, Some(&ws), Some("decision"), false).unwrap_or_default();
+        let constraints = aikd_storage::memory::list_memory(database.conn(), &project, Some(&ws), Some("constraint"), false).unwrap_or_default();
+        let watermark = aikd_storage::events::latest_sequence(database.conn(), &project, &ws).unwrap_or(0);
+        let events = aikd_storage::events::list_events(database.conn(), &project, &ws, None, watermark.saturating_sub(recent as i64), recent).unwrap_or_default();
+        let mut out = format!("=== HANDOFF: {project} / {ws} ===\n");
+        for t in &tasks {
+            out.push_str(&format!("\nTASK {} — {}\n{}\n", t.id, t.title, t.body));
+        }
+        if tasks.is_empty() {
+            out.push_str("(no active tasks)\n");
+        }
+        match &cp {
+            Some(c) => out.push_str(&format!("\nCHECKPOINT {} — {}\n{}\n", c.id, c.title, c.body)),
+            None => out.push_str("\n(no checkpoint)\n"),
+        }
+        for (label, items) in [("DECISION", &decisions), ("CONSTRAINT", &constraints)] {
+            for m in items {
+                out.push_str(&format!("\n{label} [{}]: {}\n", m.source, m.title));
+            }
+        }
+        out.push_str(&format!("\nRECENT EVENTS (watermark seq={watermark}):\n"));
+        for e in &events {
+            out.push_str(&format!("  #{} {}:{} {}\n", e.sequence, e.agent_id, e.event_type, e.payload.lines().next().unwrap_or("")));
+        }
+        out.push_str(&format!("\nRetrieved: tasks={} decisions={} constraints={} events={} | semantic_used=false\n", tasks.len(), decisions.len(), constraints.len(), events.len()));
         out
     }
 }

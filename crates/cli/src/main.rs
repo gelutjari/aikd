@@ -217,6 +217,20 @@ enum Commands {
         limit: usize,
     },
 
+    #[command(about = "[ADAPTER] Append or list canonical agent events (event journal)")]
+    Event {
+        #[command(subcommand)]
+        action: EventAction,
+    },
+
+    #[command(about = "[HANDOFF] Build the context package for a workstream (resume after compaction/transfer)")]
+    Handoff {
+        #[arg(long, default_value = "default")]
+        workstream: String,
+        #[arg(long, default_value = "30")]
+        recent_events: usize,
+    },
+
     #[command(about = "[CLI] Structured memory: facts, decisions, constraints, tasks, checkpoints")]
     Memory {
         #[command(subcommand)]
@@ -262,6 +276,36 @@ enum MemoryAction {
     Task {
         #[arg(long, default_value = "default")]
         workstream: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventAction {
+    #[command(about = "Append one canonical event (DSH-style adapter / batch import)")]
+    Append {
+        #[arg(long)]
+        event_type: String,
+        #[arg(long, default_value = "default")]
+        workstream: String,
+        #[arg(long, default_value = "dsh")]
+        agent: String,
+        #[arg(long, default_value = "")]
+        session: String,
+        #[arg(long, default_value = "")]
+        source_ref: String,
+        #[arg(long, default_value = "{}")]
+        payload: String,
+    },
+    #[command(about = "List journal events (resume with --since)")]
+    List {
+        #[arg(long, default_value = "default")]
+        workstream: String,
+        #[arg(long)]
+        event_type: Option<String>,
+        #[arg(long, default_value = "0")]
+        since: i64,
+        #[arg(long, default_value = "50")]
+        limit: usize,
     },
 }
 
@@ -313,7 +357,9 @@ enum DbAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Logs go to stderr: stdout is reserved for MCP stdio and --json output.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,aikd=info")),
@@ -328,7 +374,7 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "model": embedder::MODEL_NAME,
-                "db_schema": 7,
+                "db_schema": 8,
             }))
             .unwrap_or_default()
         );
@@ -417,6 +463,8 @@ async fn main() -> Result<()> {
         Commands::Gc => cmd_gc(&cli.config, json_mode),
         Commands::Symbol { name, limit } => cmd_symbol(&cli.config, &name, limit, json_mode),
         Commands::Memory { action } => cmd_memory(&cli.config, action, json_mode),
+        Commands::Event { action } => cmd_event(&cli.config, action, json_mode),
+        Commands::Handoff { workstream, recent_events } => cmd_handoff(&cli.config, &workstream, recent_events, json_mode),
     }
 }
 
@@ -1500,6 +1548,112 @@ fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()>
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_event(config_path: &str, action: EventAction, json: bool) -> Result<()> {
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+    match action {
+        EventAction::Append { event_type, workstream, agent, session, source_ref, payload } => {
+            // Validate payload is JSON (canonical model stores payload as JSON text).
+            let v: serde_json::Value = serde_json::from_str(&payload)
+                .map_err(|e| anyhow::anyhow!("payload must be JSON: {e}"))?;
+            let ev = aikd_storage::events::append_event(
+                database.conn(), &project, &workstream, &agent, &session, &event_type, &source_ref,
+                &v.to_string(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&ev).unwrap_or_default());
+            } else {
+                println!("Event {} seq={} ({}:{})", ev.event_id, ev.sequence, ev.agent_id, ev.event_type);
+            }
+        }
+        EventAction::List { workstream, event_type, since, limit } => {
+            let items = aikd_storage::events::list_events(database.conn(), &project, &workstream, event_type.as_deref(), since, limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&items).unwrap_or_default());
+            } else if items.is_empty() {
+                println!("No events (workstream '{workstream}', since {since}).");
+            } else {
+                for e in &items {
+                    println!("#{} [{}] {}:{} {}", e.sequence, e.timestamp, e.agent_id, e.event_type, e.payload.lines().next().unwrap_or(""));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Context package for session resume / cross-agent handoff (attachment P5).
+fn cmd_handoff(config_path: &str, workstream: &str, recent_events: usize, json: bool) -> Result<()> {
+    use aikd_storage::memory::{active_tasks, latest_checkpoint, list_memory};
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
+    let tasks = active_tasks(database.conn(), &project, workstream)?;
+    let checkpoint = latest_checkpoint(database.conn(), &project, workstream)?;
+    let decisions = list_memory(database.conn(), &project, Some(workstream), Some("decision"), false)?;
+    let constraints = list_memory(database.conn(), &project, Some(workstream), Some("constraint"), false)?;
+    let discoveries = list_memory(database.conn(), &project, Some(workstream), Some("discovery"), false)?;
+    let facts = list_memory(database.conn(), &project, Some(workstream), Some("fact"), false)?;
+    let watermark = aikd_storage::events::latest_sequence(database.conn(), &project, workstream).unwrap_or(0);
+    let events = aikd_storage::events::list_events(database.conn(), &project, workstream, None, watermark.saturating_sub(recent_events as i64), recent_events)?;
+    let next_actions: Vec<&str> = tasks.iter().flat_map(|t| {
+        t.body.lines().filter(|l| {
+            let u = l.to_uppercase();
+            u.contains("REMAINING") || u.contains("NEXT") || u.contains("TODO")
+        }).collect::<Vec<_>>()
+    }).collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "project": project,
+                "workstream": workstream,
+                "retrieved": { "tasks": tasks.len(), "decisions": decisions.len(), "constraints": constraints.len(), "events": events.len() },
+                "semantic_used": false,
+                "tasks": tasks,
+                "checkpoint": checkpoint,
+                "decisions": decisions,
+                "constraints": constraints,
+                "discoveries": discoveries,
+                "facts": facts,
+                "recent_events": events,
+                "next_actions": next_actions,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!("=== HANDOFF: {project} / {workstream} ===");
+        for t in &tasks {
+            println!("\nTASK {} — {}\n{}", t.id, t.title, t.body);
+        }
+        if tasks.is_empty() {
+            println!("(no active tasks)");
+        }
+        match &checkpoint {
+            Some(c) => println!("\nCHECKPOINT {} — {}\n{}", c.id, c.title, c.body),
+            None => println!("\n(no checkpoint — save one with: aikd memory save --kind checkpoint ...)"),
+        }
+        for (label, items) in [("DECISION", &decisions), ("CONSTRAINT", &constraints), ("DISCOVERY", &discoveries), ("FACT", &facts)] {
+            for m in items {
+                println!("\n{label} {} [{}]: {}\n  {}", m.id, m.source, m.title, m.body.lines().next().unwrap_or(""));
+            }
+        }
+        if !next_actions.is_empty() {
+            println!("\nNEXT ACTIONS:");
+            for n in &next_actions {
+                println!("  - {n}");
+            }
+        }
+        println!("\nRECENT EVENTS ({} of journal, watermark seq={}):", events.len(), watermark);
+        for e in &events {
+            println!("  #{} {}:{} {}", e.sequence, e.agent_id, e.event_type, e.payload.lines().next().unwrap_or(""));
+        }
+        println!("\nRetrieved: tasks={} decisions={} constraints={} events={} | semantic_used=false (structural retrieval sufficient)", tasks.len(), decisions.len(), constraints.len(), events.len());
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -44,6 +44,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
     if current < 7 {
         migrate_v7(conn)?;
+    }
+    if current < 8 {
+        migrate_v8(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -316,6 +319,33 @@ fn migrate_v7(conn: &Connection) -> Result<()> {
     )?;
 
     log::info!("Migration v7 applied — structured memory table");
+    Ok(())
+}
+
+fn migrate_v8(conn: &Connection) -> Result<()> {
+    // Persistent event journal (attachment P1/P3): append-only source
+    // records. sequence is a global monotonic order; event_id PK gives
+    // idempotent ingestion (duplicate delivery is ignored).
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS events (
+            event_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            workstream TEXT NOT NULL DEFAULT 'default',
+            agent_id TEXT NOT NULL,
+            agent_session_id TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            source_ref TEXT NOT NULL DEFAULT '',
+            payload TEXT NOT NULL DEFAULT '{}',
+            sequence INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_stream ON events(project_id, workstream, sequence);
+        CREATE INDEX IF NOT EXISTS idx_events_type ON events(project_id, workstream, event_type, sequence);
+        ",
+    )?;
+
+    log::info!("Migration v8 applied — event journal");
     Ok(())
 }
 

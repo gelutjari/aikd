@@ -124,6 +124,22 @@ pub struct MemoryItem {
     pub updated_at: String,
 }
 
+/// Canonical agent event (attachment P1): every adapter translates its
+/// runtime events into this model. No adapter may invent its own memory model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEvent {
+    pub event_id: String,
+    pub project_id: String,
+    pub workstream: String,
+    pub agent_id: String,
+    pub agent_session_id: String,
+    pub event_type: String,
+    pub timestamp: String,
+    pub source_ref: String,
+    pub payload: String,
+    pub sequence: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
