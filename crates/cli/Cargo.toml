@@ -8,6 +8,14 @@ description = "AIKD CLI interface"
 name = "aikd"
 path = "src/main.rs"
 
+[[bin]]
+name = "aikd-tray"
+path = "src/tray.rs"
+required-features = ["tray"]
+
+[features]
+default = []
+tray = ["dep:tray-icon", "dep:muda", "dep:winit"]
 [dependencies]
 aikd-core = { path = "../core" }
 aikd-storage = { path = "../storage" }
@@ -33,3 +41,6 @@ num_cpus = "1"
 indicatif = { workspace = true }
 rayon = { workspace = true }
 sysinfo = { workspace = true }
+tray-icon = { version = "=0.21.3", optional = true }
+muda = { version = "0.17", optional = true }
+winit = { version = "0.30", optional = true }
