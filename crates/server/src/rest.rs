@@ -320,24 +320,6 @@ fn check_auth(headers: &HeaderMap, token: &Option<String>) -> bool {
     false
 }
 
-/// Validate JWT token from request headers.
-/// Returns Claims if valid, None otherwise.
-#[allow(dead_code)]
-fn validate_jwt(headers: &HeaderMap, secret: &str) -> Option<Claims> {
-    if let Some(auth) = headers.get("authorization") {
-        if let Ok(auth_str) = auth.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                let jwt_config = JwtConfig {
-                    secret: secret.to_string(),
-                    expiration_hours: 24,
-                };
-                return jwt_config.validate_token(token).ok();
-            }
-        }
-    }
-    None
-}
-
 /// Constant-time string comparison to prevent timing attacks.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -496,23 +478,6 @@ async fn handle_stats(
         data: Some(data),
         error: None,
     }))
-}
-
-/// Streaming search endpoint placeholder.
-/// TODO: Implement proper SSE streaming with correct types.
-#[allow(dead_code)]
-async fn handle_query_stream(
-    State(_state): State<RestState>,
-    _headers: HeaderMap,
-    Query(_params): Query<QueryParams>,
-) -> Json<ApiResponse<String>> {
-    // SSE implementation requires more work on type compatibility
-    // For now, use the regular /api/query endpoint
-    Json(ApiResponse {
-        success: false,
-        data: None,
-        error: Some("SSE streaming not yet implemented. Use /api/query instead.".to_string()),
-    })
 }
 
 async fn handle_scan(
@@ -931,7 +896,6 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         .route("/metrics/prometheus", get(handle_metrics))
         .route("/api/auth/login", post(handle_login))
         .route("/api/query", get(handle_query))
-        // .route("/api/query/stream", get(handle_query_stream))  // TODO: Implement SSE properly
         .route("/api/stats", get(handle_stats))
         .route("/api/status", get(handle_status))
         .route("/api/scan", post(handle_scan))

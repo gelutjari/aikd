@@ -521,8 +521,7 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
                 r = rest_handle => { let _ = r?; }
                 r = mcp_handle => { let _ = r?; }
             }
-            Ok::<(), anyhow::Error>(())
-        };
+        }
     } else {
         let pid_dir = shellexpand::tilde("~/.aikd");
         let pid_path = format!("{pid_dir}/aikd.pid");

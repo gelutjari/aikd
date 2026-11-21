@@ -4,6 +4,18 @@ pub mod markdown;
 use aikd_core::Chunk;
 use std::collections::HashMap;
 
+/// Deterministic chunk ID: same file + index + content always yields the
+/// same ID across rescans, so embeddings and symbol relations stay valid.
+pub(crate) fn chunk_id(file_path: &str, chunk_index: usize, content: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(file_path.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&chunk_index.to_le_bytes());
+    hasher.update(b"\0");
+    hasher.update(content.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
 pub fn chunk_file(
     file_path: &str,
     content: &str,
@@ -81,7 +93,7 @@ fn chunk_plain_text(file_path: &str, content: &str, max_tokens: usize) -> Vec<Ch
         let est = current_content.len() / 4;
         if est >= max_tokens {
             chunks.push(Chunk {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: chunk_id(file_path, chunk_index, &current_content),
                 file_path: file_path.to_string(),
                 chunk_index,
                 heading_hierarchy: vec![],
@@ -100,7 +112,7 @@ fn chunk_plain_text(file_path: &str, content: &str, max_tokens: usize) -> Vec<Ch
 
     if !current_content.trim().is_empty() {
         chunks.push(Chunk {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: chunk_id(file_path, chunk_index, &current_content),
             file_path: file_path.to_string(),
             chunk_index,
             heading_hierarchy: vec![],
@@ -118,7 +130,7 @@ fn chunk_plain_text(file_path: &str, content: &str, max_tokens: usize) -> Vec<Ch
 
 fn chunk_structured(file_path: &str, content: &str) -> Vec<Chunk> {
     vec![Chunk {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: chunk_id(file_path, 0, content),
         file_path: file_path.to_string(),
         chunk_index: 0,
         heading_hierarchy: vec![],
@@ -178,5 +190,36 @@ mod tests {
         let ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
         let unique_ids: std::collections::HashSet<&str> = ids.iter().cloned().collect();
         assert_eq!(ids.len(), unique_ids.len());
+    }
+
+    #[test]
+    fn test_chunk_ids_deterministic() {
+        // Same input must produce identical IDs across rescans so that
+        // embeddings and symbol relations survive re-indexing.
+        let content = "# Title\n\nContent 1\n\n## Section\n\nContent 2";
+        let a = chunk_file("test.md", content, 1000, 10);
+        let b = chunk_file("test.md", content, 1000, 10);
+        assert_eq!(
+            a.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            b.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
+        );
+        let code = "fn alpha() {\n    let x = 1;\n}\n\nfn beta() {\n    let y = 2;\n}\n";
+        let c1 = chunk_file("t.rs", code, 1000, 100);
+        let c2 = chunk_file("t.rs", code, 1000, 100);
+        assert_eq!(
+            c1.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            c2.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_small_symbols_not_dropped() {
+        // Regression: functions below min_tokens used to be discarded.
+        let code = "fn tiny() { 1 }\n\nfn also_tiny() { 2 }\n\nfn big() {\n    let mut s = String::new();\n    for i in 0..100 { s.push_str(&i.to_string()); }\n    s\n}\n";
+        let chunks = chunk_file("t.rs", code, 1000, 100);
+        let all = chunks.iter().map(|c| c.content.clone()).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("fn tiny()"), "tiny fn lost: {all}");
+        assert!(all.contains("fn also_tiny()"), "also_tiny lost: {all}");
+        assert!(all.contains("fn big()"));
     }
 }

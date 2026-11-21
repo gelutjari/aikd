@@ -119,10 +119,12 @@ fn chunk_by_function(
                     &metadata,
                 ));
                 chunk_index += 1;
+                current_content.clear();
+                current_start = i;
+                current_symbol = trimmed.to_string();
             }
-            current_content.clear();
-            current_start = i;
-            current_symbol = trimmed.to_string();
+            // Below min_tokens: merge into the accumulating chunk instead
+            // of dropping it (small functions used to vanish from the index).
         } else if is_symbol && current_content.trim().is_empty() {
             current_start = i;
             current_symbol = trimmed.to_string();
@@ -250,7 +252,7 @@ fn make_code_chunk(
     };
 
     Chunk {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: crate::chunk_id(file_path, chunk_index, content),
         file_path: file_path.to_string(),
         chunk_index,
         heading_hierarchy: if heading.is_empty() {

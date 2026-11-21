@@ -131,7 +131,7 @@ pub fn chunk_markdown(
 
     if chunks.is_empty() && !content.trim().is_empty() {
         chunks.push(Chunk {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: crate::chunk_id(file_path, 0, content),
             file_path: file_path.to_string(),
             chunk_index: 0,
             heading_hierarchy: vec![],
@@ -179,7 +179,7 @@ fn make_chunk(
     };
 
     Chunk {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: crate::chunk_id(file_path, chunk_index, content),
         file_path: file_path.to_string(),
         chunk_index,
         heading_hierarchy: hierarchy,
