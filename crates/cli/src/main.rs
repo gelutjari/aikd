@@ -200,6 +200,15 @@ enum Commands {
         #[command(subcommand)]
         action: Option<ModelAction>,
     },
+
+    #[command(about = "[CLI] Database maintenance (status, check, backup, restore, compact)")]
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
+
+    #[command(about = "[CLI] Garbage-collect rows for deleted files and reclaim space")]
+    Gc,
 }
 
 #[derive(Subcommand)]
@@ -223,6 +232,29 @@ enum ModelAction {
     Download,
     #[command(about = "Remove downloaded model files")]
     Remove,
+}
+
+#[derive(Subcommand)]
+enum DbAction {
+    #[command(about = "Show database health, sizes, and counts")]
+    Status,
+    #[command(about = "Verify integrity (SQLite + FTS sync + orphans)")]
+    Check,
+    #[command(about = "Online backup to a file (VACUUM INTO)")]
+    Backup {
+        #[arg(short, long)]
+        output: String,
+    },
+    #[command(about = "Restore from a backup file (verifies first, atomic replace)")]
+    Restore {
+        #[arg(short, long)]
+        file: String,
+    },
+    #[command(about = "Reclaim space (VACUUM); optionally rebuild the FTS index")]
+    Compact {
+        #[arg(long)]
+        rebuild_fts: bool,
+    },
 }
 
 #[tokio::main]
@@ -327,6 +359,8 @@ async fn main() -> Result<()> {
         Commands::Benchmark => cmd_benchmark(&cli.config).await,
         Commands::Session { action } => cmd_session(&cli.config, action, json_mode),
         Commands::Model { action } => cmd_model(&cli.config, action.unwrap_or(ModelAction::Status)),
+        Commands::Db { action } => cmd_db(&cli.config, action, json_mode),
+        Commands::Gc => cmd_gc(&cli.config, json_mode),
     }
 }
 
@@ -1213,6 +1247,113 @@ fn cmd_model(config_path: &str, action: ModelAction) -> Result<()> {
                 println!("No model files found at {}", model_dir.display());
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_db(config_path: &str, action: DbAction, json: bool) -> Result<()> {
+    use aikd_storage::maintenance::{db_backup, db_check, db_compact, db_restore, db_status};
+    let cfg = load_or_default(config_path);
+    let db_path = cfg.db_path();
+    match action {
+        DbAction::Status => {
+            let database = Database::open(&db_path)?;
+            let st = db_status(database.conn(), &db_path)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
+            } else {
+                println!("DB: {} ({:.1} MB)", st.db_path, st.db_bytes as f64 / (1024.0 * 1024.0));
+                println!("Schema: v{} | journal: {}", st.schema_version, st.journal_mode);
+                println!(
+                    "Files: {} | chunks: {} | embeddings: {} | sessions: {} | conversations: {}",
+                    st.files, st.chunks, st.embeddings, st.sessions, st.conversations
+                );
+                println!(
+                    "FTS docs: {} | pages: {} x {} bytes | freelist: {}",
+                    st.fts_docs, st.page_count, st.page_size, st.freelist_pages
+                );
+            }
+        }
+        DbAction::Check => {
+            let database = Database::open(&db_path)?;
+            let problems = db_check(database.conn())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "healthy": problems.is_empty(),
+                        "problems": problems,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else if problems.is_empty() {
+                println!("OK: database healthy");
+            } else {
+                println!("Found {} problem(s):", problems.len());
+                for p in &problems {
+                    println!("  - {p}");
+                }
+                anyhow::bail!("database check failed");
+            }
+        }
+        DbAction::Backup { output } => {
+            let database = Database::open(&db_path)?;
+            let expanded = shellexpand::tilde(&output);
+            let n = db_backup(database.conn(), std::path::Path::new(expanded.as_ref()))?;
+            println!("Backup: {expanded} ({:.1} MB)", n as f64 / (1024.0 * 1024.0));
+        }
+        DbAction::Restore { file } => {
+            let expanded = shellexpand::tilde(&file);
+            db_restore(std::path::Path::new(expanded.as_ref()), &db_path)?;
+            println!("Restored from {expanded}. Re-run `aikd db check` to verify.");
+        }
+        DbAction::Compact { rebuild_fts } => {
+            let database = Database::open(&db_path)?;
+            let msg = db_compact(database.conn(), rebuild_fts)?;
+            println!("Compact: {msg}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
+    // Collect stale chunk IDs for the index before rows disappear.
+    let stale: Vec<String> = {
+        let mut stmt = database
+            .conn()
+            .prepare("SELECT c.id, f.path FROM chunks c JOIN files f ON f.id = c.file_id")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows.into_iter()
+            .filter(|(_, ps)| !std::path::Path::new(ps).exists())
+            .map(|(id, _)| id)
+            .collect()
+    };
+    if !stale.is_empty() {
+        tantivy.delete_chunks(&stale)?;
+    }
+    let (files_removed, orphan_chunks) =
+        aikd_storage::maintenance::gc(database.conn(), true)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "files_removed": files_removed,
+                "orphan_chunks_removed": orphan_chunks,
+                "index_docs_removed": stale.len(),
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!(
+            "GC: {files_removed} file(s), {orphan_chunks} orphan chunk(s), {} index doc(s) removed",
+            stale.len()
+        );
     }
     Ok(())
 }

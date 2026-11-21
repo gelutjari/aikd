@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -18,6 +18,12 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         })
         .unwrap_or(0);
 
+    if current > SCHEMA_VERSION {
+        anyhow::bail!(
+            "Database schema version {current} is newer than supported {SCHEMA_VERSION}; refusing to open (upgrade AIKD first)"
+        );
+    }
+
     if current < 1 {
         migrate_v1(conn)?;
     }
@@ -29,6 +35,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
     if current < 4 {
         migrate_v4(conn)?;
+    }
+    if current < 5 {
+        migrate_v5(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -186,6 +195,53 @@ fn migrate_v4(conn: &Connection) -> Result<()> {
     )?;
 
     log::info!("Migration v4 applied — code_symbols, audit_log, performance indexes");
+    Ok(())
+}
+
+fn migrate_v5(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        -- Contentless FTS5 index over chunks. The chunk text itself stays in
+        -- `chunks.content`; FTS only stores the inverted index + chunk_id key.
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            chunk_id UNINDEXED,
+            content,
+            heading,
+            content=''
+        );
+
+        -- Keep FTS in sync with chunks inside the same transaction.
+        CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+            INSERT INTO chunks_fts(rowid, chunk_id, content, heading)
+            VALUES (new.rowid, new.id, new.content, new.heading_text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, chunk_id, content, heading)
+            VALUES ('delete', old.rowid, old.id, old.content, old.heading_text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, chunk_id, content, heading)
+            VALUES ('delete', old.rowid, old.id, old.content, old.heading_text);
+            INSERT INTO chunks_fts(rowid, chunk_id, content, heading)
+            VALUES (new.rowid, new.id, new.content, new.heading_text);
+        END;
+
+        -- Backfill FTS from existing chunks.
+        INSERT INTO chunks_fts(rowid, chunk_id, content, heading)
+            SELECT rowid, id, content, heading_text FROM chunks;
+
+        -- Session lookup is by project_path: keep latest row per project, then enforce uniqueness.
+        DELETE FROM sessions WHERE id NOT IN (
+            SELECT id FROM sessions GROUP BY project_path HAVING MAX(last_active)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path);
+
+        -- Embedding lookups filter by model.
+        CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
+        ",
+    )?;
+
+    log::info!("Migration v5 applied — chunks_fts, session uniqueness, embeddings model index");
     Ok(())
 }
 

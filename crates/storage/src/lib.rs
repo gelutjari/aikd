@@ -1,3 +1,5 @@
+pub mod fts;
+pub mod maintenance;
 pub mod schema;
 
 use anyhow::Result;
