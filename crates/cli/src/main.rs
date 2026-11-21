@@ -237,6 +237,15 @@ enum Commands {
         action: ProjectAction,
     },
 
+    #[command(about = "[CTX] Inspect what AIKD would send for a query and why (token estimate, exclusions)")]
+    Context {
+        query: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+        #[arg(long)]
+        hybrid: bool,
+    },
+
     #[command(about = "[CLI] Structured memory: facts, decisions, constraints, tasks, checkpoints")]
     Memory {
         #[command(subcommand)]
@@ -507,6 +516,7 @@ async fn main() -> Result<()> {
         Commands::Event { action } => cmd_event(&cli.config, action, json_mode),
         Commands::Handoff { workstream, recent_events } => cmd_handoff(&cli.config, &workstream, recent_events, json_mode),
         Commands::Project { action } => cmd_project(&cli.config, action, json_mode),
+        Commands::Context { query, limit, hybrid } => cmd_context_inspect(&cli.config, &query, limit, hybrid),
     }
 }
 
@@ -1644,73 +1654,54 @@ fn cmd_event(config_path: &str, action: EventAction, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Context inspector (§25): show exactly what would be sent and why.
+fn cmd_context_inspect(config_path: &str, query: &str, limit: usize, hybrid: bool) -> Result<()> {
+    use aikd_core::SearchFilters;
+    let cfg = load_or_default(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
+    let req = aikd_context::QueryRequest {
+        query: query.to_string(),
+        filters: SearchFilters::default(),
+        limit,
+        hybrid,
+        budget: aikd_context::ContextBudget::default(),
+    };
+    let insp = aikd_context::inspect_context(
+        &database,
+        std::sync::Arc::new(tantivy),
+        &cfg.model_path(),
+        cfg.embedding.enabled,
+        &req,
+    )?;
+    println!("CONTEXT REQUEST\n  Task: {query}\n");
+    println!("RETRIEVAL: {} ({}ms)", insp.retrieval, insp.elapsed_ms);
+    println!("\nSELECTED:");
+    for s in &insp.selected {
+        println!("  - {} @ {} (score {:.3}) — {}", s["file"].as_str().unwrap_or("?"), s["lines"].as_str().unwrap_or("?"), s["score"].as_f64().unwrap_or(0.0), s["why"].as_str().unwrap_or(""));
+    }
+    if insp.selected.is_empty() {
+        println!("  (none)");
+    }
+    println!("\nEXCLUDED:");
+    for e in &insp.excluded_reasons {
+        println!("  - {e}");
+    }
+    println!("\nESTIMATED TOKENS: ~{} (truncated {} chars)", insp.estimated_tokens, insp.truncated_chars);
+    Ok(())
+}
+
 /// Context package for session resume / cross-agent handoff (attachment P5).
+/// Assembled by `aikd_context::assemble_handoff` — same constructor as MCP.
 fn cmd_handoff(config_path: &str, workstream: &str, recent_events: usize, json: bool) -> Result<()> {
-    use aikd_storage::memory::{active_tasks, latest_checkpoint, list_memory};
     let cfg = load_or_default(config_path);
     let database = Database::open(&cfg.db_path())?;
     let project = cfg.scan.include_paths.first().cloned().unwrap_or_default();
-    let tasks = active_tasks(database.conn(), &project, workstream)?;
-    let checkpoint = latest_checkpoint(database.conn(), &project, workstream)?;
-    let decisions = list_memory(database.conn(), &project, Some(workstream), Some("decision"), false)?;
-    let constraints = list_memory(database.conn(), &project, Some(workstream), Some("constraint"), false)?;
-    let discoveries = list_memory(database.conn(), &project, Some(workstream), Some("discovery"), false)?;
-    let facts = list_memory(database.conn(), &project, Some(workstream), Some("fact"), false)?;
-    let watermark = aikd_storage::events::latest_sequence(database.conn(), &project, workstream).unwrap_or(0);
-    let events = aikd_storage::events::list_events(database.conn(), &project, workstream, None, watermark.saturating_sub(recent_events as i64), recent_events)?;
-    let next_actions: Vec<&str> = tasks.iter().flat_map(|t| {
-        t.body.lines().filter(|l| {
-            let u = l.to_uppercase();
-            u.contains("REMAINING") || u.contains("NEXT") || u.contains("TODO")
-        }).collect::<Vec<_>>()
-    }).collect();
+    let pkg = aikd_context::assemble_handoff(database.conn(), &project, workstream, recent_events)?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "project": project,
-                "workstream": workstream,
-                "retrieved": { "tasks": tasks.len(), "decisions": decisions.len(), "constraints": constraints.len(), "events": events.len() },
-                "semantic_used": false,
-                "tasks": tasks,
-                "checkpoint": checkpoint,
-                "decisions": decisions,
-                "constraints": constraints,
-                "discoveries": discoveries,
-                "facts": facts,
-                "recent_events": events,
-                "next_actions": next_actions,
-            }))
-            .unwrap_or_default()
-        );
+        println!("{}", serde_json::to_string_pretty(&pkg).unwrap_or_default());
     } else {
-        println!("=== HANDOFF: {project} / {workstream} ===");
-        for t in &tasks {
-            println!("\nTASK {} — {}\n{}", t.id, t.title, t.body);
-        }
-        if tasks.is_empty() {
-            println!("(no active tasks)");
-        }
-        match &checkpoint {
-            Some(c) => println!("\nCHECKPOINT {} — {}\n{}", c.id, c.title, c.body),
-            None => println!("\n(no checkpoint — save one with: aikd memory save --kind checkpoint ...)"),
-        }
-        for (label, items) in [("DECISION", &decisions), ("CONSTRAINT", &constraints), ("DISCOVERY", &discoveries), ("FACT", &facts)] {
-            for m in items {
-                println!("\n{label} {} [{}]: {}\n  {}", m.id, m.source, m.title, m.body.lines().next().unwrap_or(""));
-            }
-        }
-        if !next_actions.is_empty() {
-            println!("\nNEXT ACTIONS:");
-            for n in &next_actions {
-                println!("  - {n}");
-            }
-        }
-        println!("\nRECENT EVENTS ({} of journal, watermark seq={}):", events.len(), watermark);
-        for e in &events {
-            println!("  #{} {}:{} {}", e.sequence, e.agent_id, e.event_type, e.payload.lines().next().unwrap_or(""));
-        }
-        println!("\nRetrieved: tasks={} decisions={} constraints={} events={} | semantic_used=false (structural retrieval sufficient)", tasks.len(), decisions.len(), constraints.len(), events.len());
+        println!("{}", pkg.render_text());
     }
     Ok(())
 }

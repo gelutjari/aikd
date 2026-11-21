@@ -893,6 +893,9 @@ async fn handle_ui(State(state): State<RestState>, headers: HeaderMap) -> impl I
     let symbols = qi("SELECT COUNT(*) FROM code_symbols");
     let mem_active = qi("SELECT COUNT(*) FROM memory WHERE status='active'");
     let mem_super = qi("SELECT COUNT(*) FROM memory WHERE status='superseded'");
+    let mem_stale = qi("SELECT COUNT(*) FROM memory WHERE status='stale'");
+    let mem_arch = qi("SELECT COUNT(*) FROM memory WHERE status='archived'");
+    let mem_conf = qi("SELECT COUNT(*) FROM memory WHERE status='conflicted'");
     let events = qi("SELECT COUNT(*) FROM events");
     let sessions = qi("SELECT COUNT(*) FROM sessions");
     let schema_v = q("SELECT version FROM schema_version LIMIT 1");
@@ -916,18 +919,50 @@ async fn handle_ui(State(state): State<RestState>, headers: HeaderMap) -> impl I
         .iter()
         .map(|(k, t, s, st, u)| format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", html_escape(k), html_escape(t), html_escape(s), html_escape(st), html_escape(u)))
         .collect();
+    let conflicted = aikd_storage::memory::conflicts(conn, "%", None).unwrap_or_default();
+    let conflict_html = if conflicted.is_empty() {
+        "<p>No unresolved conflicts.</p>".to_string()
+    } else {
+        let mut s = "<p>!! Unresolved conflicts (both sides preserved):</p><table border=1><tr><th>title</th><th>source</th><th>note</th></tr>".to_string();
+        for m in conflicted.iter().take(20) {
+            s.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(&m.title), html_escape(&m.source), html_escape(m.conflict_note.as_deref().unwrap_or(""))));
+        }
+        s.push_str("</table>");
+        s
+    };
+    let atlas_rows: Vec<(String, String, String)> = conn
+        .prepare("SELECT project_path, status, updated_at FROM atlas ORDER BY updated_at DESC LIMIT 20")
+        .and_then(|mut s| {
+            s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                .and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>())
+        })
+        .unwrap_or_default();
+    let atlas_html = if atlas_rows.is_empty() {
+        "<p>No Atlas snapshots. Run <code>aikd project analyze --path &lt;dir&gt;</code>.</p>".to_string()
+    } else {
+        let mut s = "<table border=1><tr><th>project</th><th>status</th><th>updated</th></tr>".to_string();
+        for (p, st, u) in &atlas_rows {
+            s.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>", html_escape(p), html_escape(st), html_escape(u)));
+        }
+        s.push_str("</table>");
+        s
+    };
+
     let body = format!(
         "<!doctype html><html><head><meta charset=utf-8><title>AIKD Control Center</title></head>\
         <body><h1>AIKD Control Center</h1>\
         <p>DB schema v{schema_v} · {db_mb:.1} MB · files {files} · chunks {chunks} · symbols {symbols} · sessions {sessions}</p>\
-        <h2>Memory</h2><p>active {mem_active} · superseded {mem_super}</p>\
+        <h2>Memory</h2><p>active {mem_active} · superseded {mem_super} · stale {mem_stale} · archived {mem_arch} · conflicted {mem_conf}</p>\
         <table border=1><tr><th>kind</th><th>title</th><th>source</th><th>status</th><th>updated</th></tr>{mem_rows}</table>\
+        {conflict_html}\
         <h2>Event journal</h2><p>total events {events}</p>\
         <table border=1><tr><th>agent</th><th>type</th><th>count</th></tr>{cover_rows}</table>\
+        <h2>Project Atlas</h2>{atlas_html}\
         <h2>Compaction coverage</h2><p>Checkpoints and task state persist in <code>memory</code> per workstream; \
         resume any agent with <code>aikd handoff --workstream &lt;name&gt;</code> or the MCP <code>handoff</code> tool. \
         No compaction event from an adapter is claimed as protection without a verified lifecycle integration.</p>\
-        <h2>Resources</h2><p>Semantic embedding default OFF · indexes incremental · queries served by one service (CLI/MCP/REST share <code>aikd-context</code>).</p>\
+        <h2>Resources</h2><p>Semantic embedding default OFF (zero-ONNX build unless <code>--features semantic</code>) · indexes incremental · queries served by one service (CLI/MCP/REST share <code>aikd-context</code>).</p>\
         </body></html>"
     );
     ([(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
