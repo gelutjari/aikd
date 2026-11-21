@@ -1702,12 +1702,23 @@ fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Resu
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "(none)".into());
         println!("Active: {active}");
-        // P1: who holds the daemon lock right now? A stale pointer vs a
-        // running old version is the #1 post-update confusion.
+        // P1: who REALLY holds the daemon? The lock file text can go stale
+        // (crash without cleanup); the TCP port is authoritative.
+        let cfg_probe = Config::load_validated("~/.aikd/config.yaml");
+        let probe = format!("127.0.0.1:{}", cfg_probe.server.rest_port);
         let lock = std::path::PathBuf::from(home.as_ref()).join("aikd.lock");
-        match std::fs::read_to_string(&lock) {
-            Ok(s) if !s.trim().is_empty() => println!("Daemon lock held by: {}", s.trim()),
-            _ => println!("Daemon lock: free (no daemon running)"),
+        let holder = std::fs::read_to_string(&lock).unwrap_or_default();
+        if probe_listening(&probe) {
+            let who = holder.trim();
+            if who.is_empty() {
+                println!("Daemon: RUNNING on {probe} (lock file empty — started externally?)");
+            } else {
+                println!("Daemon: RUNNING on {probe} — lock held by: {who}");
+            }
+        } else if holder.trim().is_empty() {
+            println!("Daemon: stopped (lock free)");
+        } else {
+            println!("Daemon: STOPPED but lock file is stale (was: {}). It will be ignored on next start.", holder.trim());
         }
         if let Ok(rd) = std::fs::read_dir(&vdir) {
             for e in rd.flatten() {

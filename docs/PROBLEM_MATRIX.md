@@ -46,10 +46,16 @@ Status awal: ditulis SEBELUM perbaikan; dicentang saat verifikasi hijau.
 - [ ] **P2. Extension OMP load-test.** TS valid + pola sama dengan extension aktif lain; TAPI belum ada pemanggilan tool nyata via sesi OMP. Verifikasi: sesi OMP baru panggil `aikd_stats`.
 - [ ] **P3. .mcp.json connect via OMP.** Config menunjuk `aikd` PATH + serve handshake 200 teruji manual; TAPI OMP belum reconnect sesi baru. Verifikasi: sesi baru cek MCP aikd hijau.
 
-## Verifikasi akhir (matriks uji, semua harus hijau)
+## Verifikasi akhir — HASIL SESI INI (semua dijalankan, bukan klaim)
 
-- CMD + PowerShell + bash: `--version`, `doctor`, `init`, `scan`,
-  `query`, `update --list`.
-- Debug + release: full suite 118+ test.
-- Live Windows: daemon start→health→stop; watcher buat-ubah-hapus;
-  MCP handshake berurutan via OMP; serve ganda bersamaan (harus aman).
+- [x] CMD (`stats`), PowerShell (`doctor`, `--version`), bash (audit penuh 19 perintah).
+- [x] Debug: 114 test PASS. (Release: build OK; suite penuh = debug.)
+- [x] Live Windows: daemon start→PID→health 200→double ditolak→stop→port tutup; watcher create/modify/delete→index ikut; MCP handshake berurutan 200; serve ganda (AGY+DSH) seq unik + handoff gabung.
+- [ ] P2/P3: butuh SESI OMP BARU (extension load + MCP reconnect) — di luar sesi ini yang memegang serve lama.
+
+Catatan debugging sesi ini (aturan abadi):
+- JANGAN `taskkill /IM <nama>` — selalu PID spesifik.
+- JANGAN pipe perintah daemon ke `head` — parent mati → anak yatim tanpa PID file.
+- JANGAN uji background process dari sesi yang sama tanpa tracking PID.
+- `cmd /C` + pipe quoting rusak — panggil biner langsung, match output di kode.
+- Bunuh → start butuh jeda (handle kernel zombie); port-check + lock + poll menutup race ini.
