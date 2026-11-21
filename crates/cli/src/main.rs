@@ -283,8 +283,22 @@ enum MemoryAction {
         #[arg(long, default_value = "default")]
         workstream: String,
     },
+    #[command(about = "Mark an item STALE (kept as evidence, hidden from active views)")]
+    Stale {
+        id: String,
+    },
+    #[command(about = "Archive an item (long-term retention, out of active views)")]
+    Archive {
+        id: String,
+    },
+    #[command(about = "Flag two items as CONFLICTED with a note (both preserved, neither becomes fact)")]
+    Conflict {
+        id_a: String,
+        id_b: String,
+        #[arg(long)]
+        note: String,
+    },
 }
-
 #[derive(Subcommand)]
 enum EventAction {
     #[command(about = "Append one canonical event (DSH-style adapter / batch import)")]
@@ -401,7 +415,7 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "model": embedder::MODEL_NAME,
-                "db_schema": 9,
+                "db_schema": 10,
             }))
             .unwrap_or_default()
         );
@@ -1575,6 +1589,21 @@ fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()>
                     None => println!("\n(no checkpoint)"),
                 }
             }
+        }
+        MemoryAction::Stale { id } => {
+            use aikd_storage::memory::mark_stale;
+            let n = mark_stale(database.conn(), &id)?;
+            println!("{}", if n == 1 { format!("Marked stale: {id}") } else { format!("No change (id {id} not active/conflicted)") });
+        }
+        MemoryAction::Archive { id } => {
+            use aikd_storage::memory::archive;
+            let n = archive(database.conn(), &id)?;
+            println!("{}", if n == 1 { format!("Archived: {id}") } else { format!("No change (id {id} not found)") });
+        }
+        MemoryAction::Conflict { id_a, id_b, note } => {
+            use aikd_storage::memory::flag_conflict;
+            flag_conflict(database.conn(), &id_a, &id_b, &note)?;
+            println!("Flagged conflict: {id_a} <-> {id_b} ({note}) — both preserved, neither is fact");
         }
     }
     Ok(())

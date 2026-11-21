@@ -104,6 +104,24 @@ pub struct MemoryTaskParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemoryLifecycleParams {
+    #[schemars(description = "Action: stale, archive")]
+    pub action: String,
+    #[schemars(description = "Memory item id")]
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemoryConflictParams {
+    #[schemars(description = "First item id")]
+    pub id_a: String,
+    #[schemars(description = "Second item id")]
+    pub id_b: String,
+    #[schemars(description = "Why they conflict")]
+    pub note: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EventAppendParams {
     #[schemars(description = "Event type: session_start, user_message, assistant_message, tool_call, tool_result, file_change, test_result, task_status, checkpoint")]
     pub event_type: String,
@@ -483,6 +501,38 @@ impl AikdServer {
             None => out.push_str("\n(no checkpoint)\n"),
         }
         out
+    }
+
+    #[tool(description = "Mark a memory item STALE or ARCHIVED (evidence kept, hidden from active views)")]
+    async fn memory_lifecycle(&self, Parameters(params): Parameters<MemoryLifecycleParams>) -> String {
+        let cfg = self.state.config.lock().await.clone();
+        let database = match Database::open(&cfg.db_path()) {
+            Ok(db) => db,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let n = match params.action.as_str() {
+            "stale" => aikd_storage::memory::mark_stale(database.conn(), &params.id),
+            "archive" => aikd_storage::memory::archive(database.conn(), &params.id),
+            other => return format!("Error: unknown action '{other}' (use stale|archive)"),
+        };
+        match n {
+            Ok(1) => format!("{}: {}", params.action, params.id),
+            Ok(_) => format!("No change (id {} not found or not in a flaggable state)", params.id),
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    #[tool(description = "Flag two memory items as CONFLICTED with a note (both preserved, neither becomes fact)")]
+    async fn memory_conflict(&self, Parameters(params): Parameters<MemoryConflictParams>) -> String {
+        let cfg = self.state.config.lock().await.clone();
+        let database = match Database::open(&cfg.db_path()) {
+            Ok(db) => db,
+            Err(e) => return format!("Error: {e}"),
+        };
+        match aikd_storage::memory::flag_conflict(database.conn(), &params.id_a, &params.id_b, &params.note) {
+            Ok(()) => format!("Flagged conflict: {} <-> {} ({})", params.id_a, params.id_b, params.note),
+            Err(e) => format!("Error: {e}"),
+        }
     }
 
     #[tool(description = "Append a canonical agent event to the journal (AGY-style live adapter). Idempotent on content.")]

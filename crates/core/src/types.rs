@@ -120,6 +120,7 @@ pub struct MemoryItem {
     pub status: String,
     pub confidence: f64,
     pub supersedes: Option<String>,
+    pub conflict_note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

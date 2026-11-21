@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -51,6 +51,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if current < 9 {
         migrate_v9(conn)?;
+    }
+
+    if current < 10 {
+        migrate_v10(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -373,6 +377,39 @@ fn migrate_v9(conn: &Connection) -> Result<()> {
     )?;
 
     log::info!("Migration v9 applied — project atlas table");
+    Ok(())
+}
+
+fn migrate_v10(conn: &Connection) -> Result<()> {
+    // Memory governance (§11): STALE / CONFLICTED lifecycle + conflict notes.
+    // SQLite CHECK constraints cannot be altered, so rebuild the table with
+    // the wider status set and copy existing rows verbatim.
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS memory_new (
+            id TEXT PRIMARY KEY,
+            project_path TEXT NOT NULL,
+            workstream TEXT NOT NULL DEFAULT 'default',
+            kind TEXT NOT NULL CHECK(kind IN ('fact','decision','constraint','discovery','task','checkpoint')),
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'explicit' CHECK(source IN ('explicit','agent-asserted','inferred')),
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','superseded','stale','archived','conflicted')),
+            confidence REAL NOT NULL DEFAULT 1.0,
+            supersedes TEXT,
+            conflict_note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO memory_new (id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, conflict_note, created_at, updated_at)
+            SELECT id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, NULL, created_at, updated_at FROM memory;
+        DROP TABLE memory;
+        ALTER TABLE memory_new RENAME TO memory;
+        CREATE INDEX IF NOT EXISTS idx_memory_project ON memory(project_path, workstream, kind, status);
+        ",
+    )?;
+
+    log::info!("Migration v10 applied — memory governance (stale/archived/conflicted)");
     Ok(())
 }
 

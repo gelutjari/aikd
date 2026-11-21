@@ -18,12 +18,13 @@ fn map_row(row: &rusqlite::Row) -> Result<MemoryItem, rusqlite::Error> {
         status: row.get(7)?,
         confidence: row.get(8)?,
         supersedes: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        conflict_note: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
-const COLS: &str = "id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, created_at, updated_at";
+const COLS: &str = "id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, conflict_note, created_at, updated_at";
 
 /// Save a new memory item. IDs are UUIDs; callers may pass `supersedes`
 /// to retire an older item in the same call (see [`supersede`]).
@@ -55,6 +56,7 @@ pub fn save_memory(
         status: "active".into(),
         confidence,
         supersedes: None,
+        conflict_note: None,
         created_at: now.clone(),
         updated_at: now,
     })
@@ -132,6 +134,57 @@ pub fn latest_checkpoint(
     Ok(items.into_iter().next())
 }
 
+/// Mark an item STALE: still stored and listed on request, but excluded
+/// from active views, handoff packages and Atlas decisions. The evidence
+/// (provenance, supersession chain) is preserved, never deleted.
+pub fn mark_stale(conn: &Connection, id: &str) -> Result<usize> {
+    let now = chrono::Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE memory SET status='stale', updated_at=?1 WHERE id=?2 AND status IN ('active','conflicted')",
+        rusqlite::params![now, id],
+    )?)
+}
+
+/// Archive an item: long-term retention without active visibility.
+pub fn archive(conn: &Connection, id: &str) -> Result<usize> {
+    let now = chrono::Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE memory SET status='archived', updated_at=?1 WHERE id=?2 AND status IN ('active','superseded','stale','conflicted')",
+        rusqlite::params![now, id],
+    )?)
+}
+
+/// Flag two items as CONFLICTED, preserving both bodies plus a note that
+/// references the other side. Never silently converts either into fact.
+pub fn flag_conflict(conn: &Connection, id_a: &str, id_b: &str, note: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    for (id, other) in [(id_a, id_b), (id_b, id_a)] {
+        let n = conn.execute(
+            "UPDATE memory SET status='conflicted', conflict_note=?1, updated_at=?2 WHERE id=?3 AND status IN ('active','stale')",
+            rusqlite::params![format!("conflicts with {other}: {note}"), now, id],
+        )?;
+        if n == 0 {
+            anyhow::bail!("cannot flag conflict: item {id} not found or not flaggable (status must be active/stale)");
+        }
+    }
+    Ok(())
+}
+
+/// All conflicted items in scope, with their notes — for handoff/Atlas.
+pub fn conflicts(conn: &Connection, project_path: &str, workstream: Option<&str>) -> Result<Vec<MemoryItem>> {
+    let mut sql = format!("SELECT {COLS} FROM memory WHERE project_path=?1 AND status='conflicted'");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(project_path.to_string())];
+    if let Some(ws) = workstream {
+        sql.push_str(" AND workstream=?2");
+        params.push(Box::new(ws.to_string()));
+    }
+    sql.push_str(" ORDER BY updated_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(&refs[..], map_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +222,26 @@ mod tests {
         assert!(latest_checkpoint(&conn, "/p", "ws").unwrap().is_some());
         // Other workstream isolated.
         assert!(active_tasks(&conn, "/p", "other").unwrap().is_empty());
+    }
+    #[test]
+    fn stale_archive_conflict_lifecycle() {
+        let conn = setup();
+        let a = save_memory(&conn, "/p", "ws", "decision", "A", "body-a", "explicit", 1.0).unwrap();
+        let b = save_memory(&conn, "/p", "ws", "decision", "B", "body-b", "agent-asserted", 0.7).unwrap();
+        // Stale hides from active views but keeps evidence.
+        assert_eq!(mark_stale(&conn, &a.id).unwrap(), 1);
+        assert!(list_memory(&conn, "/p", Some("ws"), Some("decision"), false).unwrap().iter().all(|m| m.id != a.id));
+        assert_eq!(list_memory(&conn, "/p", Some("ws"), Some("decision"), true).unwrap().len(), 2);
+        // Conflict preserves both with cross-referencing notes.
+        flag_conflict(&conn, &a.id, &b.id, "opposite DB choice").unwrap();
+        let cf = conflicts(&conn, "/p", Some("ws")).unwrap();
+        assert_eq!(cf.len(), 2);
+        assert!(cf.iter().all(|m| m.status == "conflicted"));
+        assert!(cf.iter().all(|m| m.conflict_note.as_deref().unwrap_or("").contains("opposite DB choice")));
+        // Neither side became fact; bodies intact.
+        assert!(cf.iter().any(|m| m.body == "body-a"));
+        // Archived items leave every listing except explicit status queries.
+        assert_eq!(archive(&conn, &a.id).unwrap(), 1);
+        assert!(conflicts(&conn, "/p", Some("ws")).unwrap().iter().all(|m| m.id != a.id));
     }
 }
