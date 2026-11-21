@@ -161,7 +161,7 @@ fn default_rest_port() -> u16 {
     9090
 }
 fn default_cors_origins() -> Vec<String> {
-    vec!["*".to_string()]
+    Vec::new()
 }
 
 impl Default for ScanConfig {
@@ -186,10 +186,17 @@ impl Default for ScanConfig {
             include_extensions: default_extensions(),
             exclude_extensions: Vec::new(),
             include_files: Vec::new(),
-            exclude_files: vec![".env", "*.bak", "*.tmp", "*.secret"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            exclude_files: vec![
+                ".env", ".env.*", "*.bak", "*.tmp", "*.secret",
+                "*.pem", "*.key", "*.p12", "*.pfx",
+                "id_rsa", "id_ed25519", "id_ecdsa", "*.pub",
+                "credentials.json", "credentials.yaml", "credentials.yml",
+                "secrets.json", "secrets.yaml", "secrets.yml",
+                ".npmrc", ".pypirc",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
             follow_symlinks: false,
         }
     }

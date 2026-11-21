@@ -243,15 +243,45 @@ struct ApiResponse<T: Serialize> {
     error: Option<String>,
 }
 
-fn error_response<T: Serialize>(
-    msg: &str,
-    _code: StatusCode,
-) -> Result<Json<ApiResponse<T>>, StatusCode> {
-    Ok(Json(ApiResponse {
-        success: false,
-        data: None,
-        error: Some(msg.to_string()),
-    }))
+/// API error that carries both HTTP status and a JSON body.
+/// Replaces the old pattern of returning HTTP 200 with an error payload.
+struct ApiError {
+    code: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn new(code: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let body = Json(ApiResponse::<serde_json::Value> {
+            success: false,
+            data: None,
+            error: Some(self.message),
+        });
+        (self.code, body).into_response()
+    }
+}
+
+impl From<StatusCode> for ApiError {
+    fn from(code: StatusCode) -> Self {
+        let message = code
+            .canonical_reason()
+            .unwrap_or("error")
+            .to_string();
+        Self { code, message }
+    }
+}
+
+fn error_response<T: Serialize>(msg: &str, code: StatusCode) -> Result<Json<ApiResponse<T>>, ApiError> {
+    Err(ApiError::new(code, msg))
 }
 
 /// Validate authentication token from request headers.
@@ -259,38 +289,35 @@ fn error_response<T: Serialize>(
 /// Rejects empty tokens and missing tokens when auth is configured.
 /// Supports both simple token auth and JWT tokens.
 fn check_auth(headers: &HeaderMap, token: &Option<String>) -> bool {
-    match token {
-        Some(expected) if !expected.is_empty() => {
-            // Token is configured and non-empty — require valid Bearer token
-            if let Some(auth) = headers.get("authorization") {
-                if let Ok(auth_str) = auth.to_str() {
-                    let provided = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
-
-                    // Try simple token match first
-                    if constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-                        return true;
-                    }
-
-                    // Try JWT validation
-                    let jwt_config = JwtConfig {
-                        secret: expected.clone(),
-                        expiration_hours: 24,
-                    };
-                    if jwt_config.validate_token(provided).is_ok() {
-                        return true;
-                    }
-
-                    return false;
-                }
-            }
-            false
-        }
-        // No token configured or empty token — deny by default for security
+    // Fail-closed: without a configured token every protected endpoint
+    // rejects the request. Health/login stay public by design.
+    let expected = match token {
+        Some(t) if !t.is_empty() => t,
         _ => {
-            log::warn!("No auth_token configured — API is unauthenticated. Set server.auth_token in config.yaml");
-            true
+            log::warn!("No auth_token configured — rejecting request. Set server.auth_token in config.yaml");
+            return false;
+        }
+    };
+    // Token is configured and non-empty — require valid Bearer token
+    if let Some(auth) = headers.get("authorization") {
+        if let Ok(auth_str) = auth.to_str() {
+            let provided = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+            // Try simple token match first
+            if constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+                return true;
+            }
+            // Try JWT validation
+            let jwt_config = JwtConfig {
+                secret: expected.clone(),
+                expiration_hours: 24,
+            };
+            if jwt_config.validate_token(provided).is_ok() {
+                return true;
+            }
+            return false;
         }
     }
+    false
 }
 
 /// Validate JWT token from request headers.
@@ -329,7 +356,7 @@ async fn handle_query(
     State(state): State<RestState>,
     headers: HeaderMap,
     Query(params): Query<QueryParams>,
-) -> Result<Json<ApiResponse<Vec<aikd_core::SearchResult>>>, StatusCode> {
+) -> Result<Json<ApiResponse<Vec<aikd_core::SearchResult>>>, ApiError> {
     let start = std::time::Instant::now();
     state.metrics.query_total.inc();
 
@@ -381,11 +408,11 @@ async fn handle_query(
 
     let results = if hybrid {
         if !cfg.embedding.enabled {
-            return Err(StatusCode::PRECONDITION_FAILED);
+            return Err(ApiError::from(StatusCode::PRECONDITION_FAILED));
         }
         let model_dir = cfg.model_path();
         if !embedder::is_model_downloaded(&model_dir) {
-            return Err(StatusCode::PRECONDITION_FAILED);
+            return Err(ApiError::from(StatusCode::PRECONDITION_FAILED));
         }
         let mut model =
             embedder::create_model(&model_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -431,10 +458,10 @@ async fn handle_query(
 async fn handle_stats(
     State(state): State<RestState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
     }
 
     let database = state.database.lock().await;
@@ -492,16 +519,25 @@ async fn handle_scan(
     State(state): State<RestState>,
     headers: HeaderMap,
     Json(body): Json<ScanBody>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<Json<ApiResponse<String>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
     }
 
     let database = state.database.lock().await;
 
+    let override_path = match body.path {
+        Some(p) => {
+            let safe = aikd_core::security::sanitize_path_input(&p).map_err(|e| {
+                ApiError::new(StatusCode::BAD_REQUEST, format!("Invalid scan path: {e}"))
+            })?;
+            Some(safe)
+        }
+        None => None,
+    };
     let opts = aikd_scanner::ScanOptions {
-        override_path: body.path.map(std::path::PathBuf::from),
+        override_path,
     };
 
     match aikd_scanner::run_scan(&cfg, &database, &state.tantivy, &opts) {
@@ -525,10 +561,10 @@ async fn handle_remember(
     State(state): State<RestState>,
     headers: HeaderMap,
     Json(body): Json<RememberBody>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<Json<ApiResponse<String>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
     }
 
     let database = state.database.lock().await;
@@ -567,10 +603,10 @@ async fn handle_recall(
     State(state): State<RestState>,
     headers: HeaderMap,
     Json(body): Json<RecallBody>,
-) -> Result<Json<ApiResponse<Vec<aikd_core::Conversation>>>, StatusCode> {
+) -> Result<Json<ApiResponse<Vec<aikd_core::Conversation>>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
     }
 
     let database = state.database.lock().await;
@@ -621,8 +657,11 @@ async fn handle_health(State(state): State<RestState>) -> Json<ApiResponse<serde
 
 /// Prometheus metrics endpoint.
 /// Returns metrics in Prometheus text format.
-async fn handle_metrics(State(state): State<RestState>) -> impl IntoResponse {
+async fn handle_metrics(State(state): State<RestState>, headers: HeaderMap) -> impl IntoResponse {
     let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
     let db_size = std::fs::metadata(cfg.db_path())
         .map(|m| m.len())
         .unwrap_or(0);
@@ -672,12 +711,12 @@ async fn handle_metrics(State(state): State<RestState>) -> impl IntoResponse {
         [(axum::http::header::CONTENT_TYPE, content_type)],
         buffer,
     )
+        .into_response()
 }
-
 async fn handle_status(
     State(state): State<RestState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
         return error_response("Unauthorized", StatusCode::UNAUTHORIZED);
@@ -702,7 +741,7 @@ async fn handle_status(
 async fn handle_embed(
     State(state): State<RestState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
         return error_response("Unauthorized", StatusCode::UNAUTHORIZED);
@@ -731,7 +770,7 @@ async fn handle_embed(
 async fn handle_sessions(
     State(state): State<RestState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<Vec<aikd_core::Session>>>, StatusCode> {
+) -> Result<Json<ApiResponse<Vec<aikd_core::Session>>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
         return error_response("Unauthorized", StatusCode::UNAUTHORIZED);
@@ -872,10 +911,13 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         }
     };
 
-    // Configure rate limiting: 10 requests per second per IP
+    // Configure rate limiting: 1 request per second per IP, burst 10.
+    // PeerIpKeyExtractor always resolves on our loopback listener; the
+    // default smart extractor fails here and rejects everything with 500.
     let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()
         .per_second(1)
         .burst_size(10)
+        .key_extractor(tower_governor::key_extractor::PeerIpKeyExtractor)
         .finish()
         .expect("Failed to create rate limiter config");
 
@@ -927,8 +969,11 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         log::info!("AIKD REST server shutting down...");
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal)
+    .await?;
     Ok(())
 }

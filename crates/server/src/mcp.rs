@@ -96,8 +96,15 @@ impl AikdServer {
             Err(e) => return format!("Error: {e}"),
         };
 
+        let override_path = match params.path {
+            Some(p) => match aikd_core::security::sanitize_path_input(&p) {
+                Ok(safe) => Some(safe),
+                Err(e) => return format!("Error: invalid scan path: {e}"),
+            },
+            None => None,
+        };
         let opts = aikd_scanner::ScanOptions {
-            override_path: params.path.map(std::path::PathBuf::from),
+            override_path,
         };
 
         match aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts) {

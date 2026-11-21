@@ -4,6 +4,7 @@ pub mod error;
 pub mod fusion;
 pub mod platform;
 pub mod resource;
+pub mod security;
 pub mod vector;
 pub mod types;
 
