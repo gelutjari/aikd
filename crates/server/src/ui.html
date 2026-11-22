@@ -1,0 +1,1147 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIKD Studio — Local AI Knowledge & Memory Control Center</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --bg-panel: #111827;
+      --bg-card: #161f33;
+      --bg-input: #0b1120;
+      --border: #1e293b;
+      --border-hover: #334155;
+      --fg: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #10b981;
+      --accent-hover: #059669;
+      --accent-soft: rgba(16, 185, 129, 0.14);
+      --blue: #3b82f6;
+      --blue-soft: rgba(59, 130, 246, 0.14);
+      --amber: #f59e0b;
+      --amber-soft: rgba(245, 158, 11, 0.14);
+      --rose: #f43f5e;
+      --rose-soft: rgba(244, 63, 94, 0.14);
+      --purple: #a855f7;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--font-sans);
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    /* Top Navbar */
+    header {
+      background: rgba(17, 24, 39, 0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-logo {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #10b981, #0ea5e9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 18px;
+      color: #090d16;
+      box-shadow: 0 4px 16px rgba(16, 185, 129, 0.25);
+    }
+    .brand-title { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+    .brand-sub { font-size: 12px; color: var(--muted); }
+    .nav-tabs {
+      display: flex;
+      gap: 6px;
+      background: var(--bg-input);
+      padding: 4px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+    .tab-btn {
+      background: transparent;
+      color: var(--muted);
+      border: none;
+      padding: 8px 16px;
+      border-radius: 7px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .tab-btn:hover { color: var(--fg); background: rgba(255,255,255,0.04); }
+    .tab-btn.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 999px;
+      color: var(--muted);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+    }
+    /* Main Container */
+    main {
+      max-width: 1360px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 24px 28px 60px;
+      flex: 1;
+    }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Stat Cards */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border-color 0.15s;
+    }
+    .stat-card:hover { border-color: var(--border-hover); }
+    .stat-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat-value { font-size: 28px; font-weight: 800; font-family: var(--font-mono); color: var(--fg); }
+    .stat-sub { font-size: 12px; color: var(--muted); }
+
+    /* Panels & Grid */
+    .grid-2 { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; margin-bottom: 20px; }
+    @media (max-width: 960px) { .grid-2 { grid-template-columns: 1fr; } }
+    .panel {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-title { font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .panel-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* Buttons & Inputs */
+    .btn {
+      background: var(--bg-card);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { border-color: var(--border-hover); background: #1e293b; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary {
+      background: var(--accent);
+      color: #090d16;
+      border-color: var(--accent);
+    }
+    .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .btn-blue { background: var(--blue-soft); color: #60a5fa; border-color: rgba(59,130,246,0.3); }
+    .btn-blue:hover { background: rgba(59,130,246,0.25); }
+    .btn-amber { background: var(--amber-soft); color: #fbbf24; border-color: rgba(245,158,11,0.3); }
+    .btn-danger { background: var(--rose-soft); color: #fb7185; border-color: rgba(244,63,94,0.3); }
+    .btn-sm { padding: 5px 10px; font-size: 12px; }
+
+    .input, .select, .textarea {
+      background: var(--bg-input);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      padding: 9px 13px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-family: inherit;
+      width: 100%;
+      transition: border-color 0.15s;
+    }
+    .input:focus, .select:focus, .textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .mono { font-family: var(--font-mono); }
+
+    /* Tables & Lists */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th {
+      text-align: left;
+      padding: 10px 12px;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border);
+    }
+    td {
+      padding: 11px 12px;
+      border-bottom: 1px solid rgba(30, 41, 59, 0.6);
+      vertical-align: top;
+    }
+    tr:hover td { background: rgba(255,255,255,0.015); }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--font-mono);
+    }
+    .badge-green { background: var(--accent-soft); color: var(--accent); }
+    .badge-blue { background: var(--blue-soft); color: #60a5fa; }
+    .badge-amber { background: var(--amber-soft); color: #fbbf24; }
+    .badge-rose { background: var(--rose-soft); color: #fb7185; }
+
+    /* Code Snippet Cards */
+    .result-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+    .result-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .result-path {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: #38bdf8;
+      word-break: break-all;
+    }
+    .result-code {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: #cbd5e1;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    /* Toast Notification */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e293b;
+      color: var(--fg);
+      border: 1px solid var(--accent);
+      padding: 12px 18px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+      display: none;
+      z-index: 100;
+    }
+
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 14px; }
+    .form-group { margin-bottom: 14px; }
+    .form-label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+    .path-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-logo">⚡</div>
+      <div>
+        <div class="brand-title">AIKD Studio</div>
+        <div class="brand-sub">Ultra-Fast Local Knowledge & Memory Engine (Rust Schema v14 Lean)</div>
+      </div>
+    </div>
+
+    <nav class="nav-tabs">
+      <button class="tab-btn active" onclick="switchTab('overview', this)">📊 Overview & Scan</button>
+      <button class="tab-btn" onclick="switchTab('explorer', this)">🔍 Search & Symbols</button>
+      <button class="tab-btn" onclick="switchTab('memory', this)">🧠 Memory & Handoff</button>
+      <button class="tab-btn" onclick="switchTab('settings', this)">⚙️ Settings & Paths</button>
+    </nav>
+
+    <div class="status-pill">
+      <span class="dot"></span>
+      <span id="nav-version">AIKD v2.0.0 · FTS5 Lean</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- ================= TAB 1: OVERVIEW & SCAN ================= -->
+    <section id="tab-overview" class="tab-pane active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-label">Indexed Files</span>
+          <span class="stat-value" id="st-files">—</span>
+          <span class="stat-sub">Blake3 incremental hash</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Code & Doc Chunks</span>
+          <span class="stat-value" id="st-chunks">—</span>
+          <span class="stat-sub">SQLite FTS5 contentless</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Extracted Symbols</span>
+          <span class="stat-value" id="st-symbols">—</span>
+          <span class="stat-sub">Functions, structs, classes</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Active Memories</span>
+          <span class="stat-value" id="st-memories">—</span>
+          <span class="stat-sub" id="st-memories-sub">Decisions, tasks, facts</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Event Journal</span>
+          <span class="stat-value" id="st-events">—</span>
+          <span class="stat-sub" id="st-sessions-sub">Across AI agent sessions</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Database Footprint</span>
+          <span class="stat-value" id="st-dbsize">—</span>
+          <span class="stat-sub" id="st-schema">Schema v14 · Zero-Duplication</span>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <!-- Quick Scan & Maintenance Panel -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">⚡ Quick Scan & Database Maintenance</div>
+              <div class="panel-desc">Arahkan ke folder project baru atau jalankan scan inkremental pada semua workspace terdaftar.</div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Scan Folder Project Tertentu (On-Demand Directed Scan)</label>
+            <div style="display:flex; gap:8px;">
+              <input id="quick-scan-path" class="input mono" placeholder="Contoh: D:\PRODY atau C:\Users\hp\aikd" />
+              <button class="btn btn-primary" onclick="runDirectedScan(false)" id="btn-scan-dir">⚡ Scan Path</button>
+              <button class="btn btn-blue" onclick="runDirectedScan(true)" title="Sekalian tambahkan ke daftar permanen config.yaml">➕ Scan & Simpan ke Config</button>
+            </div>
+          </div>
+
+          <div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
+            <button class="btn btn-primary" onclick="runAllScan(false)">🔄 Scan Semua Workspace</button>
+            <button class="btn btn-blue" onclick="runMaintenance('sync_rules')">📜 Sync Rules & Skills (.md) ke Memory</button>
+            <button class="btn btn-amber" onclick="runMaintenance('gc')">🧹 Garbage Collect (Bersihkan File Hilang)</button>
+            <button class="btn" onclick="runMaintenance('rebuild_fts')">🔨 Rebuild FTS5 Index</button>
+            <button class="btn" onclick="runMaintenance('prune_content')">✂️ Prune Legacy Content</button>
+          </div>
+
+          <div id="scan-output" style="margin-top:14px; display:none;" class="result-code"></div>
+        </div>
+
+        <!-- How AIKD Scanning Works & System Info -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">🖥️ System Profile & Cara Kerja Scanner</div>
+              <div class="panel-desc">Status resource perangkat dan alur kerja pengindeksan AIKD.</div>
+            </div>
+          </div>
+          <div id="sys-info" style="font-size:13px; color:var(--muted); display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px;">
+            <div>CPU Cores: <strong style="color:var(--fg)" id="sys-cpu">—</strong></div>
+            <div>Total RAM: <strong style="color:var(--fg)" id="sys-ram">—</strong></div>
+            <div>Storage Engine: <strong style="color:var(--accent)">SQLite FTS5 Contentless</strong></div>
+            <div>Live Snippets: <strong style="color:var(--fg)">Disk Read (Max 120 lines)</strong></div>
+          </div>
+          <div style="background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:12px; font-size:12px; color:var(--muted);">
+            <strong style="color:var(--fg);">💡 Bagaimana AIKD Melakukan Scanning?</strong>
+            <ol style="margin-left:18px; margin-top:6px; display:flex; flex-direction:column; gap:4px;">
+              <li><strong>Auto / Default Workspace:</strong> Membaca daftar folder di <code>scan.include_paths</code> (bisa diatur di tab Settings).</li>
+              <li><strong>Directed Scan:</strong> Anda atau AI Agent bisa men-scan folder mana saja kapan pun lewat kotak di samping atau tool MCP <code>scan</code>.</li>
+              <li><strong>Blake3 Incremental:</strong> Hanya file yang berubah hash-nya yang di-index ulang. Teks asli tetap di disk, DB tetap ramping!</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dependency Graph & Recent Activity -->
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">🕸️ Project File Dependency Graph</div>
+              <div class="panel-desc">Visualisasi hubungan import antar file pada project yang diindeks.</div>
+            </div>
+            <div style="display:flex; gap:6px;">
+              <input id="graph-path-input" class="input mono" style="width:240px; padding:5px 10px; font-size:12px;" placeholder="Filter project path..." />
+              <button class="btn btn-sm" onclick="loadGraph()">Muat Graph</button>
+            </div>
+          </div>
+          <div id="graph-container" style="min-height:220px; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--muted); font-size:13px;">
+            Memuat graph...
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">📡 Multi-Agent Event Coverage</div>
+              <div class="panel-desc">Aktivitas AI Agent (Antigravity, Pi CLI, OMP CLI, Claude) yang tercatat di journal.</div>
+            </div>
+          </div>
+          <div id="coverage-container">Memuat data event...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= TAB 2: SEARCH & SYMBOLS ================= -->
+    <section id="tab-explorer" class="tab-pane">
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">🔍 Live Codebase Search (BM25 FTS5) & Symbol Lookup</div>
+            <div class="panel-desc">Uji kecepatan pencarian AIKD secara langsung. Potongan kode dibaca langsung dari disk secara real-time.</div>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 180px 1fr 180px 110px auto; gap:10px; margin-bottom:18px;">
+          <select id="search-mode" class="select">
+            <option value="query">🔎 BM25 Full-Text</option>
+            <option value="symbol">🧩 Code Symbol</option>
+          </select>
+          <input id="search-input" class="input mono" placeholder="Ketik kata kunci kode, fungsi, atau struct... (Enter untuk cari)" onkeydown="if(event.key==='Enter') runSearch()" />
+          <input id="search-path" class="input mono" placeholder="Filter path (opsional)" onkeydown="if(event.key==='Enter') runSearch()" />
+          <input id="search-ext" class="input mono" placeholder="Ext (rs, ts, py)" onkeydown="if(event.key==='Enter') runSearch()" />
+          <button class="btn btn-primary" onclick="runSearch()">Cari Sekarang</button>
+        </div>
+
+        <div id="search-meta" style="font-size:12px; color:var(--muted); margin-bottom:12px;"></div>
+        <div id="search-results">
+          <div style="text-align:center; padding:40px; color:var(--muted); font-size:13px;">
+            Masukkan kata kunci di atas untuk mencari potongan kode atau simbol fungsi/class di seluruh codebase Anda.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= TAB 3: MEMORY & HANDOFF ================= -->
+    <section id="tab-memory" class="tab-pane">
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">🧠 Structured Memory Governance</div>
+              <div class="panel-desc">Memori jangka panjang AI Agent: keputusan arsitektur, constraint, fakta, task, dan checkpoint.</div>
+            </div>
+            <div style="display:flex; gap:6px;">
+              <select id="mem-filter-kind" class="select" style="width:140px; padding:5px 8px; font-size:12px;" onchange="loadMemories()">
+                <option value="">Semua Jenis</option>
+                <option value="decision">decision</option>
+                <option value="fact">fact</option>
+                <option value="constraint">constraint</option>
+                <option value="discovery">discovery</option>
+                <option value="task">task</option>
+                <option value="checkpoint">checkpoint</option>
+              </select>
+              <button class="btn btn-sm btn-blue" onclick="syncRulesFromMemTab()">📜 Sync .md Rules/Skills</button>
+              <button class="btn btn-sm" onclick="loadMemories()">🔄 Refresh</button>
+            </div>
+          </div>
+          <div id="memory-list-container" style="max-height:620px; overflow-y:auto;">Memuat memori...</div>
+        </div>
+
+        <div>
+          <!-- Add Memory Form -->
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">➕ Simpan Memori Baru</div>
+                <div class="panel-desc">Tambahkan aturan, keputusan, atau checkpoint agar diingat oleh semua AI Agent.</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label class="form-label">Jenis Memori (Kind)</label>
+                <select id="new-mem-kind" class="select">
+                  <option value="decision">decision (Keputusan Arsitektur)</option>
+                  <option value="constraint">constraint (Aturan / Pantangan)</option>
+                  <option value="fact">fact (Fakta Proyek)</option>
+                  <option value="task">task (Tugas Aktif)</option>
+                  <option value="checkpoint">checkpoint (Titik Resume)</option>
+                  <option value="discovery">discovery (Temuan Bug/Riset)</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">Workstream</label>
+                <input id="new-mem-ws" class="input mono" value="default" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Judul Singkat</label>
+              <input id="new-mem-title" class="input" placeholder="Contoh: Gunakan SQLite FTS5 Contentless tanpa Tantivy" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Isi / Penjelasan Detail</label>
+              <textarea id="new-mem-body" class="textarea" rows="3" placeholder="Detail keputusan atau informasi penting..."></textarea>
+            </div>
+            <button class="btn btn-primary" onclick="createMemory()">💾 Simpan ke Memory AIKD</button>
+          </div>
+
+          <!-- Handoff Generator -->
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">🤝 Context Handoff Package Generator</div>
+                <div class="panel-desc">Paketkan memori, task aktif, dan event terbaru untuk di-copy-paste ke sesi AI Agent baru.</div>
+              </div>
+              <button class="btn btn-blue btn-sm" onclick="copyHandoff()">📋 Copy Handoff</button>
+            </div>
+            <pre id="handoff-box" class="result-code" style="max-height:220px;">Memuat handoff...</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= TAB 4: SETTINGS & PATHS ================= -->
+    <section id="tab-settings" class="tab-pane">
+      <div class="grid-2">
+        <!-- Workspace Include Paths Manager -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">📂 Daftar Workspace (`scan.include_paths`)</div>
+              <div class="panel-desc">Folder yang otomatis dipindai saat menjalankan <code>aikd scan</code>.</div>
+            </div>
+          </div>
+
+          <div style="display:flex; gap:8px; margin-bottom:14px;">
+            <input id="cfg-new-path" class="input mono" placeholder="Tambah path folder baru, misal: D:\PRODY" onkeydown="if(event.key==='Enter') addIncludePath()" />
+            <button class="btn btn-primary" onclick="addIncludePath()">➕ Tambah Folder</button>
+          </div>
+
+          <div id="cfg-paths-list" style="max-height:420px; overflow-y:auto;"></div>
+        </div>
+
+        <!-- General Settings Form -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">⚙️ Konfigurasi Scanner, Chunker & Filter</div>
+              <div class="panel-desc">Pengaturan disimpan langsung ke file <code>~/.aikd/config.yaml</code>.</div>
+            </div>
+            <button class="btn btn-primary" onclick="saveSettings()">💾 Simpan Semua Setting</button>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Preset Filter Cerdas Multi-Agent (1-Klik)</label>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+              <button class="btn btn-sm btn-primary" onclick="applyFilterPreset('recommended')" title="Simpan Kode Proyek, Rules (.md), & Skills; Buang semua sampah cache/telemetry/scratch agent">✨ Preset Recommended (Bersih & Optimal)</button>
+              <button class="btn btn-sm btn-blue" onclick="applyFilterPreset('strict_code')" title="Hanya kode proyek & aturan utama; kecualikan semua log/history/sessions">🎯 Preset Strict Code & Rules Only</button>
+              <button class="btn btn-sm btn-amber" onclick="applyFilterPreset('include_sessions')" title="Ikutkan riwayat session/chat agent tetapi tetap buang sampah browser/telemetry">💬 Preset Include Agent Sessions</button>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label class="form-label">Max Chunk Tokens</label>
+              <input id="cfg-max-tokens" type="number" class="input mono" />
+            </div>
+            <div>
+              <label class="form-label">Min Chunk Tokens</label>
+              <input id="cfg-min-tokens" type="number" class="input mono" />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Ekstensi File yang Diindeks (`include_extensions`, pisahkan dengan koma)</label>
+            <textarea id="cfg-extensions" class="textarea mono" rows="3"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Folder yang Dikecualikan (`exclude_paths`, pisahkan dengan koma)</label>
+            <textarea id="cfg-exclude-paths" class="textarea mono" rows="4"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">File yang Dikecualikan (`exclude_files`, pisahkan dengan koma)</label>
+            <textarea id="cfg-exclude-files" class="textarea mono" rows="2"></textarea>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label class="form-label">Follow Symlinks</label>
+              <select id="cfg-symlinks" class="select">
+                <option value="false"> Tidak (Recommended)</option>
+                <option value="true">Ya</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label">REST API Port</label>
+              <input id="cfg-port" type="number" class="input mono" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Connected AI Agents Matrix -->
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">🤖 Koneksi AI Agent (CLI & Non-CLI / IDE)</div>
+            <div class="panel-desc">Deteksi otomatis semua AI Agent di perangkat Anda dan hubungkan ke MCP Server <code>aikd serve</code> dengan 1 klik.</div>
+          </div>
+          <button class="btn btn-primary" onclick="registerAllAgents()">🔌 Auto-Register Semua AI Agent</button>
+        </div>
+        <div id="agents-container">Memuat daftar AI Agent...</div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast"></div>
+
+  <script>
+    let currentConfig = null;
+
+    function showToast(msg, isError = false) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.style.borderColor = isError ? 'var(--rose)' : 'var(--accent)';
+      t.style.display = 'block';
+      clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => { t.style.display = 'none'; }, 3500);
+    }
+
+    function switchTab(id, btn) {
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('tab-' + id).classList.add('active');
+      btn.classList.add('active');
+      if (id === 'overview') loadOverview();
+      if (id === 'memory') { loadMemories(); loadHandoff(); }
+      if (id === 'settings') { loadConfig(); loadAgents(); }
+    }
+
+    function esc(s) {
+      if (s === null || s === undefined) return '';
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts
+      });
+      return res.json();
+    }
+
+    async function loadOverview() {
+      try {
+        const res = await api('/api/overview');
+        if (!res.success) return;
+        const d = res.data;
+        document.getElementById('st-files').textContent = d.files.toLocaleString();
+        document.getElementById('st-chunks').textContent = d.chunks.toLocaleString();
+        document.getElementById('st-symbols').textContent = d.symbols.toLocaleString();
+        document.getElementById('st-memories').textContent = d.memory_active.toLocaleString();
+        document.getElementById('st-memories-sub').textContent =
+          `${d.memory_stale} stale · ${d.memory_archived} archived · ${d.memory_conflicted} conflict`;
+        document.getElementById('st-events').textContent = d.events.toLocaleString();
+        document.getElementById('st-sessions-sub').textContent = `${d.sessions} sesi percakapan tercatat`;
+        document.getElementById('st-dbsize').textContent = `${d.db_mb.toFixed(1)} MB`;
+        document.getElementById('st-schema').textContent = `Schema v${d.schema_version} · FTS5 Lean`;
+        document.getElementById('nav-version').textContent = `AIKD v${d.version} · Schema v${d.schema_version}`;
+        document.getElementById('sys-cpu').textContent = `${d.cpu_cores} Threads`;
+        document.getElementById('sys-ram').textContent = `${d.ram_gb.toFixed(1)} GB`;
+
+        // Render coverage
+        const cov = d.coverage || [];
+        if (cov.length === 0) {
+          document.getElementById('coverage-container').innerHTML =
+            '<div style="color:var(--muted); font-size:13px; padding:12px 0;">Belum ada event journal yang dicatat oleh agen.</div>';
+        } else {
+          let html = '<table><thead><tr><th>Agent</th><th>Event Type</th><th>Count</th></tr></thead><tbody>';
+          cov.forEach(c => {
+            html += `<tr><td><span class="badge badge-green">${esc(c.agent)}</span></td><td class="mono">${esc(c.event_type)}</td><td class="mono">${c.count}</td></tr>`;
+          });
+          html += '</tbody></table>';
+          document.getElementById('coverage-container').innerHTML = html;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      loadGraph();
+    }
+
+    async function loadGraph() {
+      const p = document.getElementById('graph-path-input').value.trim();
+      const url = p ? `/api/graph?path=${encodeURIComponent(p)}&limit=30` : '/api/graph?limit=30';
+      const box = document.getElementById('graph-container');
+      try {
+        const res = await api(url);
+        if (!res.success || !res.data || !res.data.files || res.data.files.length === 0) {
+          box.innerHTML = '<div style="padding:30px; text-align:center;">Belum ada file untuk project ini. Jalankan <b>Scan</b> terlebih dahulu.</div>';
+          return;
+        }
+        const g = res.data;
+        const files = g.files.slice(0, 20);
+        const n = files.length;
+        const cx = 280, cy = 135, r = 105;
+        const pos = {};
+        files.forEach((f, i) => {
+          const a = (2 * Math.PI * i) / n;
+          pos[f.id] = { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a), short: f.id.split('/').pop() };
+        });
+        let svg = `<svg viewBox="0 0 560 270" width="100%" style="max-width:560px; background:var(--bg-input); border-radius:10px; border:1px solid var(--border);">`;
+        (g.edges || []).forEach(e => {
+          if (pos[e.from] && pos[e.to]) {
+            svg += `<line x1="${pos[e.from].x.toFixed(0)}" y1="${pos[e.from].y.toFixed(0)}" x2="${pos[e.to].x.toFixed(0)}" y2="${pos[e.to].y.toFixed(0)}" stroke="#10b981" stroke-opacity="0.45" stroke-width="1.5"/>`;
+          }
+        });
+        files.forEach((f, i) => {
+          const pt = pos[f.id];
+          svg += `<circle cx="${pt.x.toFixed(0)}" cy="${pt.y.toFixed(0)}" r="7" fill="#111827" stroke="#10b981" stroke-width="2"><title>${esc(f.id)}</title></circle>`;
+          svg += `<text x="${pt.x.toFixed(0)}" y="${(pt.y + 17).toFixed(0)}" font-size="9" text-anchor="middle" fill="#cbd5e1">${esc(pt.short.slice(0,18))}</text>`;
+        });
+        svg += `</svg><div style="margin-top:8px; font-size:12px; color:var(--muted);">${g.files.length} files · ${(g.edges||[]).length} relasi import</div>`;
+        box.innerHTML = svg;
+      } catch (e) {
+        box.innerHTML = 'Gagal memuat graph.';
+      }
+    }
+
+    async function runDirectedScan(saveToConfig) {
+      const p = document.getElementById('quick-scan-path').value.trim();
+      if (!p) { showToast('Masukkan path folder terlebih dahulu!', true); return; }
+      const out = document.getElementById('scan-output');
+      out.style.display = 'block';
+      out.textContent = `⏳ Sedang memindai ${p} ...`;
+      try {
+        if (saveToConfig) {
+          await api('/api/config/add-path', { method: 'POST', body: JSON.stringify({ path: p }) });
+        }
+        const res = await api('/api/scan', { method: 'POST', body: JSON.stringify({ path: p }) });
+        if (res.success) {
+          out.textContent = `✅ ${res.data}`;
+          showToast(res.data);
+          loadOverview();
+        } else {
+          out.textContent = `❌ Error: ${res.error}`;
+          showToast(res.error || 'Gagal scan', true);
+        }
+      } catch (e) {
+        out.textContent = `❌ Error: ${e.message}`;
+      }
+    }
+
+    async function runAllScan() {
+      const out = document.getElementById('scan-output');
+      out.style.display = 'block';
+      out.textContent = '⏳ Sedang memindai seluruh workspace terdaftar...';
+      const res = await api('/api/scan', { method: 'POST', body: JSON.stringify({}) });
+      if (res.success) {
+        out.textContent = `✅ ${res.data}`;
+        showToast(res.data);
+        loadOverview();
+      } else {
+        out.textContent = `❌ Error: ${res.error}`;
+        showToast(res.error || 'Gagal scan', true);
+      }
+    }
+
+    async function runMaintenance(action) {
+      const out = document.getElementById('scan-output');
+      out.style.display = 'block';
+      out.textContent = `⏳ Menjalankan maintenance: ${action}...`;
+      const res = await api('/api/maintenance', { method: 'POST', body: JSON.stringify({ action }) });
+      if (res.success) {
+        out.textContent = `✅ ${res.data}`;
+        showToast(res.data);
+        loadOverview();
+      } else {
+        out.textContent = `❌ Error: ${res.error}`;
+        showToast(res.error || 'Gagal maintenance', true);
+      }
+    }
+
+    async function runSearch() {
+      const mode = document.getElementById('search-mode').value;
+      const q = document.getElementById('search-input').value.trim();
+      const path = document.getElementById('search-path').value.trim();
+      const ext = document.getElementById('search-ext').value.trim();
+      if (!q) { showToast('Masukkan kata kunci pencarian!', true); return; }
+
+      const box = document.getElementById('search-results');
+      const meta = document.getElementById('search-meta');
+      box.innerHTML = '<div style="padding:30px; text-align:center; color:var(--muted);">⏳ Mencari...</div>';
+      const t0 = performance.now();
+
+      try {
+        if (mode === 'symbol') {
+          const res = await api(`/api/symbols?name=${encodeURIComponent(q)}&limit=25`);
+          const dt = (performance.now() - t0).toFixed(1);
+          const list = res.data || [];
+          meta.textContent = `Ditemukan ${list.length} simbol dalam ${dt} ms`;
+          if (list.length === 0) {
+            box.innerHTML = '<div style="padding:30px; text-align:center; color:var(--muted);">Tidak ada simbol yang cocok. Pastikan folder proyek sudah di-scan.</div>';
+            return;
+          }
+          box.innerHTML = list.map(s => `
+            <div class="result-card">
+              <div class="result-head">
+                <span class="result-path">${esc(s.file_path)} : baris ${s.line_start}-${s.line_end}</span>
+                <div>
+                  <span class="badge badge-green">${esc(s.kind)}</span>
+                  <span class="badge badge-blue">${esc(s.language)}</span>
+                </div>
+              </div>
+              <div class="result-code">${esc(s.signature || s.name)}</div>
+            </div>
+          `).join('');
+        } else {
+          let url = `/api/query?q=${encodeURIComponent(q)}&limit=15`;
+          if (path) url += `&path=${encodeURIComponent(path)}`;
+          if (ext) url += `&type=${encodeURIComponent(ext)}`;
+          const res = await api(url);
+          const dt = (performance.now() - t0).toFixed(1);
+          const list = res.data || [];
+          meta.textContent = `Ditemukan ${list.length} chunk relevan dalam ${dt} ms (BM25 SQLite FTS5 + Live Disk Snippet)`;
+          if (list.length === 0) {
+            box.innerHTML = '<div style="padding:30px; text-align:center; color:var(--muted);">Tidak ada hasil yang cocok.</div>';
+            return;
+          }
+          box.innerHTML = list.map((r, idx) => `
+            <div class="result-card">
+              <div class="result-head">
+                <span class="result-path">#${idx+1} · ${esc(r.file_path)} ${r.line_start ? `(Baris ${r.line_start}-${r.line_end})` : ''}</span>
+                <div>
+                  ${r.heading_text ? `<span class="badge badge-blue">${esc(r.heading_text)}</span>` : ''}
+                  <span class="badge badge-green">BM25: ${Number(r.score || 0).toFixed(2)}</span>
+                </div>
+              </div>
+              <div class="result-code">${esc(r.content)}</div>
+            </div>
+          `).join('');
+        }
+      } catch (e) {
+        box.innerHTML = `<div style="color:var(--rose); padding:20px;">Gagal mencari: ${esc(e.message)}</div>`;
+      }
+    }
+
+    async function syncRulesFromMemTab() {
+      showToast('⏳ Menyinkronkan AGENTS.md, CLAUDE.md, & SKILL.md ke Memory...');
+      const res = await api('/api/maintenance', { method: 'POST', body: JSON.stringify({ action: 'sync_rules' }) });
+      if (res.success) {
+        showToast('✅ ' + res.data);
+        loadMemories();
+        loadHandoff();
+        loadOverview();
+      } else {
+        showToast(res.error || 'Gagal sync', true);
+      }
+    }
+
+    async function loadMemories() {
+      const kind = document.getElementById('mem-filter-kind').value;
+      const url = kind ? `/api/memory?kind=${encodeURIComponent(kind)}` : '/api/memory';
+      const box = document.getElementById('memory-list-container');
+      try {
+        const res = await api(url);
+        const list = res.data || [];
+        if (list.length === 0) {
+          box.innerHTML = '<div style="padding:24px; text-align:center; color:var(--muted);">Belum ada item memori tersimpan.</div>';
+          return;
+        }
+        let html = '<table><thead><tr><th>Kind</th><th>Judul & Isi</th><th>Status</th><th>Aksi</th></tr></thead><tbody>';
+        list.forEach(m => {
+          const badgeClass = m.status === 'active' ? 'badge-green' : (m.status === 'stale' ? 'badge-amber' : 'badge-rose');
+          html += `<tr>
+            <td><span class="badge badge-blue">${esc(m.kind)}</span><div style="font-size:11px; color:var(--muted); margin-top:4px;">${esc(m.workstream)}</div></td>
+            <td>
+              <div style="font-weight:700; color:var(--fg);">${esc(m.title)}</div>
+              <div style="font-size:12px; color:var(--muted); margin-top:3px; white-space:pre-wrap;">${esc(m.body)}</div>
+            </td>
+            <td><span class="badge ${badgeClass}">${esc(m.status)}</span></td>
+            <td>
+              <div style="display:flex; gap:4px;">
+                ${m.status === 'active' ? `<button class="btn btn-sm btn-amber" onclick="setMemStatus('${m.id}','stale')">Stale</button>` : ''}
+                ${m.status !== 'archived' ? `<button class="btn btn-sm btn-danger" onclick="setMemStatus('${m.id}','archive')">Archive</button>` : ''}
+              </div>
+            </td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        box.innerHTML = html;
+      } catch (e) {
+        box.innerHTML = 'Gagal memuat memori.';
+      }
+    }
+
+    async function createMemory() {
+      const kind = document.getElementById('new-mem-kind').value;
+      const workstream = document.getElementById('new-mem-ws').value.trim() || 'default';
+      const title = document.getElementById('new-mem-title').value.trim();
+      const body = document.getElementById('new-mem-body').value.trim();
+      if (!title || !body) { showToast('Judul dan isi memori wajib diisi!', true); return; }
+      const res = await api('/api/memory', {
+        method: 'POST',
+        body: JSON.stringify({ kind, workstream, title, body })
+      });
+      if (res.success) {
+        showToast('Memori berhasil disimpan!');
+        document.getElementById('new-mem-title').value = '';
+        document.getElementById('new-mem-body').value = '';
+        loadMemories();
+        loadHandoff();
+        loadOverview();
+      } else {
+        showToast(res.error || 'Gagal menyimpan memori', true);
+      }
+    }
+
+    async function setMemStatus(id, action) {
+      const res = await api('/api/memory/lifecycle', {
+        method: 'POST',
+        body: JSON.stringify({ id, action })
+      });
+      if (res.success) {
+        showToast(`Status memori diubah ke ${action}`);
+        loadMemories();
+        loadHandoff();
+        loadOverview();
+      }
+    }
+
+    async function loadHandoff() {
+      const res = await api('/api/handoff');
+      if (res.success) {
+        document.getElementById('handoff-box').textContent = res.data;
+      }
+    }
+
+    function copyHandoff() {
+      const text = document.getElementById('handoff-box').textContent;
+      navigator.clipboard.writeText(text);
+      showToast('Handoff context berhasil disalin ke clipboard!');
+    }
+
+    async function loadConfig() {
+      const res = await api('/api/config');
+      if (!res.success) return;
+      currentConfig = res.data;
+      renderIncludePaths();
+      document.getElementById('cfg-max-tokens').value = currentConfig.chunk.max_tokens;
+      document.getElementById('cfg-min-tokens').value = currentConfig.chunk.min_tokens;
+      document.getElementById('cfg-extensions').value = (currentConfig.scan.include_extensions || []).join(', ');
+      document.getElementById('cfg-exclude-paths').value = (currentConfig.scan.exclude_paths || []).join(', ');
+      document.getElementById('cfg-exclude-files').value = (currentConfig.scan.exclude_files || []).join(', ');
+      document.getElementById('cfg-symlinks').value = String(!!currentConfig.scan.follow_symlinks);
+      document.getElementById('cfg-port').value = currentConfig.server.rest_port || 9090;
+    }
+
+    function renderIncludePaths() {
+      const list = (currentConfig && currentConfig.scan && currentConfig.scan.include_paths) || [];
+      const box = document.getElementById('cfg-paths-list');
+      if (list.length === 0) {
+        box.innerHTML = '<div style="color:var(--muted); font-size:13px;">Belum ada path terdaftar.</div>';
+        return;
+      }
+      box.innerHTML = list.map((p, idx) => `
+        <div class="path-item">
+          <span>📁 ${esc(p)}</span>
+          <div style="display:flex; gap:6px;">
+            <button class="btn btn-sm btn-blue" onclick="scanSinglePath('${esc(p.replace(/\\/g,'\\\\'))}')">⚡ Scan</button>
+            <button class="btn btn-sm btn-danger" onclick="removeIncludePath(${idx})">✕ Hapus</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function addIncludePath() {
+      const inp = document.getElementById('cfg-new-path');
+      const val = inp.value.trim();
+      if (!val || !currentConfig) return;
+      if (!currentConfig.scan.include_paths.includes(val)) {
+        currentConfig.scan.include_paths.unshift(val);
+        renderIncludePaths();
+      }
+      inp.value = '';
+    }
+
+    function removeIncludePath(idx) {
+      if (!currentConfig) return;
+      currentConfig.scan.include_paths.splice(idx, 1);
+      renderIncludePaths();
+    }
+
+    async function scanSinglePath(p) {
+      showToast(`Memindai ${p}...`);
+      const res = await api('/api/scan', { method: 'POST', body: JSON.stringify({ path: p }) });
+      if (res.success) {
+        showToast(res.data);
+      } else {
+        showToast(res.error || 'Gagal scan', true);
+      }
+    }
+
+    function applyFilterPreset(preset) {
+      const baseExcludes = [
+        'node_modules', '.git', '__pycache__', '.cache', 'target', '.cargo', 'dist', 'build', '.next', '.venv',
+        'extensions', 'binaries', 'History', 'workspaceStorage', 'subagents', 'tool-results', 'tasks',
+        'shell-snapshots', 'cache', 'tantivy_index', '.semantic_search', 'all-MiniLM-L6-v2', '.codegraph',
+        '.system_generated', 'scratch', '.user_uploaded', 'browser_recordings', 'antigravity-browser-profile',
+        'crashes', 'paste-cache', 'file-history', 'telemetry', 'session-env', 'archived_sessions',
+        '.sandbox', '.sandbox-bin', '.sandbox-secrets', '.tmp', 'tmp', 'thread-writer-locks',
+        'audio_cache', 'image_cache', 'sandboxes', 'worktrees', 'lancedb', '_disabled'
+      ];
+      const baseExcludeFiles = [
+        '.env', '.env.*', '*.bak', '*.tmp', '*.secret', '*.pem', '*.key', 'tokenizer.json',
+        '*.pb', '*.lock', '*.db', '*.sqlite', '*.sqlite3', 'auth.json', 'oauth_creds.json',
+        'google_accounts.json', 'device-auth.json', '1p_failed_events.*', 'package-lock.json',
+        'Cargo.lock', 'pnpm-lock.yaml', 'yarn.lock'
+      ];
+      if (preset === 'recommended') {
+        baseExcludes.push('sessions', 'conversations');
+      } else if (preset === 'strict_code') {
+        baseExcludes.push('sessions', 'conversations', 'logs', 'log', 'backups', 'downloads', 'playground');
+      }
+      // 'include_sessions' keeps sessions/conversations
+      document.getElementById('cfg-exclude-paths').value = baseExcludes.join(', ');
+      document.getElementById('cfg-exclude-files').value = baseExcludeFiles.join(', ');
+      showToast(`Preset "${preset}" diterapkan! Klik "💾 Simpan Semua Setting" lalu jalankan GC.`);
+    }
+
+    async function saveSettings() {
+      if (!currentConfig) return;
+      currentConfig.chunk.max_tokens = parseInt(document.getElementById('cfg-max-tokens').value, 10) || 500;
+      currentConfig.chunk.min_tokens = parseInt(document.getElementById('cfg-min-tokens').value, 10) || 50;
+      currentConfig.scan.include_extensions = document.getElementById('cfg-extensions').value.split(',').map(s => s.trim()).filter(Boolean);
+      currentConfig.scan.exclude_paths = document.getElementById('cfg-exclude-paths').value.split(',').map(s => s.trim()).filter(Boolean);
+      currentConfig.scan.exclude_files = document.getElementById('cfg-exclude-files').value.split(',').map(s => s.trim()).filter(Boolean);
+      currentConfig.scan.follow_symlinks = document.getElementById('cfg-symlinks').value === 'true';
+      currentConfig.server.rest_port = parseInt(document.getElementById('cfg-port').value, 10) || 9090;
+
+      const res = await api('/api/config', {
+        method: 'POST',
+        body: JSON.stringify(currentConfig)
+      });
+      if (res.success) {
+        showToast('✅ Konfigurasi berhasil disimpan ke config.yaml!');
+      } else {
+        showToast(res.error || 'Gagal menyimpan konfigurasi', true);
+      }
+    }
+
+    async function loadAgents() {
+      const box = document.getElementById('agents-container');
+      try {
+        const res = await api('/api/agents');
+        renderAgentsTable(res.data || []);
+      } catch (e) {
+        box.innerHTML = 'Gagal memuat status AI agent.';
+      }
+    }
+
+    async function registerAllAgents() {
+      showToast('⏳ Menghubungkan AIKD MCP ke semua AI Agent...');
+      const res = await api('/api/agents/register', { method: 'POST', body: '{}' });
+      if (res.success) {
+        renderAgentsTable(res.data || []);
+        const count = (res.data || []).filter(a => a.registered).length;
+        showToast(`✅ Berhasil! ${count} AI Agent terhubung ke AIKD.`);
+      } else {
+        showToast(res.error || 'Gagal registrasi agent', true);
+      }
+    }
+
+    function renderAgentsTable(list) {
+      const box = document.getElementById('agents-container');
+      const detected = list.filter(a => a.detected);
+      const notFound = list.filter(a => !a.detected);
+      let html = '<table><thead><tr><th>AI Agent</th><th>Tipe</th><th>Status MCP</th><th>Lokasi Config</th></tr></thead><tbody>';
+      detected.forEach(a => {
+        const st = a.registered
+          ? '<span class="badge badge-green">✓ Terhubung</span>'
+          : '<span class="badge badge-amber">⚠ Belum Terhubung</span>';
+        html += `<tr><td><strong>${esc(a.name)}</strong></td><td><span class="badge badge-blue">${esc(a.kind)}</span></td><td>${st}</td><td class="mono" style="font-size:11px; color:var(--muted);">${esc(a.config_path)}</td></tr>`;
+      });
+      notFound.forEach(a => {
+        html += `<tr style="opacity:0.55;"><td>${esc(a.name)}</td><td><span class="badge">${esc(a.kind)}</span></td><td><span class="badge">Tidak Terinstal</span></td><td class="mono" style="font-size:11px;">—</td></tr>`;
+      });
+      html += '</tbody></table>';
+      box.innerHTML = html;
+    }
+
+    // Initial load
+    loadOverview();
+  </script>
+</body>
+</html>

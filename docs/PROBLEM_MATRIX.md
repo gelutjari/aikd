@@ -42,9 +42,16 @@ Status awal: ditulis SEBELUM perbaikan; dicentang saat verifikasi hijau.
 - [x] **X5. Network path.** `validate()` warning untuk UNC/mnt/media/Volumes.
 ## Kemasan / docs
 
-- [x] **P1. update --list vs versi proses.** Menampilkan lock holder + pointer aktif + daftar versi; beda versi = warning di doctor.
-- [ ] **P2. Extension OMP load-test.** TS valid + pola sama dengan extension aktif lain; TAPI belum ada pemanggilan tool nyata via sesi OMP. Verifikasi: sesi OMP baru panggil `aikd_stats`.
+- [x] **P1. update --list vs versi proses.** Menampilkan lock holder + pointer aktif + daftar versi beserta binary `--version` masing-masing (menjelaskan label folder vs `CARGO_PKG_VERSION`); `doctor` membandingkan path binary aktual terhadap `versions/<active-version>/`.
+- [ ] **P2. Extension OMP load-test.** TS valid + pola sama dengan extension aktif lain (dan CLI `aikd symbol` kini menerima `--name` maupun posisi); TAPI belum ada pemanggilan tool nyata via sesi OMP. Verifikasi: sesi OMP baru panggil `aikd_stats`.
 - [ ] **P3. .mcp.json connect via OMP.** Config menunjuk `aikd` PATH + serve handshake 200 teruji manual; TAPI OMP belum reconnect sesi baru. Verifikasi: sesi baru cek MCP aikd hijau.
+
+## Temuan audit sesi-ini (I1 & Audit Lanjutan): identitas, isolasi, REST/UI, chunker/watcher
+
+- [x] **I1. cmd_memory + session New pakai path mentah.** Terbukti di DB user: TASK tersimpan tak terlihat handoff (slash vs backslash). Fix: canonical_project di semua penulis; migrasi v13 normalisasi memory/events/sessions/atlas (termasuk merge collision `sessions.project_path` UNIQUE); test regresi roundtrip.
+- [x] **A1. Isolasi `--config` & test lock.** `daemon`, `daemon-stop`, `daemon-pid`, `init`, `update --list`, dan `acquire_singleton_at` memakai `Config::runtime_dir` + `rest_port` (tidak hardcode `~/.aikd` / `:9090`); unit test `singleton_second_daemon_fails` dipindah ke `tempdir`; `Config::load` strip UTF-8 BOM.
+- [x] **A2. REST `/ui`, `/api/scan` cache, 401 & MCP `embed`.** `/ui` memakai `all_adapter_coverage` & `all_conflicts` (bukan `LIKE`-less `"%"`); semua endpoint auth pakai pesan 401 konsisten; `/api/scan` invalidate `query_cache`; MCP/REST `embed` hormati `embedding.enabled`; `stats`/`status` melaporkan `embedding_enabled` aktual.
+- [x] **A3. Retrieval, simbol, chunker, watcher, CLI.** Tantivy fallback `parse_query_lenient` (query kode seperti `fn(` tak lagi crash); `symbol` terima `--name`; `--version-json` bisa jalan tanpa subcommand; `doctor --json` + cek path `active-version`; `scanner`/`watcher` hormati `exclude_extensions` + filter dir/file; `chunker` tambah `.cjs`/`.cs` + smart config C#; `atlas` scope prefix ketat + hanya task aktif + multi-line `KNOWN_ISSUES.md`; `tray` panggil sibling `aikd`.
 
 ## Verifikasi akhir — HASIL SESI INI (semua dijalankan, bukan klaim)
 

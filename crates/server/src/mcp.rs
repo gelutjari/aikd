@@ -1,9 +1,7 @@
 use anyhow::Result;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    schemars, tool, tool_handler, tool_router,
-    transport::stdio,
-    ServerHandler, ServiceExt,
+    schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 
@@ -123,7 +121,9 @@ pub struct MemoryConflictParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EventAppendParams {
-    #[schemars(description = "Event type: session_start, user_message, assistant_message, tool_call, tool_result, file_change, test_result, task_status, checkpoint")]
+    #[schemars(
+        description = "Event type: session_start, user_message, assistant_message, tool_call, tool_result, file_change, test_result, task_status, checkpoint"
+    )]
     pub event_type: String,
     #[schemars(description = "Workstream (default)")]
     pub workstream: Option<String>,
@@ -152,7 +152,28 @@ pub struct AikdServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for AikdServer {}
+impl ServerHandler for AikdServer {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo {
+            capabilities: rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+            server_info: rmcp::model::Implementation {
+                name: "aikd".to_string(),
+                title: Some("AIKD — Project Intelligence & Code Search".to_string()),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                description: None,
+                icons: None,
+                website_url: None,
+            },
+            instructions: Some(
+                "AIKD indexed codebase search, symbols, Atlas, structured memory, and event journal."
+                    .to_string(),
+            ),
+            ..Default::default()
+        }
+    }
+}
 
 #[tool_router(router = tool_router)]
 impl AikdServer {
@@ -185,6 +206,7 @@ impl AikdServer {
         };
         let opts = aikd_scanner::ScanOptions {
             override_path,
+            force: false,
         };
 
         match aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts) {
@@ -239,7 +261,9 @@ impl AikdServer {
         };
         let mut head = String::new();
         if let aikd_context::RetrievalKind::LexicalFallback { reason } = &outcome.retrieval {
-            head.push_str(&format!("(Hybrid unavailable: {reason}; used lexical search.)\n"));
+            head.push_str(&format!(
+                "(Hybrid unavailable: {reason}; used lexical search.)\n"
+            ));
         }
         if outcome.truncated_chars > 0 {
             head.push_str(&format!(
@@ -289,6 +313,9 @@ impl AikdServer {
     #[tool(description = "Generate embeddings for all chunks")]
     async fn embed(&self, Parameters(params): Parameters<EmbedParams>) -> String {
         let cfg = self.state.config.lock().await.clone();
+        if !cfg.embedding.enabled {
+            return "Error: semantic embedding is disabled (embedding.enabled=false). Set embedding.enabled=true in config to opt in.".to_string();
+        }
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
@@ -300,7 +327,37 @@ impl AikdServer {
         if count == 0 {
             return "No chunks to embed. Run scan first.".to_string();
         }
-        let batch_size = params.batch_size.unwrap_or_else(|| aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode).batch_size);
+        if cfg.embedding.provider == "external" {
+            #[cfg(feature = "semantic-ext")]
+            {
+                use aikd_core::SemanticProvider;
+                let provider = match embedder::ExternalProvider::from_env(
+                    &cfg.embedding.endpoint,
+                    &cfg.embedding.model,
+                    &cfg.embedding.api_key_env,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => return format!("Error: {e}"),
+                };
+                if !provider.is_available() {
+                    return "Error: external provider unavailable (endpoint/key)".to_string();
+                }
+                let batch = params
+                    .batch_size
+                    .unwrap_or_else(|| cfg.embedding.batch_size.parse().unwrap_or(32));
+                return match embedder::embed_and_store_external(database.conn(), &provider, batch) {
+                    Ok(n) => format!("Embedded {n} chunks via {}.", provider.model_id()),
+                    Err(e) => format!("Error: {e}"),
+                };
+            }
+            #[cfg(not(feature = "semantic-ext"))]
+            {
+                return "Error: provider=external needs the semantic-ext build: cargo build --features semantic-ext".to_string();
+            }
+        }
+        let batch_size = params.batch_size.unwrap_or_else(|| {
+            aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode).batch_size
+        });
         let model_dir = cfg.model_path();
         match embedder::embed_and_store(database.conn(), &model_dir, batch_size) {
             Ok(n) => format!("Embedded {n} chunks. Hybrid search now available."),
@@ -389,12 +446,13 @@ impl AikdServer {
     async fn status(&self) -> String {
         let cfg = self.state.config.lock().await.clone();
         let profile = aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode);
+        let emb_active = crate::semantic_active(&cfg) && profile.embedding_enabled;
         format!(
             "AIKD Daemon Status\nCPU Cores: {}\nRAM: {:.1} GB\nGPU: {}\nEmbedding: {}\nBatch Size: {}\nParallelism: {}\nHNSW M: {}\nREST Port: {}",
             profile.cpu_cores,
             profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
             profile.has_gpu,
-            profile.embedding_enabled,
+            emb_active,
             profile.batch_size,
             profile.parallelism,
             profile.hnsw_m,
@@ -402,7 +460,9 @@ impl AikdServer {
         )
     }
 
-    #[tool(description = "Look up code symbols (functions, structs, classes) by name with file and line provenance")]
+    #[tool(
+        description = "Look up code symbols (functions, structs, classes) by name with file and line provenance"
+    )]
     async fn symbol(&self, Parameters(params): Parameters<SymbolParams>) -> String {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
@@ -423,7 +483,13 @@ impl AikdServer {
                 for s in &symbols {
                     out.push_str(&format!(
                         "{} {} — {}:{}-{} [{}]\n  {}\n",
-                        s.kind, s.name, s.file_path, s.line_start, s.line_end, s.language, s.signature
+                        s.kind,
+                        s.name,
+                        s.file_path,
+                        s.line_start,
+                        s.line_end,
+                        s.language,
+                        s.signature
                     ));
                 }
                 out
@@ -432,7 +498,9 @@ impl AikdServer {
         }
     }
 
-    #[tool(description = "Save structured memory: fact, decision, constraint, discovery, task, or checkpoint with provenance")]
+    #[tool(
+        description = "Save structured memory: fact, decision, constraint, discovery, task, or checkpoint with provenance"
+    )]
     async fn memory_save(&self, Parameters(params): Parameters<MemorySaveParams>) -> String {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
@@ -441,13 +509,39 @@ impl AikdServer {
         };
         let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
-        let source = params.source.unwrap_or_else(|| "agent-asserted".to_string());
-        const KINDS: [&str; 6] = ["fact", "decision", "constraint", "discovery", "task", "checkpoint"];
+        let source = params
+            .source
+            .unwrap_or_else(|| "agent-asserted".to_string());
+        const KINDS: [&str; 6] = [
+            "fact",
+            "decision",
+            "constraint",
+            "discovery",
+            "task",
+            "checkpoint",
+        ];
         if !KINDS.contains(&params.kind.as_str()) {
             return format!("Error: invalid kind '{}'", params.kind);
         }
-        match aikd_storage::memory::save_memory(database.conn(), &project, &ws, &params.kind, &params.title, &params.body, &source, 0.9) {
-            Ok(m) => format!("Saved {} '{}' [{}] (id {})", m.kind, m.title, m.source, m.id),
+        if !["explicit", "agent-asserted", "inferred"].contains(&source.as_str()) {
+            return format!(
+                "Error: invalid source '{source}' (use explicit|agent-asserted|inferred)"
+            );
+        }
+        match aikd_storage::memory::save_memory(
+            database.conn(),
+            &project,
+            &ws,
+            &params.kind,
+            &params.title,
+            &params.body,
+            &source,
+            0.9,
+        ) {
+            Ok(m) => format!(
+                "Saved {} '{}' [{}] (id {})",
+                m.kind, m.title, m.source, m.id
+            ),
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -461,12 +555,26 @@ impl AikdServer {
         };
         let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
-        match aikd_storage::memory::list_memory(database.conn(), &project, Some(&ws), params.kind.as_deref(), params.all.unwrap_or(false)) {
+        match aikd_storage::memory::list_memory(
+            database.conn(),
+            &project,
+            Some(&ws),
+            params.kind.as_deref(),
+            params.all.unwrap_or(false),
+        ) {
             Ok(items) if items.is_empty() => "No memory items.".to_string(),
             Ok(items) => {
                 let mut out = String::new();
                 for m in &items {
-                    out.push_str(&format!("[{}] {} — {} [{}|{}]\n  {}\n", m.kind, m.title, m.id, m.source, m.status, m.body.lines().next().unwrap_or("")));
+                    out.push_str(&format!(
+                        "[{}] {} — {} [{}|{}]\n  {}\n",
+                        m.kind,
+                        m.title,
+                        m.id,
+                        m.source,
+                        m.status,
+                        m.body.lines().next().unwrap_or("")
+                    ));
                 }
                 out
             }
@@ -474,7 +582,9 @@ impl AikdServer {
         }
     }
 
-    #[tool(description = "Get active tasks and latest checkpoint for a workstream (resume point after compaction)")]
+    #[tool(
+        description = "Get active tasks and latest checkpoint for a workstream (resume point after compaction)"
+    )]
     async fn memory_task(&self, Parameters(params): Parameters<MemoryTaskParams>) -> String {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
@@ -499,14 +609,22 @@ impl AikdServer {
             out.push_str("(no active tasks)\n");
         }
         match &cp {
-            Some(c) => out.push_str(&format!("\nCHECKPOINT {} — {}\n{}\n", c.id, c.title, c.body)),
+            Some(c) => out.push_str(&format!(
+                "\nCHECKPOINT {} — {}\n{}\n",
+                c.id, c.title, c.body
+            )),
             None => out.push_str("\n(no checkpoint)\n"),
         }
         out
     }
 
-    #[tool(description = "Mark a memory item STALE or ARCHIVED (evidence kept, hidden from active views)")]
-    async fn memory_lifecycle(&self, Parameters(params): Parameters<MemoryLifecycleParams>) -> String {
+    #[tool(
+        description = "Mark a memory item STALE or ARCHIVED (evidence kept, hidden from active views)"
+    )]
+    async fn memory_lifecycle(
+        &self,
+        Parameters(params): Parameters<MemoryLifecycleParams>,
+    ) -> String {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
@@ -519,25 +637,43 @@ impl AikdServer {
         };
         match n {
             Ok(1) => format!("{}: {}", params.action, params.id),
-            Ok(_) => format!("No change (id {} not found or not in a flaggable state)", params.id),
+            Ok(_) => format!(
+                "No change (id {} not found or not in a flaggable state)",
+                params.id
+            ),
             Err(e) => format!("Error: {e}"),
         }
     }
 
-    #[tool(description = "Flag two memory items as CONFLICTED with a note (both preserved, neither becomes fact)")]
-    async fn memory_conflict(&self, Parameters(params): Parameters<MemoryConflictParams>) -> String {
+    #[tool(
+        description = "Flag two memory items as CONFLICTED with a note (both preserved, neither becomes fact)"
+    )]
+    async fn memory_conflict(
+        &self,
+        Parameters(params): Parameters<MemoryConflictParams>,
+    ) -> String {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
-        match aikd_storage::memory::flag_conflict(database.conn(), &params.id_a, &params.id_b, &params.note) {
-            Ok(()) => format!("Flagged conflict: {} <-> {} ({})", params.id_a, params.id_b, params.note),
+        match aikd_storage::memory::flag_conflict(
+            database.conn(),
+            &params.id_a,
+            &params.id_b,
+            &params.note,
+        ) {
+            Ok(()) => format!(
+                "Flagged conflict: {} <-> {} ({})",
+                params.id_a, params.id_b, params.note
+            ),
             Err(e) => format!("Error: {e}"),
         }
     }
 
-    #[tool(description = "Append a canonical agent event to the journal (AGY-style live adapter). Idempotent on content.")]
+    #[tool(
+        description = "Append a canonical agent event to the journal (AGY-style live adapter). Idempotent on content."
+    )]
     async fn event_append(&self, Parameters(params): Parameters<EventAppendParams>) -> String {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
@@ -550,7 +686,8 @@ impl AikdServer {
             return "Error: payload must be JSON".to_string();
         }
         match aikd_storage::events::append_event(
-            database.conn(), &project,
+            database.conn(),
+            &project,
             &params.workstream.unwrap_or_else(|| "default".to_string()),
             &params.agent.unwrap_or_else(|| "agy".to_string()),
             &params.session.unwrap_or_default(),
@@ -558,12 +695,17 @@ impl AikdServer {
             &params.source_ref.unwrap_or_default(),
             &payload,
         ) {
-            Ok(ev) => format!("Event {} seq={} ({}:{})", ev.event_id, ev.sequence, ev.agent_id, ev.event_type),
+            Ok(ev) => format!(
+                "Event {} seq={} ({}:{})",
+                ev.event_id, ev.sequence, ev.agent_id, ev.event_type
+            ),
             Err(e) => format!("Error: {e}"),
         }
     }
 
-    #[tool(description = "Build the context package for a workstream: tasks, checkpoint, decisions, constraints, recent events, next actions")]
+    #[tool(
+        description = "Build the context package for a workstream: tasks, checkpoint, decisions, constraints, recent events, next actions"
+    )]
     async fn handoff(&self, Parameters(params): Parameters<HandoffParams>) -> String {
         let cfg = self.state.config.lock().await.clone();
         let database = match Database::open(&cfg.db_path()) {
@@ -614,7 +756,88 @@ fn format_results(results: &[aikd_core::SearchResult]) -> String {
 
 pub async fn run_server(config_path: &str) -> Result<()> {
     let server = AikdServer::new(config_path.to_string());
-    let service = server.serve(stdio()).await?;
+    let (client_io, server_io) = tokio::io::duplex(256 * 1024);
+    let (mut client_read, mut client_write) = tokio::io::split(client_io);
+
+    let proxy_task = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let mut stdin_reader = BufReader::new(tokio::io::stdin());
+        let mut stdout = tokio::io::stdout();
+        let mut initialized_seen = false;
+        let mut line = String::new();
+
+        // Forward server_io -> stdout concurrently
+        let out_task = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut client_read, &mut stdout).await;
+        });
+
+        while let Ok(n) = stdin_reader.read_line(&mut line).await {
+            if n == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                line.clear();
+                continue;
+            }
+            if !initialized_seen {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    let method = val.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                    if method == "initialize" {
+                        initialized_seen = true;
+                    } else if let Some(id) = val.get("id") {
+                        // Non-initialize request before handshake (e.g. OMP v19.1.0 "server/discover").
+                        // Reply with -32601 Method not found so client falls back to standard "initialize".
+                        let resp = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32601,
+                                "message": format!("Method not found: {method}")
+                            }
+                        });
+                        let mut out_line = resp.to_string();
+                        out_line.push('\n');
+                        let _ = tokio::io::stdout().write_all(out_line.as_bytes()).await;
+                        let _ = tokio::io::stdout().flush().await;
+                        line.clear();
+                        continue;
+                    } else {
+                        // Pre-initialize notification: ignore so rmcp doesn't abort handshake
+                        line.clear();
+                        continue;
+                    }
+                }
+            }
+            if client_write.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            let _ = client_write.flush().await;
+            line.clear();
+        }
+        drop(client_write);
+        let _ = out_task.await;
+    });
+
+    let service = server.serve(server_io).await?;
     service.waiting().await?;
+    proxy_task.abort();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AikdServer;
+    use rmcp::ServerHandler;
+
+    #[test]
+    fn server_info_advertises_tools_capability() {
+        let srv = AikdServer::new("~/.aikd/config.yaml".to_string());
+        let info = srv.get_info();
+        assert!(
+            info.capabilities.tools.is_some(),
+            "MCP initialize must advertise capabilities.tools so spec clients call tools/list"
+        );
+        assert_eq!(info.server_info.name, "aikd");
+    }
 }

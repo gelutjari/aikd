@@ -26,6 +26,7 @@ fn map_row(row: &rusqlite::Row) -> Result<AgentEvent, rusqlite::Error> {
 
 /// Append one event. Duplicate `event_id` delivery returns the existing row
 /// instead of failing (idempotent ingestion).
+#[allow(clippy::too_many_arguments)]
 pub fn append_event(
     conn: &Connection,
     project_id: &str,
@@ -55,8 +56,11 @@ pub fn append_event(
     let own_tx = conn.execute_batch("BEGIN IMMEDIATE").is_ok();
     let timestamp = chrono::Utc::now().to_rfc3339();
     let result = (|| -> Result<AgentEvent> {
-        let sequence: i64 = conn
-            .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |r| r.get(0))?;
+        let sequence: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
+            [],
+            |r| r.get(0),
+        )?;
         // OR IGNORE: a racing duplicate event_id converges instead of failing.
         conn.execute(
             "INSERT OR IGNORE INTO events (event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -135,12 +139,11 @@ pub fn list_events(
 
 /// Highest sequence ingested (consumer resume watermark).
 pub fn latest_sequence(conn: &Connection, project_id: &str, workstream: &str) -> Result<i64> {
-    Ok(conn
-        .query_row(
-            "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE project_id=?1 AND workstream=?2",
-            rusqlite::params![project_id, workstream],
-            |r| r.get(0),
-        )?)
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE project_id=?1 AND workstream=?2",
+        rusqlite::params![project_id, workstream],
+        |r| r.get(0),
+    )?)
 }
 
 /// Adapter coverage: event counts per (agent, type) for diagnostics.
@@ -159,6 +162,16 @@ pub fn adapter_coverage(
         .map_err(Into::into)
 }
 
+/// Global adapter coverage across all projects and workstreams (for `/ui`).
+pub fn all_adapter_coverage(conn: &Connection) -> Result<Vec<(String, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, event_type, COUNT(*) FROM events GROUP BY agent_id, event_type ORDER BY agent_id, event_type",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,8 +185,28 @@ mod tests {
     #[test]
     fn append_is_idempotent_and_ordered() {
         let conn = setup();
-        let a = append_event(&conn, "/p", "ws", "agy", "s1", "tool_call", "src", "{\"tool\":\"edit\"}").unwrap();
-        let b = append_event(&conn, "/p", "ws", "agy", "s1", "tool_call", "src", "{\"tool\":\"edit\"}").unwrap();
+        let a = append_event(
+            &conn,
+            "/p",
+            "ws",
+            "agy",
+            "s1",
+            "tool_call",
+            "src",
+            "{\"tool\":\"edit\"}",
+        )
+        .unwrap();
+        let b = append_event(
+            &conn,
+            "/p",
+            "ws",
+            "agy",
+            "s1",
+            "tool_call",
+            "src",
+            "{\"tool\":\"edit\"}",
+        )
+        .unwrap();
         assert_eq!(a.event_id, b.event_id);
         assert_eq!(a.sequence, b.sequence);
         let c = append_event(&conn, "/p", "ws", "agy", "s1", "tool_result", "src", "{}").unwrap();
@@ -192,7 +225,9 @@ mod tests {
     fn workstream_isolation() {
         let conn = setup();
         append_event(&conn, "/p", "ws1", "agy", "s1", "session_start", "", "{}").unwrap();
-        assert!(list_events(&conn, "/p", "ws2", None, 0, 100).unwrap().is_empty());
+        assert!(list_events(&conn, "/p", "ws2", None, 0, 100)
+            .unwrap()
+            .is_empty());
     }
     #[test]
     fn concurrent_appends_converge_with_unique_sequences() {
@@ -214,8 +249,14 @@ mod tests {
                     barrier.wait();
                     for i in 0..10 {
                         append_event(
-                            &conn, "/p", "ws", "agy", "s", "tool_call",
-                            &format!("t{t}-i{i}"), "{\"tool\":\"edit\"}",
+                            &conn,
+                            "/p",
+                            "ws",
+                            "agy",
+                            "s",
+                            "tool_call",
+                            &format!("t{t}-i{i}"),
+                            "{\"tool\":\"edit\"}",
                         )
                         .unwrap();
                     }

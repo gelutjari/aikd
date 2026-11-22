@@ -6,7 +6,7 @@ description = "AIKD Tantivy BM25 + HNSW ANN search engine"
 
 [dependencies]
 aikd-core = { path = "../core" }
-tantivy = { workspace = true }
+aikd-storage = { path = "../storage" }
 hnsw_rs = { workspace = true }
 anndists = "0.1"
 anyhow = { workspace = true }

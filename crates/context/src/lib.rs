@@ -73,7 +73,10 @@ pub struct QueryOutcome {
     pub elapsed_ms: u128,
 }
 
-fn apply_budget(mut results: Vec<SearchResult>, budget: &ContextBudget) -> (Vec<SearchResult>, usize) {
+fn apply_budget(
+    mut results: Vec<SearchResult>,
+    budget: &ContextBudget,
+) -> (Vec<SearchResult>, usize) {
     results.truncate(budget.max_results);
     let mut used = 0usize;
     let mut cut = 0usize;
@@ -104,7 +107,11 @@ pub enum SemanticSource<'a> {
     /// Local ONNX model dir (only with `--features semantic`).
     LocalOnnx { model_dir: &'a Path },
     /// External HTTP provider (only with `--features semantic-ext`).
-    External { endpoint: &'a str, model: &'a str, api_key_env: &'a str },
+    External {
+        endpoint: &'a str,
+        model: &'a str,
+        api_key_env: &'a str,
+    },
 }
 
 impl<'a> SemanticSource<'a> {
@@ -153,25 +160,37 @@ pub fn run_query_with_source(
     req: &QueryRequest,
 ) -> Result<QueryOutcome> {
     let start = std::time::Instant::now();
-    let limit = req.limit.min(req.budget.max_results).max(1) * 2;
+    let mut budget = req.budget.clone();
+    if req.limit > 0 && req.limit < budget.max_results {
+        budget.max_results = req.limit;
+    }
+    let limit = req.limit.min(budget.max_results).max(1) * 2;
+
+    let search_lex = |q: &str, lim: usize, flt: &SearchFilters| -> Result<Vec<SearchResult>> {
+        let mut res = tantivy.search_with_conn(db.conn(), q, lim, flt)?;
+        if res.is_empty() {
+            res = tantivy.search(q, lim, flt)?;
+        }
+        Ok(res)
+    };
 
     let (raw, retrieval) = if req.hybrid {
         match try_hybrid(db, tantivy.clone(), source, embedding_enabled, req, limit) {
             Ok(r) => r,
             Err(reason) => {
                 log::info!("hybrid unavailable ({reason}); lexical fallback");
-                let results = tantivy.search(&req.query, limit, &req.filters)?;
+                let results = search_lex(&req.query, limit, &req.filters)?;
                 let results = enrich(db, &results)?;
                 (results, RetrievalKind::LexicalFallback { reason })
             }
         }
     } else {
-        let results = tantivy.search(&req.query, limit, &req.filters)?;
+        let results = search_lex(&req.query, limit, &req.filters)?;
         let results = enrich(db, &results)?;
         (results, RetrievalKind::Lexical)
     };
 
-    let (results, truncated_chars) = apply_budget(raw, &req.budget);
+    let (results, truncated_chars) = apply_budget(raw, &budget);
     Ok(QueryOutcome {
         results,
         retrieval,
@@ -182,7 +201,10 @@ pub fn run_query_with_source(
 
 /// Query embedding per source. Local ONNX needs `semantic`; external HTTP
 /// needs `semantic-ext`; otherwise an honest fallback reason.
-fn embed_query(source: SemanticSource, query: &str) -> Result<(Vec<f32>, &'static str), &'static str> {
+fn embed_query(
+    source: SemanticSource,
+    query: &str,
+) -> Result<(Vec<f32>, &'static str), &'static str> {
     match source {
         SemanticSource::None => Err("semantic is disabled (embedding.enabled=false)"),
         SemanticSource::LocalOnnx { .. } => {
@@ -192,7 +214,8 @@ fn embed_query(source: SemanticSource, query: &str) -> Result<(Vec<f32>, &'stati
                     if !aikd_embedder::is_model_downloaded(model_dir) {
                         return Err("model not downloaded");
                     }
-                    let mut model = aikd_embedder::create_model(model_dir).map_err(|_| "model failed to load")?;
+                    let mut model = aikd_embedder::create_model(model_dir)
+                        .map_err(|_| "model failed to load")?;
                     let emb = model
                         .embed(vec![query], None)
                         .map_err(|_| "query embedding failed")?
@@ -208,13 +231,20 @@ fn embed_query(source: SemanticSource, query: &str) -> Result<(Vec<f32>, &'stati
                 Err("semantic not compiled (zero-ONNX default build); rebuild with --features semantic")
             }
         }
-        SemanticSource::External { endpoint, model, api_key_env } => {
+        SemanticSource::External {
+            endpoint,
+            model,
+            api_key_env,
+        } => {
             #[cfg(feature = "semantic-ext")]
             {
                 use aikd_core::SemanticProvider;
-                let provider = aikd_embedder::ExternalProvider::from_env(endpoint, model, api_key_env)
-                    .map_err(|_| "external provider misconfigured (endpoint/key)")?;
-                let mut embs = provider.embed_texts(&[query]).map_err(|_| "external embedding failed")?;
+                let provider =
+                    aikd_embedder::ExternalProvider::from_env(endpoint, model, api_key_env)
+                        .map_err(|_| "external provider misconfigured (endpoint/key)")?;
+                let mut embs = provider
+                    .embed_texts(&[query])
+                    .map_err(|_| "external embedding failed")?;
                 let emb = embs.pop().ok_or("empty embedding")?;
                 // Static model id: the lifetime outlives this call via leak-free
                 // table lookup below (model string lives in config).
@@ -247,38 +277,46 @@ fn try_hybrid(
     if vector_index.is_empty() {
         return Err("no embeddings stored");
     }
-    let searcher =
-        aikd_indexer::HybridSearcher::new(tantivy, std::sync::Arc::new(vector_index));
+    let searcher = aikd_indexer::HybridSearcher::new(tantivy, std::sync::Arc::new(vector_index));
     let results = searcher
-        .hybrid_search(&req.query, &q_emb, limit, &req.filters, aikd_core::fusion::DEFAULT_RRF_K)
+        .hybrid_search_with_conn(
+            db.conn(),
+            &req.query,
+            &q_emb,
+            limit,
+            &req.filters,
+            aikd_core::fusion::DEFAULT_RRF_K,
+        )
         .map_err(|_| "hybrid search failed")?;
     let results = enrich(db, &results).map_err(|_| "enrich failed")?;
     Ok((results, RetrievalKind::Hybrid))
 }
 
-/// Fill line numbers from SQLite (Tantivy docs carry chunk IDs only).
-fn enrich(
-    db: &aikd_storage::Database,
-    results: &[SearchResult],
-) -> Result<Vec<SearchResult>> {
+/// Fill line numbers from SQLite if not already populated.
+fn enrich(db: &aikd_storage::Database, results: &[SearchResult]) -> Result<Vec<SearchResult>> {
     let mut out = Vec::with_capacity(results.len());
     for r in results {
-        let (ls, le): (i64, i64) = db
-            .conn()
-            .query_row(
-                "SELECT line_start, line_end FROM chunks WHERE id=?1",
-                rusqlite::params![r.chunk_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap_or((0, 0));
+        let (ls, le) = if r.line_start > 0 || r.line_end > 0 {
+            (r.line_start, r.line_end)
+        } else {
+            let (s, e): (i64, i64) = db
+                .conn()
+                .query_row(
+                    "SELECT line_start, line_end FROM chunks WHERE id=?1",
+                    rusqlite::params![r.chunk_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or((0, 0));
+            (s as usize, e as usize)
+        };
         out.push(SearchResult {
             chunk_id: r.chunk_id.clone(),
             file_path: r.file_path.clone(),
             heading_hierarchy: r.heading_hierarchy.clone(),
             heading_text: r.heading_text.clone(),
             content: r.content.clone(),
-            line_start: ls as usize,
-            line_end: le as usize,
+            line_start: ls,
+            line_end: le,
             score: r.score,
         });
     }
@@ -314,7 +352,14 @@ impl HandoffPackage {
         for t in &self.tasks {
             chars += t.title.len() + t.body.len();
         }
-        for m in self.decisions.iter().chain(&self.constraints).chain(&self.discoveries).chain(&self.facts).chain(&self.conflicts) {
+        for m in self
+            .decisions
+            .iter()
+            .chain(&self.constraints)
+            .chain(&self.discoveries)
+            .chain(&self.facts)
+            .chain(&self.conflicts)
+        {
             chars += m.title.len() + m.body.len();
         }
         if let Some(c) = &self.checkpoint {
@@ -340,8 +385,13 @@ impl HandoffPackage {
             out.push_str("(no active tasks)\n");
         }
         match &self.checkpoint {
-            Some(c) => out.push_str(&format!("\nCHECKPOINT {} — {}\n{}\n", c.id, c.title, c.body)),
-            None => out.push_str("\n(no checkpoint — save one with: aikd memory save --kind checkpoint ...)\n"),
+            Some(c) => out.push_str(&format!(
+                "\nCHECKPOINT {} — {}\n{}\n",
+                c.id, c.title, c.body
+            )),
+            None => out.push_str(
+                "\n(no checkpoint — save one with: aikd memory save --kind checkpoint ...)\n",
+            ),
         }
         for (label, items) in [
             ("DECISION", &self.decisions),
@@ -350,13 +400,25 @@ impl HandoffPackage {
             ("FACT", &self.facts),
         ] {
             for m in items {
-                out.push_str(&format!("\n{label} {} [{}]: {}\n  {}\n", m.id, m.source, m.title, m.body.lines().next().unwrap_or("")));
+                out.push_str(&format!(
+                    "\n{label} {} [{}]: {}\n  {}\n",
+                    m.id,
+                    m.source,
+                    m.title,
+                    m.body.lines().next().unwrap_or("")
+                ));
             }
         }
         if !self.conflicts.is_empty() {
             out.push_str("\n!! CONFLICTS (unresolved, both sides preserved):\n");
             for m in &self.conflicts {
-                out.push_str(&format!("  - {} [{}]: {} — {}\n", m.id, m.source, m.title, m.conflict_note.as_deref().unwrap_or("")));
+                out.push_str(&format!(
+                    "  - {} [{}]: {} — {}\n",
+                    m.id,
+                    m.source,
+                    m.title,
+                    m.conflict_note.as_deref().unwrap_or("")
+                ));
             }
         }
         if !self.next_actions.is_empty() {
@@ -365,12 +427,22 @@ impl HandoffPackage {
                 out.push_str(&format!(" - {n}\n"));
             }
         }
-        out.push_str(&format!("\nRECENT EVENTS ({} of journal, watermark seq={}):\n", self.recent_events.len(), self.watermark));
+        out.push_str(&format!(
+            "\nRECENT EVENTS ({} of journal, watermark seq={}):\n",
+            self.recent_events.len(),
+            self.watermark
+        ));
         for e in &self.recent_events {
-            out.push_str(&format!(" #{} {}:{} {}\n", e.sequence, e.agent_id, e.event_type, e.payload.lines().next().unwrap_or("")));
+            out.push_str(&format!(
+                " #{} {}:{} {}\n",
+                e.sequence,
+                e.agent_id,
+                e.event_type,
+                e.payload.lines().next().unwrap_or("")
+            ));
         }
         out.push_str(&format!("\nAtlas: {} (fp {}) | est. tokens ~{} | semantic_used={} (structural retrieval sufficient)\n",
-            self.atlas_status, &self.atlas_fingerprint.chars().take(12).collect::<String>(), self.estimated_tokens(), self.semantic_used));
+            self.atlas_status, self.atlas_fingerprint.chars().take(12).collect::<String>(), self.estimated_tokens(), self.semantic_used));
         out.push_str(&format!("\nRetrieved: tasks={} decisions={} constraints={} events={} conflicts={} | semantic_used={}\n",
             self.tasks.len(), self.decisions.len(), self.constraints.len(), self.recent_events.len(), self.conflicts.len(), self.semantic_used));
         out
@@ -387,22 +459,87 @@ pub fn assemble_handoff(
     use aikd_storage::memory::{active_tasks, conflicts, latest_checkpoint, list_memory};
     let tasks = active_tasks(conn, project, workstream)?;
     let checkpoint = latest_checkpoint(conn, project, workstream)?;
-    let decisions = list_memory(conn, project, Some(workstream), Some("decision"), false)?;
-    let constraints = list_memory(conn, project, Some(workstream), Some("constraint"), false)?;
+    let mut decisions = list_memory(conn, project, Some(workstream), Some("decision"), false)?;
+    let mut constraints = list_memory(conn, project, Some(workstream), Some("constraint"), false)?;
+    // Include synced project rules (`workstream="rules"`) so every handoff
+    // re-anchors AGENTS.md / CLAUDE.md / GEMINI.md against context rot!
+    if workstream != "rules" {
+        if let Ok(rule_constraints) =
+            list_memory(conn, project, Some("rules"), Some("constraint"), false)
+        {
+            for rc in rule_constraints.into_iter().take(12) {
+                if !constraints.iter().any(|c| c.id == rc.id) {
+                    constraints.push(rc);
+                }
+            }
+        }
+    }
+    if decisions.is_empty() && constraints.is_empty() {
+        // Fallback: if project path shifted, pull active explicit/rule decisions & constraints globally
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, conflict_note, created_at, updated_at FROM memory WHERE status='active' AND kind IN ('decision','constraint') ORDER BY CASE WHEN source='explicit' THEN 0 ELSE 1 END, updated_at DESC LIMIT 15"
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok(aikd_core::MemoryItem {
+                    id: row.get(0)?,
+                    project_path: row.get(1)?,
+                    workstream: row.get(2)?,
+                    kind: row.get(3)?,
+                    title: row.get(4)?,
+                    body: row.get(5)?,
+                    source: row.get(6)?,
+                    status: row.get(7)?,
+                    confidence: row.get(8)?,
+                    supersedes: row.get(9)?,
+                    conflict_note: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
+                })
+            }) {
+                for item in rows.flatten() {
+                    if item.kind == "decision" {
+                        decisions.push(item);
+                    } else if item.kind == "constraint" {
+                        constraints.push(item);
+                    }
+                }
+            }
+        }
+    }
     let discoveries = list_memory(conn, project, Some(workstream), Some("discovery"), false)?;
     let facts = list_memory(conn, project, Some(workstream), Some("fact"), false)?;
     let conflicted = conflicts(conn, project, Some(workstream))?;
     let watermark = aikd_storage::events::latest_sequence(conn, project, workstream).unwrap_or(0);
-    let events = aikd_storage::events::list_events(conn, project, workstream, None, watermark.saturating_sub(recent_events as i64), recent_events)?;
-    let next_actions: Vec<String> = tasks.iter().flat_map(|t| {
-        t.body.lines().filter(|l| {
-            let u = l.to_uppercase();
-            u.contains("REMAINING") || u.contains("NEXT") || u.contains("TODO")
-        }).map(|s| s.to_string()).collect::<Vec<_>>()
-    }).collect();
+    let events = aikd_storage::events::list_events(
+        conn,
+        project,
+        workstream,
+        None,
+        watermark.saturating_sub(recent_events as i64),
+        recent_events,
+    )?;
+    let next_actions: Vec<String> = tasks
+        .iter()
+        .flat_map(|t| {
+            t.body
+                .lines()
+                .filter(|l| {
+                    let u = l.to_uppercase();
+                    u.contains("REMAINING") || u.contains("NEXT") || u.contains("TODO")
+                })
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
     let (atlas_status, atlas_fingerprint) = match aikd_storage::atlas::read_atlas(conn, project)? {
         Some((_, status, _)) => {
-            let fp: String = conn.query_row("SELECT fingerprint FROM atlas WHERE project_path=?1", rusqlite::params![project], |r| r.get(0)).unwrap_or_default();
+            let fp: String = conn
+                .query_row(
+                    "SELECT fingerprint FROM atlas WHERE project_path=?1",
+                    rusqlite::params![project],
+                    |r| r.get(0),
+                )
+                .unwrap_or_default();
             (status, fp)
         }
         None => ("missing".to_string(), String::new()),
@@ -410,9 +547,19 @@ pub fn assemble_handoff(
     Ok(HandoffPackage {
         project: project.to_string(),
         workstream: workstream.to_string(),
-        tasks, checkpoint, decisions, constraints, discoveries, facts,
-        conflicts: conflicted, recent_events: events, watermark,
-        atlas_status, atlas_fingerprint, next_actions, semantic_used: false,
+        tasks,
+        checkpoint,
+        decisions,
+        constraints,
+        discoveries,
+        facts,
+        conflicts: conflicted,
+        recent_events: events,
+        watermark,
+        atlas_status,
+        atlas_fingerprint,
+        next_actions,
+        semantic_used: false,
     })
 }
 
@@ -446,41 +593,84 @@ pub fn inspect_context(
     let mut excluded_reasons = Vec::new();
     excluded_reasons.push("files outside project scope: not retrieved (scope filter)".to_string());
     if outcome.truncated_chars > 0 {
-        excluded_reasons.push(format!("{} chars cut to fit context budget (max_results={}, max_chars={})", outcome.truncated_chars, req.budget.max_results, req.budget.max_chars));
+        excluded_reasons.push(format!(
+            "{} chars cut to fit context budget (max_results={}, max_chars={})",
+            outcome.truncated_chars, req.budget.max_results, req.budget.max_chars
+        ));
     }
     if req.hybrid && !outcome.retrieval.semantic_used() {
-        excluded_reasons.push("semantic layer excluded: embeddings unavailable — lexical fallback used".to_string());
+        excluded_reasons.push(
+            "semantic layer excluded: embeddings unavailable — lexical fallback used".to_string(),
+        );
     }
-    let estimated_tokens = outcome.results.iter().map(|r| r.content.len()).sum::<usize>() / 4;
+    let estimated_tokens = outcome
+        .results
+        .iter()
+        .map(|r| r.content.len())
+        .sum::<usize>()
+        / 4;
     Ok(ContextInspection {
         query: req.query.clone(),
         retrieval: outcome.retrieval.as_str().to_string(),
-        selected, excluded_reasons, estimated_tokens,
+        selected,
+        excluded_reasons,
+        estimated_tokens,
         truncated_chars: outcome.truncated_chars,
         elapsed_ms: outcome.elapsed_ms,
     })
 }
 
-    #[test]
-    fn handoff_assembles_from_canonical_stores() {
-        use aikd_storage::schema;
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        schema::run_migrations(&conn).unwrap();
-        aikd_storage::memory::save_memory(&conn, "/p", "ws", "task", "T-1", "STATUS: IN_PROGRESS\nREMAINING: logout", "explicit", 1.0).unwrap();
-        aikd_storage::memory::save_memory(&conn, "/p", "ws", "decision", "D-1", "use SQLite", "agent-asserted", 1.0).unwrap();
-        aikd_storage::memory::save_memory(&conn, "/p", "ws", "checkpoint", "cp-1", "auth done", "explicit", 1.0).unwrap();
-        aikd_storage::events::append_event(&conn, "/p", "ws", "agy", "s1", "session_start", "", "{}").unwrap();
-        let pkg = assemble_handoff(&conn, "/p", "ws", 30).unwrap();
-        assert_eq!(pkg.tasks.len(), 1);
-        assert_eq!(pkg.decisions.len(), 1);
-        assert!(pkg.checkpoint.is_some());
-        assert_eq!(pkg.recent_events.len(), 1);
-        assert_eq!(pkg.next_actions, vec!["REMAINING: logout".to_string()]);
-        assert_eq!(pkg.atlas_status, "missing");
-        assert!(pkg.estimated_tokens() > 0);
-        let text = pkg.render_text();
-        assert!(text.contains("T-1") && text.contains("cp-1") && text.contains("watermark seq=1"));
-    }
+#[test]
+fn handoff_assembles_from_canonical_stores() {
+    use aikd_storage::schema;
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    schema::run_migrations(&conn).unwrap();
+    aikd_storage::memory::save_memory(
+        &conn,
+        "/p",
+        "ws",
+        "task",
+        "T-1",
+        "STATUS: IN_PROGRESS\nREMAINING: logout",
+        "explicit",
+        1.0,
+    )
+    .unwrap();
+    aikd_storage::memory::save_memory(
+        &conn,
+        "/p",
+        "ws",
+        "decision",
+        "D-1",
+        "use SQLite",
+        "agent-asserted",
+        1.0,
+    )
+    .unwrap();
+    aikd_storage::memory::save_memory(
+        &conn,
+        "/p",
+        "ws",
+        "checkpoint",
+        "cp-1",
+        "auth done",
+        "explicit",
+        1.0,
+    )
+    .unwrap();
+    aikd_storage::events::append_event(&conn, "/p", "ws", "agy", "s1", "session_start", "", "{}")
+        .unwrap();
+    let pkg = assemble_handoff(&conn, "/p", "ws", 30).unwrap();
+    assert_eq!(pkg.tasks.len(), 1);
+    assert_eq!(pkg.decisions.len(), 1);
+    assert!(pkg.checkpoint.is_some());
+    assert_eq!(pkg.recent_events.len(), 1);
+    assert_eq!(pkg.next_actions, vec!["REMAINING: logout".to_string()]);
+    assert_eq!(pkg.atlas_status, "missing");
+    assert!(pkg.estimated_tokens() > 0);
+    let text = pkg.render_text();
+    assert!(text.contains("T-1") && text.contains("cp-1") && text.contains("watermark seq=1"));
+}
 
 #[cfg(test)]
 mod tests {
@@ -501,9 +691,23 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         aikd_storage::schema::run_migrations(&conn).unwrap();
         let project = aikd_core::platform::canonical_project(&["C:\\proj".to_string()]);
-        aikd_storage::memory::save_memory(&conn, &project, "ws", "task", "T", "STATUS: IN_PROGRESS\nREMAINING: x", "explicit", 1.0).unwrap();
+        aikd_storage::memory::save_memory(
+            &conn,
+            &project,
+            "ws",
+            "task",
+            "T",
+            "STATUS: IN_PROGRESS\nREMAINING: x",
+            "explicit",
+            1.0,
+        )
+        .unwrap();
         let pkg = assemble_handoff(&conn, &project, "ws", 10).unwrap();
-        assert_eq!(pkg.tasks.len(), 1, "handoff must see what memory saved under the same project key");
+        assert_eq!(
+            pkg.tasks.len(),
+            1,
+            "handoff must see what memory saved under the same project key"
+        );
         assert_eq!(pkg.next_actions, vec!["REMAINING: x".to_string()]);
     }
 
@@ -519,7 +723,13 @@ mod tests {
             line_end: 2,
             score: 1.0,
         };
-        let (out, cut) = apply_budget(vec![mk(1), mk(2), mk(3)], &ContextBudget { max_results: 2, max_chars: 150 });
+        let (out, cut) = apply_budget(
+            vec![mk(1), mk(2), mk(3)],
+            &ContextBudget {
+                max_results: 2,
+                max_chars: 150,
+            },
+        );
         assert_eq!(out.len(), 2);
         assert!(cut > 0);
         assert!(out[0].content.len() <= 160);

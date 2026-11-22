@@ -48,7 +48,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// Brute-force top-K vector search over in-memory vectors.
 /// For small/medium DB this is the default; HNSW in `aikd-indexer` is an
 /// optional acceleration for the same canonical data.
-pub fn vector_search(query: &[f32], all: &[(String, Vec<f32>)], limit: usize) -> Vec<(String, f32)> {
+pub fn vector_search(
+    query: &[f32],
+    all: &[(String, Vec<f32>)],
+    limit: usize,
+) -> Vec<(String, f32)> {
     let mut scored: Vec<(String, f32)> = all
         .iter()
         .map(|(id, e)| (id.clone(), cosine_similarity(query, e)))
@@ -94,7 +98,10 @@ pub fn load_all_embeddings(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(S
 /// Import vectors produced by an EXTERNAL provider (JSON array of
 /// `{chunk_id, embedding}`). This is the zero-ONNX path to semantic data:
 /// vectors come from outside, AIKD stores and serves them.
-pub fn import_embeddings_json(conn: &rusqlite::Connection, json_path: &str) -> anyhow::Result<usize> {
+pub fn import_embeddings_json(
+    conn: &rusqlite::Connection,
+    json_path: &str,
+) -> anyhow::Result<usize> {
     let content = std::fs::read_to_string(json_path)?;
     let data: serde_json::Value = serde_json::from_str(&content)?;
     let arr = data
@@ -105,7 +112,11 @@ pub fn import_embeddings_json(conn: &rusqlite::Connection, json_path: &str) -> a
         let chunk_id = item["chunk_id"].as_str().unwrap_or_default().to_string();
         let embedding: Vec<f32> = item["embedding"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect()
+            })
             .unwrap_or_default();
         if chunk_id.is_empty() || embedding.is_empty() {
             continue;
@@ -121,15 +132,41 @@ pub fn import_embeddings_json(conn: &rusqlite::Connection, json_path: &str) -> a
 
 /// Export chunk contents for an EXTERNAL provider to embed.
 /// Zero-ONNX workflow: `aikd export` → provider embeds → `aikd import`.
-pub fn export_chunks_for_embedding(conn: &rusqlite::Connection, output_path: &str) -> anyhow::Result<usize> {
-    let mut stmt = conn.prepare("SELECT id, content FROM chunks")?;
+/// In lean mode (empty `chunks.content`), reads lines live from disk.
+pub fn export_chunks_for_embedding(
+    conn: &rusqlite::Connection,
+    output_path: &str,
+) -> anyhow::Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, f.path, c.line_start, c.line_end, c.content FROM chunks c JOIN files f ON f.id = c.file_id",
+    )?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? as usize,
+            row.get::<_, i64>(3)? as usize,
+            row.get::<_, String>(4)?,
+        ))
     })?;
     let mut items = Vec::new();
     for row in rows {
-        let (id, content) = row?;
-        items.push(serde_json::json!({"chunk_id": id, "content": content}));
+        let (id, fp, ls, le, content) = row?;
+        let text = if !content.is_empty() {
+            content
+        } else if let Ok(raw) = std::fs::read_to_string(&fp) {
+            let lines: Vec<&str> = raw.lines().collect();
+            if lines.is_empty() {
+                String::new()
+            } else {
+                let s = ls.saturating_sub(1).min(lines.len().saturating_sub(1));
+                let e = le.max(s + 1).min(lines.len());
+                lines[s..e].join("\n")
+            }
+        } else {
+            String::new()
+        };
+        items.push(serde_json::json!({"chunk_id": id, "content": text}));
     }
     let json = serde_json::to_string_pretty(&items)?;
     std::fs::write(output_path, json)?;
@@ -160,8 +197,15 @@ impl EmbeddingCache {
         }
     }
 
-    pub fn preload_for_ids(&self, chunk_ids: &[String], conn: &rusqlite::Connection) -> anyhow::Result<()> {
-        let mut cache = self.cache.lock().map_err(|_| anyhow::anyhow!("cache lock poisoned"))?;
+    pub fn preload_for_ids(
+        &self,
+        chunk_ids: &[String],
+        conn: &rusqlite::Connection,
+    ) -> anyhow::Result<()> {
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("cache lock poisoned"))?;
         let ids_to_load: Vec<&String> = chunk_ids
             .iter()
             .filter(|id| cache.get(id.as_str()).is_none())
@@ -173,9 +217,11 @@ impl EmbeddingCache {
             "SELECT chunk_id, vector FROM embeddings WHERE model = ?1 AND chunk_id = ?2",
         )?;
         for id in ids_to_load {
-            if let Ok(bytes) = stmt.query_row(rusqlite::params![EMBEDDING_MODEL, id.as_str()], |row| {
-                row.get::<_, Vec<u8>>(1)
-            }) {
+            if let Ok(bytes) = stmt
+                .query_row(rusqlite::params![EMBEDDING_MODEL, id.as_str()], |row| {
+                    row.get::<_, Vec<u8>>(1)
+                })
+            {
                 cache.put(id.clone(), bytes_to_f32(&bytes));
             }
         }

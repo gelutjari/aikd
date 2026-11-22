@@ -70,7 +70,7 @@ struct Cli {
     #[arg(long, global = true)]
     version_json: bool,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -86,6 +86,10 @@ enum Commands {
         #[arg(short, long)]
         path: Option<String>,
     },
+    #[command(
+        about = "Auto-detect and register AIKD MCP across all installed AI agents (CLI & IDE)"
+    )]
+    Register,
     #[command(about = "[MCP] Start MCP server (stdio, for AI assistants)")]
     Serve,
     #[command(about = "[DAEMON] Start background service (REST API + file watcher)")]
@@ -103,6 +107,11 @@ enum Commands {
     Scan {
         #[arg(short, long)]
         path: Option<String>,
+        #[arg(
+            long,
+            help = "Re-chunk all files regardless of hash (for rebuilding FTS after prune)"
+        )]
+        force: bool,
     },
     #[command(about = "[CLI] Search the knowledge base")]
     Query {
@@ -212,7 +221,9 @@ enum Commands {
         action: DbAction,
     },
 
-    #[command(about = "[CLI] Install a new binary version side-by-side and switch the shim pointer (never touches a running file)")]
+    #[command(
+        about = "[CLI] Install a new binary version side-by-side and switch the shim pointer (never touches a running file)"
+    )]
     Update {
         #[arg(long, help = "Local binary file to install as a new version")]
         file: Option<String>,
@@ -223,11 +234,25 @@ enum Commands {
     },
 
     #[command(about = "[CLI] Garbage-collect rows for deleted files and reclaim space")]
-    Gc,
+    Gc {
+        #[arg(
+            long,
+            help = "Empty chunks.content column (search via FTS5 + live disk snippets)"
+        )]
+        prune_content: bool,
+        #[arg(
+            long,
+            help = "Delete all stored vector embeddings and downloaded model files"
+        )]
+        prune_semantic: bool,
+    },
 
     #[command(about = "[CLI] Look up code symbols (functions, structs, classes) by name")]
     Symbol {
-        name: String,
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+        #[arg(long = "name", value_name = "NAME", conflicts_with = "name")]
+        name_flag: Option<String>,
         #[arg(short, long, default_value = "20")]
         limit: usize,
     },
@@ -238,7 +263,9 @@ enum Commands {
         action: EventAction,
     },
 
-    #[command(about = "[HANDOFF] Build the context package for a workstream (resume after compaction/transfer)")]
+    #[command(
+        about = "[HANDOFF] Build the context package for a workstream (resume after compaction/transfer)"
+    )]
     Handoff {
         #[arg(long, default_value = "default")]
         workstream: String,
@@ -252,7 +279,9 @@ enum Commands {
         action: ProjectAction,
     },
 
-    #[command(about = "[CTX] Inspect what AIKD would send for a query and why (token estimate, exclusions)")]
+    #[command(
+        about = "[CTX] Inspect what AIKD would send for a query and why (token estimate, exclusions)"
+    )]
     Context {
         query: String,
         #[arg(long, default_value = "10")]
@@ -261,7 +290,9 @@ enum Commands {
         hybrid: bool,
     },
 
-    #[command(about = "[CLI] Structured memory: facts, decisions, constraints, tasks, checkpoints")]
+    #[command(
+        about = "[CLI] Structured memory: facts, decisions, constraints, tasks, checkpoints"
+    )]
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
@@ -270,7 +301,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum MemoryAction {
-    #[command(about = "Save a memory item (kind: fact|decision|constraint|discovery|task|checkpoint)")]
+    #[command(
+        about = "Save a memory item (kind: fact|decision|constraint|discovery|task|checkpoint)"
+    )]
     Save {
         #[arg(long)]
         kind: String,
@@ -308,14 +341,12 @@ enum MemoryAction {
         workstream: String,
     },
     #[command(about = "Mark an item STALE (kept as evidence, hidden from active views)")]
-    Stale {
-        id: String,
-    },
+    Stale { id: String },
     #[command(about = "Archive an item (long-term retention, out of active views)")]
-    Archive {
-        id: String,
-    },
-    #[command(about = "Flag two items as CONFLICTED with a note (both preserved, neither becomes fact)")]
+    Archive { id: String },
+    #[command(
+        about = "Flag two items as CONFLICTED with a note (both preserved, neither becomes fact)"
+    )]
     Conflict {
         id_a: String,
         id_b: String,
@@ -401,7 +432,7 @@ enum ModelAction {
 enum DbAction {
     #[command(about = "Show database health, sizes, and counts")]
     Status,
-    #[command(about = "Verify integrity (SQLite + FTS sync + orphans)")]
+    #[command(about = "Verify integrity (SQLite + orphans)")]
     Check,
     #[command(about = "Online backup to a file (VACUUM INTO)")]
     Backup {
@@ -413,9 +444,12 @@ enum DbAction {
         #[arg(short, long)]
         file: String,
     },
-    #[command(about = "Reclaim space (VACUUM); --rebuild-fts is a no-op since v12 (Tantivy is the lexical engine)")]
+    #[command(about = "Reclaim space (VACUUM); --rebuild-fts rebuilds the contentless FTS5 index")]
     Compact {
-        #[arg(long, help = "No-op since v12 (kept for back-compat)")]
+        #[arg(
+            long,
+            help = "Rebuild contentless FTS5 index from chunks/disk before VACUUM"
+        )]
         rebuild_fts: bool,
     },
 }
@@ -434,31 +468,46 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.version_json {
+        let active_version =
+            std::fs::read_to_string(shellexpand::tilde("~/.aikd/active-version").as_ref())
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
+                "active_version": active_version,
                 "model": embedder::MODEL_NAME,
-                "db_schema": 13,
+                "db_schema": 14,
+                "semantic_compiled": aikd_embedder::SEMANTIC_COMPILED,
             }))
             .unwrap_or_default()
         );
         return Ok(());
     }
 
+    let Some(command) = cli.command else {
+        use clap::CommandFactory;
+        Cli::command().print_help()?;
+        eprintln!();
+        std::process::exit(2);
+    };
+
     let json_mode = cli.json;
     if cli.quiet {
         QUIET.store(true, Ordering::Relaxed);
     }
-    match cli.command {
+    match command {
         Commands::Init { path } => cmd_init(&cli.config, path.as_deref()),
+        Commands::Register => cmd_register(json_mode),
         Commands::Daemon { action } => {
             let foreground = matches!(action, Some(DaemonAction::Foreground));
             cmd_daemon(&cli.config, foreground).await
         }
-        Commands::DaemonStop => cmd_daemon_stop(),
-        Commands::DaemonPid => cmd_daemon_pid(),
-        Commands::Scan { path } => cmd_scan(&cli.config, path.as_deref()),
+        Commands::DaemonStop => cmd_daemon_stop(&cli.config),
+        Commands::DaemonPid => cmd_daemon_pid(&cli.config),
+        Commands::Scan { path, force } => cmd_scan(&cli.config, path.as_deref(), force, json_mode),
         Commands::Query {
             query,
             limit,
@@ -520,26 +569,74 @@ async fn main() -> Result<()> {
             limit,
         } => cmd_recall(&cli.config, &query, session.as_deref(), limit, json_mode),
         Commands::Status => cmd_status(&cli.config, json_mode),
-        Commands::Doctor => cmd_doctor(&cli.config),
+        Commands::Doctor => cmd_doctor(&cli.config, json_mode),
         Commands::Inject { command } => cmd_inject(&cli.config, &command),
         Commands::Benchmark => cmd_benchmark(&cli.config).await,
         Commands::Session { action } => cmd_session(&cli.config, action, json_mode),
         Commands::Model { action } => cmd_model(&cli.config, action.unwrap_or(ModelAction::Status)),
         Commands::Db { action } => cmd_db(&cli.config, action, json_mode),
-        Commands::Gc => cmd_gc(&cli.config, json_mode),
-        Commands::Update { file, version, list } => cmd_update(file, version, list),
-        Commands::Symbol { name, limit } => cmd_symbol(&cli.config, &name, limit, json_mode),
+        Commands::Gc {
+            prune_content,
+            prune_semantic,
+        } => cmd_gc(&cli.config, prune_content, prune_semantic, json_mode),
+        Commands::Update {
+            file,
+            version,
+            list,
+        } => cmd_update(&cli.config, file, version, list, json_mode),
+        Commands::Symbol {
+            name,
+            name_flag,
+            limit,
+        } => {
+            let sym = name.or(name_flag).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provide a symbol name: `aikd symbol <NAME>` or `aikd symbol --name <NAME>`"
+                )
+            })?;
+            cmd_symbol(&cli.config, &sym, limit, json_mode)
+        }
         Commands::Memory { action } => cmd_memory(&cli.config, action, json_mode),
         Commands::Event { action } => cmd_event(&cli.config, action, json_mode),
-        Commands::Handoff { workstream, recent_events } => cmd_handoff(&cli.config, &workstream, recent_events, json_mode),
+        Commands::Handoff {
+            workstream,
+            recent_events,
+        } => cmd_handoff(&cli.config, &workstream, recent_events, json_mode),
         Commands::Project { action } => cmd_project(&cli.config, action, json_mode),
-        Commands::Context { query, limit, hybrid } => cmd_context_inspect(&cli.config, &query, limit, hybrid),
+        Commands::Context {
+            query,
+            limit,
+            hybrid,
+        } => cmd_context_inspect(&cli.config, &query, limit, hybrid, json_mode),
     }
+}
+
+fn cmd_register(json_mode: bool) -> Result<()> {
+    let aikd_path = preferred_agent_binary();
+    let res = aikd_core::agents::detect_and_register(&aikd_path);
+    if json_mode {
+        let statuses = aikd_core::agents::detect_agent_statuses();
+        println!("{}", serde_json::to_string_pretty(&statuses)?);
+    } else {
+        println!("Registering AIKD MCP binary ({aikd_path}) across installed AI agents:");
+        for (name, ok) in &res {
+            if *ok {
+                println!("  [OK] {name}");
+            } else {
+                println!("  [WARN] {name} — failed to update config");
+            }
+        }
+        let statuses = aikd_core::agents::detect_agent_statuses();
+        let active = statuses.iter().filter(|s| s.registered).count();
+        println!("\nDone: {active} agent config(s) connected to AIKD.");
+    }
+    Ok(())
 }
 
 fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
     let expanded = shellexpand::tilde(config_path);
     let config_exists = Path::new(expanded.as_ref()).exists();
+    let is_default_cfg = Config::is_default_config_path(config_path);
     if config_exists {
         info!("Config already exists at {}", expanded);
     } else {
@@ -551,6 +648,17 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
         // (Otherwise `init --path X` writes smart extensions for X but
         // scans "." — the #1 "found N files" confusion.)
         cfg.scan.include_paths = vec![aikd_core::platform::canonical_path(&root)];
+        if !is_default_cfg {
+            // Isolate DB and Tantivy index beside the explicit --config file
+            // so `aikd --config <custom> init` never writes to the user's ~/.aikd DB.
+            let base = Path::new(expanded.as_ref())
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            cfg.index.db_path = aikd_core::platform::canonical_path(&base.join("aikd.db"));
+            cfg.index.tantivy_path =
+                aikd_core::platform::canonical_path(&base.join("tantivy_index"));
+        }
         cfg.save(config_path)?;
         info!("  Config created at {}", expanded);
     }
@@ -565,26 +673,28 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
         info!("  Model already downloaded ({})", embedder::MODEL_NAME);
     }
 
-    // Generate shell hooks
-    install_shell_hook(config_path);
-
-    // Auto-register ke semua AI agent yang terinstall
-    let aikd_path = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "aikd".to_string());
-
-    info!("\nDetecting AI agents...");
-    let results = aikd_core::agents::detect_and_register(&aikd_path);
-
-    for (name, success) in &results {
-        if *success {
-            info!("  {} - registered", name);
-        } else {
-            info!("  {} - not found", name);
+    // Auto-register only when initializing the default user config (never pollute
+    // user-global agent configs or shell rc files during isolated `--config` runs).
+    let runtime_dir = cfg.runtime_dir(config_path);
+    let aikd_path = preferred_agent_binary();
+    let results = if is_default_cfg {
+        install_shell_hook(config_path);
+        info!("\nDetecting AI agents...");
+        let res = aikd_core::agents::detect_and_register(&aikd_path);
+        for (name, success) in &res {
+            if *success {
+                info!("  {} - registered", name);
+            } else {
+                info!("  {} - not found", name);
+            }
         }
-    }
+        res
+    } else {
+        info!("\nIsolated config: skipping global shell hook & agent auto-registration.");
+        Vec::new()
+    };
 
-    // Always write standalone MCP config
+    // Write standalone MCP config into the config's runtime directory.
     let mcp_config = serde_json::json!({
         "mcpServers": {
             "aikd": {
@@ -593,15 +703,15 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
             }
         }
     });
-    let mcp_path = shellexpand::tilde("~/.aikd/mcp.json");
-    if let Some(parent) = Path::new(mcp_path.as_ref()).parent() {
+    let mcp_path = runtime_dir.join("mcp.json");
+    if let Some(parent) = mcp_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(
-        mcp_path.as_ref(),
+        &mcp_path,
         serde_json::to_string_pretty(&mcp_config).unwrap_or_default(),
     )?;
-    info!("  MCP config: {}", mcp_path);
+    info!("  MCP config: {}", mcp_path.display());
 
     info!("\nNext steps:");
     info!("  aikd scan          # Index your project");
@@ -612,10 +722,11 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
     let summary = serde_json::json!({
         "status": "ok",
         "config": expanded.to_string(),
+        "isolated": !is_default_cfg,
         "model_downloaded": aikd_embedder::is_model_downloaded(&model_dir),
         "agents_registered": results.iter().filter(|(_, s)| *s).map(|(n, _)| n).collect::<Vec<_>>(),
         "cli_usage": "aikd query \"keyword\" --json",
-        "mcp_config": mcp_path.to_string(),
+        "mcp_config": mcp_path.to_string_lossy(),
     });
     println!(
         "{}",
@@ -623,6 +734,25 @@ fn cmd_init(config_path: &str, scan_path: Option<&str>) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Prefer the installed PATH shim when running from a versioned folder under
+/// `~/.aikd/versions/`, so MCP configs keep working across `aikd update` swaps.
+fn preferred_agent_binary() -> String {
+    let bin = if cfg!(windows) { "aikd.exe" } else { "aikd" };
+    let exe = std::env::current_exe().ok();
+    if let Some(ref p) = exe {
+        let norm = p.to_string_lossy().replace('\\', "/");
+        if norm.contains("/.aikd/versions/") {
+            let shim =
+                std::path::PathBuf::from(shellexpand::tilde("~/.local/bin").as_ref()).join(bin);
+            if shim.is_file() {
+                return shim.to_string_lossy().to_string();
+            }
+        }
+        return p.to_string_lossy().to_string();
+    }
+    "aikd".to_string()
 }
 
 fn install_shell_hook(_config_path: &str) {
@@ -651,7 +781,7 @@ aikd_auto_start"#
             {
                 use std::io::Write;
                 let _ = writeln!(f, "\n{hook_script}");
-                println!("Shell hook installed to {bashrc}");
+                info!("Shell hook installed to {bashrc}");
             }
         }
     }
@@ -667,7 +797,7 @@ aikd_auto_start"#
             {
                 use std::io::Write;
                 let _ = writeln!(f, "\n{hook_script}");
-                println!("Shell hook installed to {zshrc}");
+                info!("Shell hook installed to {zshrc}");
             }
         }
     }
@@ -698,9 +828,8 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
             return aikd_server::run_rest_server(config_path).await;
         }
         let config_path_owned = config_path.to_string();
-        let rest_handle = tokio::spawn(async move {
-            aikd_server::run_rest_server(&config_path_owned).await
-        });
+        let rest_handle =
+            tokio::spawn(async move { aikd_server::run_rest_server(&config_path_owned).await });
 
         let config_path_owned2 = config_path.to_string();
         let mcp_handle =
@@ -713,33 +842,42 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         return Ok(());
     }
     // ---- background spawn ----
-    let pid_dir = shellexpand::tilde("~/.aikd");
-    let pid_path = format!("{pid_dir}/aikd.pid");
-    std::fs::create_dir_all(pid_dir.as_ref())?;
+    let cfg = load_validated(config_path);
+    let pid_dir = cfg.runtime_dir(config_path);
+    let pid_path = pid_dir.join("aikd.pid");
+    std::fs::create_dir_all(&pid_dir)?;
     // Stale PID from a crashed daemon must not block a fresh start; the
     // port check above is authoritative, the PID file is bookkeeping.
-    let _ = std::fs::remove_file(pid_path.as_str());
+    let _ = std::fs::remove_file(&pid_path);
     let aikd_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "aikd".to_string());
-    let log_path = format!("{pid_dir}/aikd.log");
+    let log_path = pid_dir.join("aikd.log");
     #[cfg(windows)]
     let child = {
         use std::os::windows::process::CommandExt;
+        clear_stdio_inherit();
+        let log_out = std::fs::File::create(&log_path)?;
+        let log_err = log_out.try_clone()?;
+        // CREATE_NO_WINDOW (0x08000000) | CREATE_NEW_PROCESS_GROUP (0x00000200)
         std::process::Command::new(&aikd_path)
-            .args(["--config", config_path, "daemon", "foreground"]).env("AIKD_DAEMON_BG", "1")
-            .stdout(std::fs::File::create(&log_path)?)
-            .stderr(std::process::Stdio::null())
+            .args(["--config", config_path, "daemon", "foreground"])
+            .env("AIKD_DAEMON_BG", "1")
+            .stdout(log_out)
+            .stderr(log_err)
             .stdin(std::process::Stdio::null())
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .creation_flags(0x08000000 | 0x00000200)
             .spawn()?
     };
     #[cfg(not(windows))]
     let child = {
+        let log_out = std::fs::File::create(&log_path)?;
+        let log_err = log_out.try_clone()?;
         std::process::Command::new(&aikd_path)
-            .args(["--config", config_path, "daemon", "foreground"]).env("AIKD_DAEMON_BG", "1")
-            .stdout(std::fs::File::create(&log_path)?)
-            .stderr(std::process::Stdio::null())
+            .args(["--config", config_path, "daemon", "foreground"])
+            .env("AIKD_DAEMON_BG", "1")
+            .stdout(log_out)
+            .stderr(log_err)
             .stdin(std::process::Stdio::null())
             .spawn()?
     };
@@ -748,12 +886,13 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
     // silent stderr=null deaths). A second starter racing us fails the
     // singleton lock inside the child and exits here with a clear error.
     let probe = probe_of();
+    let log_str = log_path.to_string_lossy().to_string();
     let mut ok = false;
     for _ in 0..150 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         // Child died early? Surface why instead of claiming success.
         if let ChildState::Exited(code) = child_try_wait(child.id()) {
-            let tail = tail_file(&log_path, 15);
+            let tail = tail_file(&log_str, 15);
             anyhow::bail!("daemon child exited early (code {code}). Log tail:\n{tail}");
         }
         if probe_listening(&probe) {
@@ -762,13 +901,35 @@ async fn cmd_daemon(config_path: &str, foreground: bool) -> Result<()> {
         }
     }
     if !ok {
-        let tail = tail_file(&log_path, 15);
+        let tail = tail_file(&log_str, 15);
         anyhow::bail!("daemon did not listen on {probe} within 15s. Log tail:\n{tail}");
     }
     std::fs::write(&pid_path, child.id().to_string())?;
     println!("AIKD daemon started (PID {}) on {probe}", child.id());
-    println!("Log: {log_path}");
+    println!("Log: {}", log_path.display());
     Ok(())
+}
+
+#[cfg(windows)]
+fn clear_stdio_inherit() {
+    const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+    const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+    const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    extern "system" {
+        fn GetStdHandle(n_std_handle: u32) -> isize;
+        fn SetHandleInformation(h_object: isize, dw_mask: u32, dw_flags: u32) -> i32;
+    }
+    // SAFETY: Clearing HANDLE_FLAG_INHERIT only stops detached daemon children
+    // from keeping caller-owned stdin/stdout/stderr pipes open on Windows.
+    unsafe {
+        for std_id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let h = GetStdHandle(std_id);
+            if h != 0 && h != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -814,7 +975,11 @@ fn child_try_wait(pid: u32) -> ChildState {
 }
 
 fn probe_listening(addr: &str) -> bool {
-    std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), std::time::Duration::from_millis(300)).is_ok()
+    std::net::TcpStream::connect_timeout(
+        &addr.parse().unwrap(),
+        std::time::Duration::from_millis(300),
+    )
+    .is_ok()
 }
 
 fn tail_file(path: &str, n: usize) -> String {
@@ -825,23 +990,23 @@ fn tail_file(path: &str, n: usize) -> String {
         })
         .unwrap_or_else(|_| "(log unreadable)".into())
 }
-fn cmd_daemon_stop() -> Result<()> {
+fn cmd_daemon_stop(config_path: &str) -> Result<()> {
     // D2: check the port first (cross-platform). A stale PID file from a
     // crashed daemon must not block a fresh start, and killing a recycled
     // PID would hit an unrelated process.
-    let probe = "127.0.0.1:9090";
-    if std::net::TcpStream::connect_timeout(&probe.parse().unwrap(), std::time::Duration::from_millis(500)).is_err() {
-        let pid_path = shellexpand::tilde("~/.aikd/aikd.pid");
-        let _ = std::fs::remove_file(pid_path.as_ref());
+    let cfg = load_validated(config_path);
+    let probe = format!("127.0.0.1:{}", cfg.server.rest_port);
+    let pid_path = cfg.runtime_dir(config_path).join("aikd.pid");
+    if !probe_listening(&probe) {
+        let _ = std::fs::remove_file(&pid_path);
         eprintln!("No daemon listening on {probe} (stale PID file cleaned). Nothing to stop.");
         return Ok(());
     }
-    let pid_path = shellexpand::tilde("~/.aikd/aikd.pid");
-    if !std::path::Path::new(pid_path.as_ref()).exists() {
+    if !pid_path.exists() {
         eprintln!("Daemon is listening on {probe} but no PID file exists (started externally?). Stop it manually or restart it via `aikd daemon`.");
         return Ok(());
     }
-    let pid_str = std::fs::read_to_string(pid_path.as_ref())?;
+    let pid_str = std::fs::read_to_string(&pid_path)?;
     let pid: u32 = pid_str.trim().parse().unwrap_or(0);
     if pid == 0 {
         eprintln!("Invalid PID file.");
@@ -855,7 +1020,7 @@ fn cmd_daemon_stop() -> Result<()> {
             .status()?;
         if status.success() {
             println!("Daemon stopped (PID {})", pid);
-            let _ = std::fs::remove_file(pid_path.as_ref());
+            let _ = std::fs::remove_file(&pid_path);
         } else {
             eprintln!("Failed to kill PID {}. Daemon may already be stopped.", pid);
         }
@@ -868,7 +1033,7 @@ fn cmd_daemon_stop() -> Result<()> {
             .status()?;
         if status.success() {
             println!("Daemon stopped (PID {pid})");
-            let _ = std::fs::remove_file(pid_path.as_ref());
+            let _ = std::fs::remove_file(&pid_path);
         } else {
             eprintln!("Failed to kill PID {pid}. Daemon may already be stopped.");
         }
@@ -882,53 +1047,47 @@ fn cmd_daemon_stop() -> Result<()> {
     Ok(())
 }
 
-fn cmd_daemon_pid() -> Result<()> {
-    let pid_path = shellexpand::tilde("~/.aikd/aikd.pid");
-    if !std::path::Path::new(pid_path.as_ref()).exists() {
+fn cmd_daemon_pid(config_path: &str) -> Result<()> {
+    let cfg = load_validated(config_path);
+    let pid_path = cfg.runtime_dir(config_path).join("aikd.pid");
+    if !pid_path.exists() {
         println!("Daemon not running (no PID file).");
         return Ok(());
     }
-    let pid_str = std::fs::read_to_string(pid_path.as_ref())?;
+    let pid_str = std::fs::read_to_string(&pid_path)?;
     let pid: u32 = pid_str.trim().parse().unwrap_or(0);
     if pid == 0 {
         println!("Invalid PID file.");
         return Ok(());
     }
 
-    #[cfg(unix)]
-    {
-        let check = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if check.map(|s| s.success()).unwrap_or(false) {
-            println!("Daemon running (PID {})", pid);
-        } else {
-            println!("Daemon not running (stale PID {})", pid);
-            let _ = std::fs::remove_file(pid_path.as_ref());
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        println!("Daemon PID: {pid}");
+    let probe = format!("127.0.0.1:{}", cfg.server.rest_port);
+    if child_try_wait(pid) == ChildState::Running && probe_listening(&probe) {
+        println!("Daemon running (PID {pid}) on {probe}");
+    } else if child_try_wait(pid) == ChildState::Running {
+        println!("Daemon process running (PID {pid}), port {probe} not listening");
+    } else {
+        println!("Daemon not running (stale PID {pid})");
+        let _ = std::fs::remove_file(&pid_path);
     }
 
     Ok(())
 }
 
-fn cmd_scan(config_path: &str, override_path: Option<&str>) -> Result<()> {
+fn cmd_scan(config_path: &str, override_path: Option<&str>, force: bool, json: bool) -> Result<()> {
     let cfg = load_validated(config_path);
     // Enforce worker cap: bound the global rayon pool to the resource profile.
     // (One-shot CLI process; `build_global` no-ops if already initialized.)
     let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
-    let _ = rayon::ThreadPoolBuilder::new().num_threads(profile.parallelism.max(1)).build_global();
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(profile.parallelism.max(1))
+        .build_global();
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
 
     let opts = aikd_scanner::ScanOptions {
         override_path: override_path.map(std::path::PathBuf::from),
+        force,
     };
 
     einfo!("[aikd] Scanning...");
@@ -941,6 +1100,19 @@ fn cmd_scan(config_path: &str, override_path: Option<&str>) -> Result<()> {
     );
     if progress.files_skipped > 0 {
         einfo!("[aikd] Skipped {} unchanged files", progress.files_skipped);
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "ok",
+                "files_indexed": progress.files_indexed,
+                "files_skipped": progress.files_skipped,
+                "chunks_created": progress.chunks_created,
+                "elapsed_ms": progress.elapsed.as_millis(),
+            }))
+            .unwrap_or_default()
+        );
     }
     Ok(())
 }
@@ -962,7 +1134,11 @@ fn cmd_query(config_path: &str, query: &str, params: &QueryParams) -> Result<()>
     if file_count == 0 {
         let msg = "No files indexed in this database. Run: aikd scan (or aikd init for a smart config first).";
         if params.json {
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({"results": [], "hint": msg})).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"results": [], "hint": msg}))
+                    .unwrap_or_default()
+            );
         } else {
             einfo!("[aikd] {msg}");
         }
@@ -1056,6 +1232,7 @@ fn cmd_stats(config_path: &str) -> Result<()> {
         .unwrap_or(0);
     let (sc, convc, ce) = session::get_session_stats(database.conn()).unwrap_or((0, 0, 0));
     let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
+    let embedding_active = aikd_server::semantic_active(&cfg) && profile.embedding_enabled;
     let stats = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "files": fc,
@@ -1070,7 +1247,8 @@ fn cmd_stats(config_path: &str) -> Result<()> {
         "tantivy_path": cfg.index.tantivy_path,
         "cpu_cores": profile.cpu_cores,
         "ram_gb": profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-        "embedding_enabled": profile.embedding_enabled,
+        "embedding_enabled": embedding_active,
+        "semantic_compiled": aikd_embedder::SEMANTIC_COMPILED,
         "rest_port": cfg.server.rest_port,
     });
     println!(
@@ -1084,7 +1262,11 @@ fn cmd_stats(config_path: &str) -> Result<()> {
 fn cmd_embed_external(_config_path: &str, cfg: &aikd_core::Config) -> Result<()> {
     use aikd_core::SemanticProvider;
     let database = Database::open(&cfg.db_path())?;
-    let provider = embedder::ExternalProvider::from_env(&cfg.embedding.endpoint, &cfg.embedding.model, &cfg.embedding.api_key_env)?;
+    let provider = embedder::ExternalProvider::from_env(
+        &cfg.embedding.endpoint,
+        &cfg.embedding.model,
+        &cfg.embedding.api_key_env,
+    )?;
     if !provider.is_available() {
         anyhow::bail!("external provider unavailable (endpoint/key)");
     }
@@ -1295,12 +1477,23 @@ fn cmd_recall(
 fn cmd_status(config_path: &str, json: bool) -> Result<()> {
     let cfg = load_validated(config_path);
     let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
+    let emb_active = aikd_server::semantic_active(&cfg) && profile.embedding_enabled;
+    let emb_note = if emb_active {
+        "ON"
+    } else if !cfg.embedding.enabled {
+        "OFF (config disabled)"
+    } else if !aikd_embedder::SEMANTIC_COMPILED && cfg.embedding.provider != "external" {
+        "OFF (zero-ONNX build)"
+    } else {
+        "OFF (low resource mode)"
+    };
     if json {
         let status = serde_json::json!({
             "cpu_cores": profile.cpu_cores,
             "ram_gb": profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
             "has_gpu": profile.has_gpu,
-            "embedding_enabled": profile.embedding_enabled,
+            "embedding_enabled": emb_active,
+            "semantic_compiled": aikd_embedder::SEMANTIC_COMPILED,
             "batch_size": profile.batch_size,
             "parallelism": profile.parallelism,
             "hnsw_m": profile.hnsw_m,
@@ -1318,14 +1511,7 @@ fn cmd_status(config_path: &str, json: bool) -> Result<()> {
             profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
         );
         println!("GPU:         {}", profile.has_gpu);
-        println!(
-            "Embedding:   {}",
-            if profile.embedding_enabled {
-                "ON"
-            } else {
-                "OFF"
-            }
-        );
+        println!("Embedding:   {emb_note}");
         println!("Batch Size:  {}", profile.batch_size);
         println!("Parallelism: {}", profile.parallelism);
         println!("HNSW M:      {}", profile.hnsw_m);
@@ -1337,7 +1523,7 @@ fn cmd_status(config_path: &str, json: bool) -> Result<()> {
 /// Doctor (§19): live diagnostics — process RSS, DB/index/model sizes,
 /// index health, Atlas freshness, memory conflicts, integrity check.
 /// Every line comes from real state; warnings name the fix command.
-fn cmd_doctor(config_path: &str) -> Result<()> {
+fn cmd_doctor(config_path: &str, json: bool) -> Result<()> {
     use sysinfo::{Pid, System};
     let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
@@ -1345,69 +1531,186 @@ fn cmd_doctor(config_path: &str) -> Result<()> {
     let qi = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(-1) };
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    let rss_mb = sys.process(Pid::from(std::process::id() as usize))
+    let rss_mb = sys
+        .process(Pid::from(std::process::id() as usize))
         .map(|p| p.memory() as f64 / (1024.0 * 1024.0))
         .unwrap_or(-1.0);
     sys.refresh_memory();
     let host_gb = sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
     let profile = ResourceProfile::detect_with_mode(&cfg.resource.mode);
-    let db_mb = std::fs::metadata(cfg.db_path()).map(|m| m.len() as f64 / (1024.0 * 1024.0)).unwrap_or(-1.0);
+    let db_mb = std::fs::metadata(cfg.db_path())
+        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(-1.0);
     let tantivy_mb = dir_mb(&cfg.tantivy_path());
     let model_mb = dir_mb(&cfg.model_path());
     let files = qi("SELECT COUNT(*) FROM files");
     let chunks = qi("SELECT COUNT(*) FROM chunks");
     let symbols = qi("SELECT COUNT(*) FROM code_symbols");
     let events = qi("SELECT COUNT(*) FROM events");
-    let mem_rows: Vec<(String, i64)> = conn.prepare("SELECT status, COUNT(*) FROM memory GROUP BY status")
-        .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>()))
+    let mem_rows: Vec<(String, i64)> = conn
+        .prepare("SELECT status, COUNT(*) FROM memory GROUP BY status")
+        .and_then(|mut s| {
+            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>())
+        })
         .unwrap_or_default();
-    let atlases: Vec<(String, String)> = conn.prepare("SELECT project_path, status FROM atlas")
-        .and_then(|mut s| s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>()))
+    let atlases: Vec<(String, String)> = conn
+        .prepare("SELECT project_path, status FROM atlas")
+        .and_then(|mut s| {
+            s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>())
+        })
         .unwrap_or_default();
     let integrity = aikd_storage::maintenance::db_check(conn).unwrap_or_default();
     let mut warnings: Vec<String> = Vec::new();
     if !integrity.is_empty() {
-        warnings.push(format!("integrity check found {} issue(s); run `aikd db check` for detail", integrity.len()));
+        warnings.push(format!(
+            "integrity check found {} issue(s); run `aikd db check` for detail",
+            integrity.len()
+        ));
     }
     for (p, st) in &atlases {
         if st == "stale" {
-            warnings.push(format!("Atlas STALE for {p}; run `aikd project analyze --path {p}`"));
+            warnings.push(format!(
+                "Atlas STALE for {p}; run `aikd project analyze --path {p}`"
+            ));
         }
     }
-    let conf: i64 = mem_rows.iter().find(|(s, _)| s == "conflicted").map(|(_, n)| *n).unwrap_or(0);
+    let conf: i64 = mem_rows
+        .iter()
+        .find(|(s, _)| s == "conflicted")
+        .map(|(_, n)| *n)
+        .unwrap_or(0);
     if conf > 0 {
         warnings.push(format!("{conf} conflicted memor(ies); resolve with `aikd memory` supersede/archive, see `aikd handoff`"));
     }
     if db_mb > 500.0 {
-        warnings.push(format!("DB is {db_mb:.0} MB; consider `aikd db backup` then `aikd gc`/`aikd db compact`"));
+        warnings.push(format!(
+            "DB is {db_mb:.0} MB; consider `aikd db backup` then `aikd gc`/`aikd db compact`"
+        ));
     }
     // M2: is THIS binary resolvable the way agents spawn it? PATH lookup
     // fails inside GUI apps with minimal PATH (the #1 MCP setup failure).
-    // D3: running version vs shim pointer — a stale daemon after `update`
-    // is normal (old file keeps running) but must be visible.
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    // D3: running binary vs shim pointer — compare the actual binary path
+    // against `versions/<active-version>/aikd(.exe)` when present, rather
+    // than prefix-matching the compile-time version string alone.
+    let exe_path = std::env::current_exe().ok();
+    let exe = exe_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
     let active_ver = std::fs::read_to_string(shellexpand::tilde("~/.aikd/active-version").as_ref())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "(none — pre-shim install?)".into());
-    println!("Binary: {exe} (v{}) · active-version: {active_ver}", env!("CARGO_PKG_VERSION"));
-    if !active_ver.starts_with(env!("CARGO_PKG_VERSION")) && !active_ver.starts_with("(none") {
-        warnings.push(format!("running v{} but shim points at {active_ver}; restart sessions/daemon to pick it up (old file keeps running by design)", env!("CARGO_PKG_VERSION")));
+    if !active_ver.starts_with("(none") {
+        let bin_name = if cfg!(windows) { "aikd.exe" } else { "aikd" };
+        let expected = std::path::PathBuf::from(shellexpand::tilde("~/.aikd/versions").as_ref())
+            .join(&active_ver)
+            .join(bin_name);
+        if expected.is_file() {
+            let matches_active = match (
+                exe_path.as_ref().and_then(|p| p.canonicalize().ok()),
+                expected.canonicalize().ok(),
+            ) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            if !matches_active {
+                warnings.push(format!(
+                    "running {} (v{}) while shim active-version points at {active_ver}; restart sessions/daemon or invoke via shim to pick it up",
+                    exe,
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+        } else if !active_ver.starts_with(env!("CARGO_PKG_VERSION")) {
+            warnings.push(format!(
+                "running v{} but shim points at {active_ver}; restart sessions/daemon to pick it up (old file keeps running by design)",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
     }
+    let schema_v = qi("SELECT version FROM schema_version LIMIT 1");
+    if json {
+        let mem_map: std::collections::BTreeMap<&str, i64> =
+            mem_rows.iter().map(|(s, n)| (s.as_str(), *n)).collect();
+        let atlas_list: Vec<serde_json::Value> = atlases
+            .iter()
+            .map(|(p, s)| serde_json::json!({"project": p, "status": s}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "binary": exe,
+                "version": env!("CARGO_PKG_VERSION"),
+                "active_version": active_ver,
+                "rss_mb": rss_mb,
+                "host_ram_gb": host_gb,
+                "cpu_cores": profile.cpu_cores,
+                "mode": format!("{:?}", cfg.resource.mode),
+                "db_mb": db_mb,
+                "schema_version": schema_v,
+                "tantivy_mb": tantivy_mb,
+                "model_mb": model_mb,
+                "semantic_compiled": aikd_embedder::SEMANTIC_COMPILED,
+                "files": files,
+                "chunks": chunks,
+                "symbols": symbols,
+                "events": events,
+                "memory": mem_map,
+                "atlases": atlas_list,
+                "integrity": if integrity.is_empty() { "OK" } else { "FAILED" },
+                "warnings": warnings,
+            }))
+            .unwrap_or_default()
+        );
+        return Ok(());
+    }
+    println!(
+        "Binary: {exe} (v{}) · active-version: {active_ver}",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("=== AIKD Doctor ===");
-    println!("Process RSS:  {rss_mb:.1} MB (host RAM {host_gb:.1} GB, {cores} cores, mode {mode:?})",
-        cores = profile.cpu_cores, mode = cfg.resource.mode);
-    println!("Enforced caps: parallelism={} batch={} tantivy_heap={}MB cache={}MB debounce={}ms",
-        profile.parallelism, profile.batch_size, profile.tantivy_heap_mb, profile.cache_size_mb, profile.watcher_debounce_ms);
-    println!("DB: {db_mb:.1} MB (schema v{}) · tantivy {tantivy_mb:.1} MB · model dir {model_mb:.1} MB · semantic_compiled={}",
-        qi("SELECT version FROM schema_version LIMIT 1"), aikd_embedder::SEMANTIC_COMPILED);
+    println!(
+        "Process RSS:  {rss_mb:.1} MB (host RAM {host_gb:.1} GB, {cores} cores, mode {mode:?})",
+        cores = profile.cpu_cores,
+        mode = cfg.resource.mode
+    );
+    println!(
+        "Enforced caps: parallelism={} batch={} tantivy_heap={}MB cache={}MB debounce={}ms",
+        profile.parallelism,
+        profile.batch_size,
+        profile.tantivy_heap_mb,
+        profile.cache_size_mb,
+        profile.watcher_debounce_ms
+    );
+    println!("DB: {db_mb:.1} MB (schema v{schema_v}) · tantivy {tantivy_mb:.1} MB · model dir {model_mb:.1} MB · semantic_compiled={}",
+        aikd_embedder::SEMANTIC_COMPILED);
     println!("Index: files={files} chunks={chunks} symbols={symbols} events={events}");
     print!("Memory:");
     for (s, n) in &mem_rows {
         print!(" {s}={n}");
     }
     println!();
-    println!("Atlas snapshots: {}", if atlases.is_empty() { "(none)".to_string() } else { atlases.iter().map(|(p, s)| format!("{p}[{s}]")).collect::<Vec<_>>().join(", ") });
-    println!("Integrity: {}", if integrity.is_empty() { "OK".to_string() } else { format!("{} issue(s)", integrity.len()) });
+    println!(
+        "Atlas snapshots: {}",
+        if atlases.is_empty() {
+            "(none)".to_string()
+        } else {
+            atlases
+                .iter()
+                .map(|(p, s)| format!("{p}[{s}]"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    println!(
+        "Integrity: {}",
+        if integrity.is_empty() {
+            "OK".to_string()
+        } else {
+            format!("{} issue(s)", integrity.len())
+        }
+    );
     if warnings.is_empty() {
         println!("Warnings: none — all healthy.");
     } else {
@@ -1492,11 +1795,6 @@ fn print_results(
         println!("   {}", preview.replace('\n', "\n   "));
         println!();
     }
-}
-
-fn load_or_default(p: &str) -> Config {
-    // Deprecated shim: all policy lives in Config::load_validated (core).
-    Config::load_validated(p)
 }
 
 fn load_validated(p: &str) -> Config {
@@ -1630,8 +1928,15 @@ fn cmd_db(config_path: &str, action: DbAction, json: bool) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
             } else {
-                println!("DB: {} ({:.1} MB)", st.db_path, st.db_bytes as f64 / (1024.0 * 1024.0));
-                println!("Schema: v{} | journal: {}", st.schema_version, st.journal_mode);
+                println!(
+                    "DB: {} ({:.1} MB)",
+                    st.db_path,
+                    st.db_bytes as f64 / (1024.0 * 1024.0)
+                );
+                println!(
+                    "Schema: v{} | journal: {}",
+                    st.schema_version, st.journal_mode
+                );
                 println!(
                     "Files: {} | chunks: {} | embeddings: {} | sessions: {} | conversations: {}",
                     st.files, st.chunks, st.embeddings, st.sessions, st.conversations
@@ -1668,17 +1973,48 @@ fn cmd_db(config_path: &str, action: DbAction, json: bool) -> Result<()> {
             let database = Database::open(&db_path)?;
             let expanded = shellexpand::tilde(&output);
             let n = db_backup(database.conn(), std::path::Path::new(expanded.as_ref()))?;
-            println!("Backup: {expanded} ({:.1} MB)", n as f64 / (1024.0 * 1024.0));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"backup": expanded.as_ref(), "bytes": n})
+                    )
+                    .unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "Backup: {expanded} ({:.1} MB)",
+                    n as f64 / (1024.0 * 1024.0)
+                );
+            }
         }
         DbAction::Restore { file } => {
             let expanded = shellexpand::tilde(&file);
             db_restore(std::path::Path::new(expanded.as_ref()), &db_path)?;
-            println!("Restored from {expanded}. Re-run `aikd db check` to verify.");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"restored_from": expanded.as_ref()})
+                    )
+                    .unwrap_or_default()
+                );
+            } else {
+                println!("Restored from {expanded}. Re-run `aikd db check` to verify.");
+            }
         }
         DbAction::Compact { rebuild_fts } => {
             let database = Database::open(&db_path)?;
             let msg = db_compact(database.conn(), rebuild_fts)?;
-            println!("Compact: {msg}");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"status": msg}))
+                        .unwrap_or_default()
+                );
+            } else {
+                println!("Compact: {msg}");
+            }
         }
     }
     Ok(())
@@ -1688,22 +2024,71 @@ fn cmd_db(config_path: &str, action: DbAction, json: bool) -> Result<()> {
 /// versions/<v>/aikd(.exe), then atomically rewrite the `active-version`
 /// pointer. Running sessions keep the old file; new spawns use the new one.
 /// PATH holds only the tiny shim, which never needs replacing.
-fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Result<()> {
+fn cmd_update(
+    config_path: &str,
+    file: Option<String>,
+    version: Option<String>,
+    list: bool,
+    json: bool,
+) -> Result<()> {
     let home = shellexpand::tilde("~/.aikd");
     let vdir = std::path::PathBuf::from(home.as_ref()).join("versions");
     std::fs::create_dir_all(&vdir)?;
     if list {
-        let active = std::fs::read_to_string(std::path::PathBuf::from(home.as_ref()).join("active-version"))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "(none)".into());
-        println!("Active: {active}");
+        let active =
+            std::fs::read_to_string(std::path::PathBuf::from(home.as_ref()).join("active-version"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "(none)".into());
         // P1: who REALLY holds the daemon? The lock file text can go stale
         // (crash without cleanup); the TCP port is authoritative.
-        let cfg_probe = Config::load_validated("~/.aikd/config.yaml");
+        let cfg_probe = Config::load_validated(config_path);
         let probe = format!("127.0.0.1:{}", cfg_probe.server.rest_port);
-        let lock = std::path::PathBuf::from(home.as_ref()).join("aikd.lock");
+        let lock = cfg_probe.runtime_dir(config_path).join("aikd.lock");
         let holder = std::fs::read_to_string(&lock).unwrap_or_default();
-        if probe_listening(&probe) {
+        let daemon_running = probe_listening(&probe);
+        let mut installed = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&vdir) {
+            let mut entries: Vec<_> = rd.flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for e in entries {
+                let bin = e
+                    .path()
+                    .join(if cfg!(windows) { "aikd.exe" } else { "aikd" });
+                if bin.is_file() {
+                    let label = e.file_name().to_string_lossy().to_string();
+                    let bin_ver = std::process::Command::new(&bin)
+                        .arg("--version")
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_else(|| "unknown".into());
+                    let is_active = label == active;
+                    installed.push((label, bin_ver, is_active));
+                }
+            }
+        }
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "active_pointer": active,
+                    "running_binary_version": env!("CARGO_PKG_VERSION"),
+                    "daemon_probe": probe,
+                    "daemon_running": daemon_running,
+                    "lock_holder": holder.trim(),
+                    "versions": installed.iter().map(|(l, bv, act)| serde_json::json!({
+                        "label": l,
+                        "binary_version": bv,
+                        "active": act,
+                    })).collect::<Vec<_>>(),
+                }))
+                .unwrap_or_default()
+            );
+            return Ok(());
+        }
+        println!("Active: {active} (note: folder label in ~/.aikd/versions/; `aikd --version` prints compile-time CARGO_PKG_VERSION)");
+        if daemon_running {
             let who = holder.trim();
             if who.is_empty() {
                 println!("Daemon: RUNNING on {probe} (lock file empty — started externally?)");
@@ -1715,18 +2100,15 @@ fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Resu
         } else {
             println!("Daemon: STOPPED but lock file is stale (was: {}). It will be ignored on next start.", holder.trim());
         }
-        if let Ok(rd) = std::fs::read_dir(&vdir) {
-            for e in rd.flatten() {
-                let bin = e.path().join(if cfg!(windows) { "aikd.exe" } else { "aikd" });
-                if bin.is_file() {
-                    let mark = if Some(e.file_name().to_string_lossy().to_string()) == Some(active.clone()) { " (active)" } else { "" };
-                    println!("  {}{mark}", e.file_name().to_string_lossy());
-                }
-            }
+        for (label, bin_ver, is_active) in &installed {
+            let mark = if *is_active { " (active)" } else { "" };
+            println!("  {label}{mark} [binary: {bin_ver}]");
         }
         return Ok(());
     }
-    let src = file.ok_or_else(|| anyhow::anyhow!("provide --file <new aikd binary> (explicit, never auto-downloaded)"))?;
+    let src = file.ok_or_else(|| {
+        anyhow::anyhow!("provide --file <new aikd binary> (explicit, never auto-downloaded)")
+    })?;
     // Ask the binary itself for its version when no label is given.
     // X3: never trust raw output — sanitize to [A-Za-z0-9._-], fallback to
     // timestamped label instead of "unknown" (which would collide).
@@ -1736,7 +2118,10 @@ fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Resu
             let out = std::process::Command::new(&src).arg("--version").output()?;
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let raw = s.split_whitespace().last().unwrap_or("").to_string();
-            let clean: String = raw.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).collect();
+            let clean: String = raw
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                .collect();
             let clean = clean.trim_matches(|c| c == '.' || c == '-').to_string();
             if clean.is_empty() {
                 format!("manual-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"))
@@ -1752,7 +2137,11 @@ fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Resu
     std::fs::create_dir_all(&dest_dir)?;
     let dest = dest_dir.join(if cfg!(windows) { "aikd.exe" } else { "aikd" });
     // Fresh file, never a running one: copy to temp then atomic rename.
-    let tmp = dest_dir.join(if cfg!(windows) { ".aikd.exe.tmp" } else { ".aikd.tmp" });
+    let tmp = dest_dir.join(if cfg!(windows) {
+        ".aikd.exe.tmp"
+    } else {
+        ".aikd.tmp"
+    });
     std::fs::copy(&src, &tmp)?;
     #[cfg(unix)]
     {
@@ -1769,10 +2158,24 @@ fn cmd_update(file: Option<String>, version: Option<String>, list: bool) -> Resu
     Ok(())
 }
 
-fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
+fn cmd_gc(config_path: &str, prune_content: bool, prune_semantic: bool, json: bool) -> Result<()> {
     let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
+    let mut semantic_pruned = 0usize;
+    let mut content_pruned = 0usize;
+    let mut fts_backfilled = 0usize;
+    if prune_semantic {
+        semantic_pruned = aikd_storage::fts::prune_semantic(database.conn())?;
+        let model_dir = cfg.model_path();
+        if model_dir.exists() {
+            let _ = std::fs::remove_dir_all(&model_dir);
+        }
+    }
+    if prune_content {
+        fts_backfilled = aikd_storage::fts::backfill_fts(database.conn())?;
+        content_pruned = aikd_storage::fts::prune_chunk_content(database.conn())?;
+    }
     // Collect stale chunk IDs for the index before rows disappear.
     let stale: Vec<String> = {
         let mut stmt = database
@@ -1790,8 +2193,7 @@ fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
     if !stale.is_empty() {
         tantivy.delete_chunks(&stale)?;
     }
-    let (files_removed, orphan_chunks) =
-        aikd_storage::maintenance::gc(database.conn(), true)?;
+    let (files_removed, orphan_chunks) = aikd_storage::maintenance::gc(database.conn(), true)?;
     let retention = aikd_storage::maintenance::enforce_retention(database.conn(), &cfg.retention)?;
     if json {
         println!(
@@ -1800,12 +2202,21 @@ fn cmd_gc(config_path: &str, json: bool) -> Result<()> {
                 "files_removed": files_removed,
                 "orphan_chunks_removed": orphan_chunks,
                 "index_docs_removed": stale.len(),
+                "fts_backfilled": fts_backfilled,
+                "content_pruned": content_pruned,
+                "semantic_pruned": semantic_pruned,
                 "events_archived": retention.events_archived,
                 "memory_marked_stale": retention.memory_marked_stale,
             }))
             .unwrap_or_default()
         );
     } else {
+        if prune_semantic {
+            println!("Pruned semantic: {semantic_pruned} embedding row(s) removed");
+        }
+        if prune_content {
+            println!("Pruned content: {fts_backfilled} FTS chunk(s) backfilled, {content_pruned} chunk content(s) cleared");
+        }
         println!(
             "GC: {files_removed} file(s), {orphan_chunks} orphan chunk(s), {} index doc(s) removed",
             stale.len()
@@ -1836,7 +2247,10 @@ fn cmd_symbol(config_path: &str, name: &str, limit: usize, json: bool) -> Result
     } else if symbols.is_empty() {
         println!("No symbols matching '{name}'. Run: aikd scan");
     } else {
-        println!("{} symbol(s) for '{name}' (EXTRACTED, heuristic):", symbols.len());
+        println!(
+            "{} symbol(s) for '{name}' (EXTRACTED, heuristic):",
+            symbols.len()
+        );
         for s in &symbols {
             println!(
                 "  {} {} — {}:{}-{} [{}]",
@@ -1851,46 +2265,101 @@ fn cmd_symbol(config_path: &str, name: &str, limit: usize, json: bool) -> Result
 }
 
 fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()> {
-    use aikd_storage::memory::{active_tasks, latest_checkpoint, list_memory, save_memory, supersede};
+    use aikd_storage::memory::{
+        active_tasks, latest_checkpoint, list_memory, save_memory, supersede,
+    };
     let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
     match action {
-        MemoryAction::Save { kind, title, body, workstream, source, confidence } => {
-            const KINDS: [&str; 6] = ["fact", "decision", "constraint", "discovery", "task", "checkpoint"];
+        MemoryAction::Save {
+            kind,
+            title,
+            body,
+            workstream,
+            source,
+            confidence,
+        } => {
+            const KINDS: [&str; 6] = [
+                "fact",
+                "decision",
+                "constraint",
+                "discovery",
+                "task",
+                "checkpoint",
+            ];
             if !KINDS.contains(&kind.as_str()) {
                 anyhow::bail!("Invalid kind '{kind}'. Use one of: fact, decision, constraint, discovery, task, checkpoint");
             }
             if !["explicit", "agent-asserted", "inferred"].contains(&source.as_str()) {
                 anyhow::bail!("Invalid source '{source}'. Use: explicit, agent-asserted, inferred");
             }
-            let m = save_memory(database.conn(), &project, &workstream, &kind, &title, &body, &source, confidence)?;
+            let m = save_memory(
+                database.conn(),
+                &project,
+                &workstream,
+                &kind,
+                &title,
+                &body,
+                &source,
+                confidence,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&m).unwrap_or_default());
             } else {
-                println!("Saved {} '{}' [{}] (id {})", m.kind, m.title, m.source, m.id);
+                println!(
+                    "Saved {} '{}' [{}] (id {})",
+                    m.kind, m.title, m.source, m.id
+                );
             }
         }
-        MemoryAction::List { kind, workstream, all } => {
-            let items = list_memory(database.conn(), &project, Some(&workstream), kind.as_deref(), all)?;
+        MemoryAction::List {
+            kind,
+            workstream,
+            all,
+        } => {
+            let items = list_memory(
+                database.conn(),
+                &project,
+                Some(&workstream),
+                kind.as_deref(),
+                all,
+            )?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&items).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&items).unwrap_or_default()
+                );
             } else if items.is_empty() {
                 println!("No memory items.");
             } else {
                 for m in &items {
-                    println!("[{}] {} — {} [{}|{}|conf {:.2}]", m.kind, m.title, m.id, m.source, m.status, m.confidence);
+                    println!(
+                        "[{}] {} — {} [{}|{}|conf {:.2}]",
+                        m.kind, m.title, m.id, m.source, m.status, m.confidence
+                    );
                     println!("    {}", m.body.lines().next().unwrap_or(""));
                 }
             }
         }
         MemoryAction::Supersede { id, title, body } => {
             // Carry over kind/project/workstream/source from the retired item.
-            let old: Option<aikd_core::MemoryItem> = list_memory(database.conn(), &project, None, None, true)?
-                .into_iter()
-                .find(|m| m.id == id);
+            let old: Option<aikd_core::MemoryItem> =
+                list_memory(database.conn(), &project, None, None, true)?
+                    .into_iter()
+                    .find(|m| m.id == id);
             let old = old.ok_or_else(|| anyhow::anyhow!("No memory item with id {id}"))?;
-            let m = supersede(database.conn(), &id, &project, &old.workstream, &old.kind, &title, &body, &old.source, old.confidence)?;
+            let m = supersede(
+                database.conn(),
+                &id,
+                &project,
+                &old.workstream,
+                &old.kind,
+                &title,
+                &body,
+                &old.source,
+                old.confidence,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&m).unwrap_or_default());
             } else {
@@ -1927,17 +2396,55 @@ fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()>
         MemoryAction::Stale { id } => {
             use aikd_storage::memory::mark_stale;
             let n = mark_stale(database.conn(), &id)?;
-            println!("{}", if n == 1 { format!("Marked stale: {id}") } else { format!("No change (id {id} not active/conflicted)") });
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"id": id, "status": "stale", "updated": n})
+                    )
+                    .unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "{}",
+                    if n == 1 {
+                        format!("Marked stale: {id}")
+                    } else {
+                        format!("No change (id {id} not active/conflicted)")
+                    }
+                );
+            }
         }
         MemoryAction::Archive { id } => {
             use aikd_storage::memory::archive;
             let n = archive(database.conn(), &id)?;
-            println!("{}", if n == 1 { format!("Archived: {id}") } else { format!("No change (id {id} not found)") });
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"id": id, "status": "archived", "updated": n})
+                    )
+                    .unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "{}",
+                    if n == 1 {
+                        format!("Archived: {id}")
+                    } else {
+                        format!("No change (id {id} not found)")
+                    }
+                );
+            }
         }
         MemoryAction::Conflict { id_a, id_b, note } => {
             use aikd_storage::memory::flag_conflict;
             flag_conflict(database.conn(), &id_a, &id_b, &note)?;
-            println!("Flagged conflict: {id_a} <-> {id_b} ({note}) — both preserved, neither is fact");
+            if json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"status": "conflicted", "id_a": id_a, "id_b": id_b, "note": note})).unwrap_or_default());
+            } else {
+                println!("Flagged conflict: {id_a} <-> {id_b} ({note}) — both preserved, neither is fact");
+            }
         }
     }
     Ok(())
@@ -1948,29 +2455,67 @@ fn cmd_event(config_path: &str, action: EventAction, json: bool) -> Result<()> {
     let database = Database::open(&cfg.db_path())?;
     let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
     match action {
-        EventAction::Append { event_type, workstream, agent, session, source_ref, payload } => {
+        EventAction::Append {
+            event_type,
+            workstream,
+            agent,
+            session,
+            source_ref,
+            payload,
+        } => {
             // Validate payload is JSON (canonical model stores payload as JSON text).
             let v: serde_json::Value = serde_json::from_str(&payload)
                 .map_err(|e| anyhow::anyhow!("payload must be JSON: {e}"))?;
             let ev = aikd_storage::events::append_event(
-                database.conn(), &project, &workstream, &agent, &session, &event_type, &source_ref,
+                database.conn(),
+                &project,
+                &workstream,
+                &agent,
+                &session,
+                &event_type,
+                &source_ref,
                 &v.to_string(),
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&ev).unwrap_or_default());
             } else {
-                println!("Event {} seq={} ({}:{})", ev.event_id, ev.sequence, ev.agent_id, ev.event_type);
+                println!(
+                    "Event {} seq={} ({}:{})",
+                    ev.event_id, ev.sequence, ev.agent_id, ev.event_type
+                );
             }
         }
-        EventAction::List { workstream, event_type, since, limit } => {
-            let items = aikd_storage::events::list_events(database.conn(), &project, &workstream, event_type.as_deref(), since, limit)?;
+        EventAction::List {
+            workstream,
+            event_type,
+            since,
+            limit,
+        } => {
+            let items = aikd_storage::events::list_events(
+                database.conn(),
+                &project,
+                &workstream,
+                event_type.as_deref(),
+                since,
+                limit,
+            )?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&items).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&items).unwrap_or_default()
+                );
             } else if items.is_empty() {
                 println!("No events (workstream '{workstream}', since {since}).");
             } else {
                 for e in &items {
-                    println!("#{} [{}] {}:{} {}", e.sequence, e.timestamp, e.agent_id, e.event_type, e.payload.lines().next().unwrap_or(""));
+                    println!(
+                        "#{} [{}] {}:{} {}",
+                        e.sequence,
+                        e.timestamp,
+                        e.agent_id,
+                        e.event_type,
+                        e.payload.lines().next().unwrap_or("")
+                    );
                 }
             }
         }
@@ -1979,7 +2524,13 @@ fn cmd_event(config_path: &str, action: EventAction, json: bool) -> Result<()> {
 }
 
 /// Context inspector (§25): show exactly what would be sent and why.
-fn cmd_context_inspect(config_path: &str, query: &str, limit: usize, hybrid: bool) -> Result<()> {
+fn cmd_context_inspect(
+    config_path: &str,
+    query: &str,
+    limit: usize,
+    hybrid: bool,
+    json: bool,
+) -> Result<()> {
     use aikd_core::SearchFilters;
     let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
@@ -2000,11 +2551,24 @@ fn cmd_context_inspect(config_path: &str, query: &str, limit: usize, hybrid: boo
         enabled,
         &req,
     )?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&insp).unwrap_or_default()
+        );
+        return Ok(());
+    }
     println!("CONTEXT REQUEST\n  Task: {query}\n");
     println!("RETRIEVAL: {} ({}ms)", insp.retrieval, insp.elapsed_ms);
     println!("\nSELECTED:");
     for s in &insp.selected {
-        println!("  - {} @ {} (score {:.3}) — {}", s["file"].as_str().unwrap_or("?"), s["lines"].as_str().unwrap_or("?"), s["score"].as_f64().unwrap_or(0.0), s["why"].as_str().unwrap_or(""));
+        println!(
+            "  - {} @ {} (score {:.3}) — {}",
+            s["file"].as_str().unwrap_or("?"),
+            s["lines"].as_str().unwrap_or("?"),
+            s["score"].as_f64().unwrap_or(0.0),
+            s["why"].as_str().unwrap_or("")
+        );
     }
     if insp.selected.is_empty() {
         println!("  (none)");
@@ -2013,13 +2577,21 @@ fn cmd_context_inspect(config_path: &str, query: &str, limit: usize, hybrid: boo
     for e in &insp.excluded_reasons {
         println!("  - {e}");
     }
-    println!("\nESTIMATED TOKENS: ~{} (truncated {} chars)", insp.estimated_tokens, insp.truncated_chars);
+    println!(
+        "\nESTIMATED TOKENS: ~{} (truncated {} chars)",
+        insp.estimated_tokens, insp.truncated_chars
+    );
     Ok(())
 }
 
 /// Context package for session resume / cross-agent handoff (attachment P5).
 /// Assembled by `aikd_context::assemble_handoff` — same constructor as MCP.
-fn cmd_handoff(config_path: &str, workstream: &str, recent_events: usize, json: bool) -> Result<()> {
+fn cmd_handoff(
+    config_path: &str,
+    workstream: &str,
+    recent_events: usize,
+    json: bool,
+) -> Result<()> {
     let cfg = load_validated(config_path);
     let database = Database::open(&cfg.db_path())?;
     let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
@@ -2037,8 +2609,8 @@ fn cmd_project(config_path: &str, action: ProjectAction, json: bool) -> Result<(
     let database = Database::open(&cfg.db_path())?;
     let resolve = |p: &Option<String>| -> String {
         match p {
-            Some(v) => v.replace('\\', "/"),
-            None => cfg.scan.include_paths.first().cloned().unwrap_or_else(|| ".".to_string()).replace('\\', "/"),
+            Some(v) => aikd_core::platform::normalize_project_key(v),
+            None => aikd_core::platform::canonical_project(&cfg.scan.include_paths),
         }
     };
     match action {
@@ -2046,7 +2618,10 @@ fn cmd_project(config_path: &str, action: ProjectAction, json: bool) -> Result<(
             let project = resolve(&path);
             // Ensure the index is current first (incremental: unchanged files skipped).
             let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
-            let opts = aikd_scanner::ScanOptions { override_path: Some(project.clone().into()) };
+            let opts = aikd_scanner::ScanOptions {
+                override_path: Some(project.clone().into()),
+                force: false,
+            };
             let progress = aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts)?;
             let (snap, _) = aikd_storage::atlas::refresh_atlas(database.conn(), &project)?;
             print_atlas(&snap, &progress, json);
@@ -2056,13 +2631,18 @@ fn cmd_project(config_path: &str, action: ProjectAction, json: bool) -> Result<(
             match aikd_storage::atlas::read_atlas(database.conn(), &project)? {
                 Some((snap, status, updated)) => {
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&snap).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&snap).unwrap_or_default()
+                        );
                     } else {
                         println!("ATLAS {project} [{status}] updated {updated}");
                         print_atlas_body(&snap);
                     }
                 }
-                None => println!("No Atlas for {project}. Run: aikd project analyze --path {project}"),
+                None => {
+                    println!("No Atlas for {project}. Run: aikd project analyze --path {project}")
+                }
             }
         }
         ProjectAction::Export { path, out } => {
@@ -2079,7 +2659,11 @@ fn cmd_project(config_path: &str, action: ProjectAction, json: bool) -> Result<(
     Ok(())
 }
 
-fn print_atlas(snap: &aikd_storage::atlas::AtlasSnapshot, progress: &aikd_scanner::ScanProgress, json: bool) {
+fn print_atlas(
+    snap: &aikd_storage::atlas::AtlasSnapshot,
+    progress: &aikd_scanner::ScanProgress,
+    json: bool,
+) {
     if json {
         let v = serde_json::json!({
             "files_indexed": progress.files_indexed, "chunks_created": progress.chunks_created,
@@ -2091,7 +2675,10 @@ fn print_atlas(snap: &aikd_storage::atlas::AtlasSnapshot, progress: &aikd_scanne
     let r = &snap.repository.data;
     println!("\nPROJECT ANALYZED\n");
     println!("Project:\n  {0}", snap.project);
-    println!("Files: {}  Chunks: {}  Symbols: {}", r.file_count, r.chunk_count, r.symbol_count);
+    println!(
+        "Files: {}  Chunks: {}  Symbols: {}",
+        r.file_count, r.chunk_count, r.symbol_count
+    );
     println!("Languages:");
     for (l, n) in &r.languages {
         println!("  - {l}: {n} files");
@@ -2107,37 +2694,81 @@ fn print_atlas(snap: &aikd_storage::atlas::AtlasSnapshot, progress: &aikd_scanne
     let a = &snap.architecture.data;
     println!("Top directories:");
     for (d, n) in a.top_dirs.iter().take(10) {
-        let disp = if d == "(root)" { d.clone() } else { format!("{d}/") };
+        let disp = if d == "(root)" {
+            d.clone()
+        } else {
+            format!("{d}/")
+        };
         println!("  - {disp} ({n} files)");
     }
     println!("Symbol kinds:");
     for (k, n) in &a.symbol_kinds {
         println!("  - {k}: {n}");
     }
-    println!("Decisions: {}  Open tasks: {}  Checkpoints: {}  Events: {}",
-        snap.decisions.len(), snap.open_tasks.len(), snap.checkpoints.len(), snap.event_count);
+    println!(
+        "Decisions: {}  Open tasks: {}  Checkpoints: {}  Events: {}",
+        snap.decisions.len(),
+        snap.open_tasks.len(),
+        snap.checkpoints.len(),
+        snap.event_count
+    );
     if !snap.known_issues.data.is_empty() {
         println!("Known issues ({} markers):", snap.known_issues.data.len());
         for i in snap.known_issues.data.iter().take(10) {
-            println!("  - {}:{} [{}] {}", i.file, i.line, i.marker, i.text.lines().next().unwrap_or(""));
+            println!(
+                "  - {}:{} [{}] {}",
+                i.file,
+                i.line,
+                i.marker,
+                i.text.lines().next().unwrap_or("")
+            );
         }
     }
     println!("\nCoverage: files+symbols VERIFIED from index; frameworks/entry-point grouping INFERRED from markers.");
-    println!("Unchanged data reused: {} files skipped, Atlas fingerprint fresh.", progress.files_skipped);
+    println!(
+        "Unchanged data reused: {} files skipped, Atlas fingerprint fresh.",
+        progress.files_skipped
+    );
 }
 
 fn print_atlas_body(snap: &aikd_storage::atlas::AtlasSnapshot) {
     let r = &snap.repository.data;
-    println!("Files: {}  Chunks: {}  Symbols: {}", r.file_count, r.chunk_count, r.symbol_count);
-    println!("Languages: {}", r.languages.iter().map(|(l, n)| format!("{l}({n})")).collect::<Vec<_>>().join(", "));
-    println!("Frameworks [INFERRED]: {}", if r.frameworks.is_empty() { "(none detected)".into() } else { r.frameworks.join(", ") });
-    println!("Decisions: {}  Open tasks: {}  Checkpoints: {}  Events: {}",
-        snap.decisions.len(), snap.open_tasks.len(), snap.checkpoints.len(), snap.event_count);
+    println!(
+        "Files: {}  Chunks: {}  Symbols: {}",
+        r.file_count, r.chunk_count, r.symbol_count
+    );
+    println!(
+        "Languages: {}",
+        r.languages
+            .iter()
+            .map(|(l, n)| format!("{l}({n})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "Frameworks [INFERRED]: {}",
+        if r.frameworks.is_empty() {
+            "(none detected)".into()
+        } else {
+            r.frameworks.join(", ")
+        }
+    );
+    println!(
+        "Decisions: {}  Open tasks: {}  Checkpoints: {}  Events: {}",
+        snap.decisions.len(),
+        snap.open_tasks.len(),
+        snap.checkpoints.len(),
+        snap.event_count
+    );
 }
 
 /// Write machine-readable JSON + human-readable Markdown from the canonical
 /// snapshot. Both projections come from the same data — no disconnected docs.
-fn write_artifacts(project: &str, out_dir: &str, snap: &aikd_storage::atlas::AtlasSnapshot) -> Result<(usize, usize)> {
+fn write_artifacts(
+    project: &str,
+    out_dir: &str,
+    snap: &aikd_storage::atlas::AtlasSnapshot,
+) -> Result<(usize, usize)> {
     let intel = format!("{out_dir}/intelligence");
     let arts = format!("{out_dir}/artifacts");
     std::fs::create_dir_all(&intel)?;
@@ -2149,34 +2780,175 @@ fn write_artifacts(project: &str, out_dir: &str, snap: &aikd_storage::atlas::Atl
         std::fs::write(format!("{intel}/{name}"), serde_json::to_string_pretty(v)?)?;
         Ok(())
     };
-    put("project.json", &serde_json::json!({"root": r.root, "files": r.file_count, "chunks": r.chunk_count, "symbols": r.symbol_count, "languages": r.languages, "provenance": "VERIFIED"}))?; n_json += 1;
-    put("architecture.json", &serde_json::json!({"top_dirs": a.top_dirs, "symbol_kinds": a.symbol_kinds, "provenance": "INFERRED"}))?; n_json += 1;
-    put("components.json", &serde_json::json!({"top_dirs": a.top_dirs}))?; n_json += 1;
-    put("symbols.json", &serde_json::json!({"kinds": a.symbol_kinds, "total": r.symbol_count}))?; n_json += 1;
-    put("dependencies.json", &serde_json::json!({"frameworks": r.frameworks, "provenance": "INFERRED"}))?; n_json += 1;
-    put("workflows.json", &serde_json::json!({"entry_points": r.entry_points, "open_tasks": snap.open_tasks, "provenance": "INFERRED"}))?; n_json += 1;
-    put("api.json", &serde_json::json!({"entry_points": r.entry_points}))?; n_json += 1;
-    put("database.json", &serde_json::json!({"detected": [], "note": "DB detection via migration/model files — extend detect_frameworks when needed"}))?; n_json += 1;
-    put("development.json", &serde_json::json!({"frameworks": r.frameworks}))?; n_json += 1;
-    put("issues.json", &serde_json::to_value(&snap.known_issues.data)?)?; n_json += 1;
+    put(
+        "project.json",
+        &serde_json::json!({"root": r.root, "files": r.file_count, "chunks": r.chunk_count, "symbols": r.symbol_count, "languages": r.languages, "provenance": "VERIFIED"}),
+    )?;
+    n_json += 1;
+    put(
+        "architecture.json",
+        &serde_json::json!({"top_dirs": a.top_dirs, "symbol_kinds": a.symbol_kinds, "provenance": "INFERRED"}),
+    )?;
+    n_json += 1;
+    put(
+        "components.json",
+        &serde_json::json!({"top_dirs": a.top_dirs}),
+    )?;
+    n_json += 1;
+    put(
+        "symbols.json",
+        &serde_json::json!({"kinds": a.symbol_kinds, "total": r.symbol_count}),
+    )?;
+    n_json += 1;
+    put(
+        "dependencies.json",
+        &serde_json::json!({"frameworks": r.frameworks, "provenance": "INFERRED"}),
+    )?;
+    n_json += 1;
+    put(
+        "workflows.json",
+        &serde_json::json!({"entry_points": r.entry_points, "open_tasks": snap.open_tasks, "provenance": "INFERRED"}),
+    )?;
+    n_json += 1;
+    put(
+        "api.json",
+        &serde_json::json!({"entry_points": r.entry_points}),
+    )?;
+    n_json += 1;
+    put(
+        "database.json",
+        &serde_json::json!({"detected": [], "note": "DB detection via migration/model files — extend detect_frameworks when needed"}),
+    )?;
+    n_json += 1;
+    put(
+        "development.json",
+        &serde_json::json!({"frameworks": r.frameworks}),
+    )?;
+    n_json += 1;
+    put(
+        "issues.json",
+        &serde_json::to_value(&snap.known_issues.data)?,
+    )?;
+    n_json += 1;
     let mut n_md = 0;
     let md = |name: &str, title: &str, body: String| -> Result<()> {
         std::fs::write(format!("{arts}/{name}"), format!("# {title}\n\n_Generated from Atlas snapshot of `{project}` — do not edit by hand; regenerate with `aikd project export`._\n\n{body}"))?;
         Ok(())
     };
-    md("PROJECT_OVERVIEW.md", "Project overview", format!("Files: {}\nChunks: {}\nSymbols: {}\nLanguages: {}\n", r.file_count, r.chunk_count, r.symbol_count, r.languages.iter().map(|(l, n)| format!("{l}({n})")).collect::<Vec<_>>().join(", ")))?; n_md += 1;
-    md("ARCHITECTURE.md", "Architecture", format!("Top dirs:\n{}\n\nSymbol kinds:\n{}\n", a.top_dirs.iter().map(|(d, n)| format!("- {d}/ ({n})")).collect::<Vec<_>>().join("\n"), a.symbol_kinds.iter().map(|(k, n)| format!("- {k}: {n}")).collect::<Vec<_>>().join("\n")))?; n_md += 1;
-    md("COMPONENTS.md", "Components", a.top_dirs.iter().map(|(d, n)| format!("- {d}/ ({n} files)")).collect::<Vec<_>>().join("\n"))?; n_md += 1;
-    md("WORKFLOWS.md", "Workflows", format!("Entry points:\n{}\n\nOpen tasks: {}\n", r.entry_points.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n"), snap.open_tasks.len()))?; n_md += 1;
-    md("DATA_FLOW.md", "Data flow", "Derived from imports/contains relations in the symbol index; extend with call-graph analysis as needed.\n".to_string())?; n_md += 1;
-    md("API_REFERENCE.md", "API reference", if r.entry_points.is_empty() { "(no entry points detected)\n".to_string() } else { r.entry_points.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n") + "\n" })?; n_md += 1;
-    md("DATABASE.md", "Database", "No migration/model markers analyzed yet — recorded as UNVERIFIED.\n".to_string())?; n_md += 1;
-    md("DEVELOPMENT.md", "Development", format!("Detected stacks: {}\n", if r.frameworks.is_empty() { "(none)".into() } else { r.frameworks.join(", ") }))?; n_md += 1;
+    md(
+        "PROJECT_OVERVIEW.md",
+        "Project overview",
+        format!(
+            "Files: {}\nChunks: {}\nSymbols: {}\nLanguages: {}\n",
+            r.file_count,
+            r.chunk_count,
+            r.symbol_count,
+            r.languages
+                .iter()
+                .map(|(l, n)| format!("{l}({n})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )?;
+    n_md += 1;
+    md(
+        "ARCHITECTURE.md",
+        "Architecture",
+        format!(
+            "Top dirs:\n{}\n\nSymbol kinds:\n{}\n",
+            a.top_dirs
+                .iter()
+                .map(|(d, n)| format!("- {d}/ ({n})"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            a.symbol_kinds
+                .iter()
+                .map(|(k, n)| format!("- {k}: {n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    )?;
+    n_md += 1;
+    md(
+        "COMPONENTS.md",
+        "Components",
+        a.top_dirs
+            .iter()
+            .map(|(d, n)| format!("- {d}/ ({n} files)"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )?;
+    n_md += 1;
+    md(
+        "WORKFLOWS.md",
+        "Workflows",
+        format!(
+            "Entry points:\n{}\n\nOpen tasks: {}\n",
+            r.entry_points
+                .iter()
+                .map(|e| format!("- {e}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            snap.open_tasks.len()
+        ),
+    )?;
+    n_md += 1;
+    md("DATA_FLOW.md", "Data flow", "Derived from imports/contains relations in the symbol index; extend with call-graph analysis as needed.\n".to_string())?;
+    n_md += 1;
+    md(
+        "API_REFERENCE.md",
+        "API reference",
+        if r.entry_points.is_empty() {
+            "(no entry points detected)\n".to_string()
+        } else {
+            r.entry_points
+                .iter()
+                .map(|e| format!("- {e}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        },
+    )?;
+    n_md += 1;
+    md(
+        "DATABASE.md",
+        "Database",
+        "No migration/model markers analyzed yet — recorded as UNVERIFIED.\n".to_string(),
+    )?;
+    n_md += 1;
+    md(
+        "DEVELOPMENT.md",
+        "Development",
+        format!(
+            "Detected stacks: {}\n",
+            if r.frameworks.is_empty() {
+                "(none)".into()
+            } else {
+                r.frameworks.join(", ")
+            }
+        ),
+    )?;
+    n_md += 1;
     let mut iss = String::new();
     for i in &snap.known_issues.data {
-        iss.push_str(&format!("- {}:{} [{}] {}", i.file, i.line, i.marker, i.text.lines().next().unwrap_or("")));
+        iss.push_str(&format!(
+            "- {}:{} [{}] {}\n",
+            i.file,
+            i.line,
+            i.marker,
+            i.text.lines().next().unwrap_or("")
+        ));
     }
-    md("KNOWN_ISSUES.md", "Known issues", if iss.is_empty() { "(none found)\n".to_string() } else { iss })?; n_md += 1;
+    md(
+        "KNOWN_ISSUES.md",
+        "Known issues",
+        if iss.is_empty() {
+            "(none found)\n".to_string()
+        } else {
+            iss
+        },
+    )?;
+    n_md += 1;
     Ok((n_json, n_md))
 }
 
@@ -2198,7 +2970,13 @@ fn cmd_inject(config_path: &str, command: &[String]) -> Result<()> {
     let context = session::recall(database.conn(), &session_id, "", 5)
         .unwrap_or_default()
         .iter()
-        .map(|c| format!("[{}]: {}", c.role, c.content.chars().take(200).collect::<String>()))
+        .map(|c| {
+            format!(
+                "[{}]: {}",
+                c.role,
+                c.content.chars().take(200).collect::<String>()
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
 

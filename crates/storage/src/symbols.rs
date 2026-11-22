@@ -15,7 +15,7 @@ pub fn find_symbols(conn: &Connection, name: &str, limit: usize) -> Result<Vec<C
                WHERE s.symbol_name = ?1 OR s.symbol_name LIKE ?2 \
                ORDER BY CASE WHEN s.symbol_name = ?1 THEN 0 ELSE 1 END, s.symbol_name \
                LIMIT ?3";
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(
         rusqlite::params![name, format!("{name}%"), limit as i64],
         |r| {
@@ -23,7 +23,9 @@ pub fn find_symbols(conn: &Connection, name: &str, limit: usize) -> Result<Vec<C
                 name: r.get(0)?,
                 kind: r.get(1)?,
                 signature: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                visibility: r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "private".into()),
+                visibility: r
+                    .get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "private".into()),
                 language: r.get(4)?,
                 file_path: r.get(5)?,
                 line_start: r.get::<_, i64>(6)? as usize,

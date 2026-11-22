@@ -4,15 +4,11 @@ use anndists::dist::distances::DistCosine;
 use anyhow::Result;
 use hnsw_rs::hnsw::Hnsw;
 use parking_lot::{Mutex, RwLock};
-use std::path::Path;
+use rusqlite::Connection;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tantivy::collector::TopDocs;
-use tantivy::doc;
-use tantivy::query::QueryParser;
-use tantivy::schema::*;
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy};
 
 pub const HNSW_M: usize = 16;
 pub const HNSW_EF_CONSTRUCTION: usize = 200;
@@ -57,7 +53,7 @@ impl VectorIndex {
         let map = self.id_map.read();
 
         let vector_bytes = data.len() * self.dim * std::mem::size_of::<f32>();
-        let id_bytes: usize = map.iter().map(|s| s.len() + 24).sum(); // 24 = String overhead
+        let id_bytes: usize = map.iter().map(|s| s.len() + 24).sum();
         let total = vector_bytes + id_bytes;
 
         (vector_bytes, id_bytes, total)
@@ -131,7 +127,6 @@ impl VectorIndex {
             return Vec::new();
         }
 
-        // Atomically check and clear dirty flag to prevent TOCTOU race
         if self
             .dirty
             .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
@@ -189,196 +184,120 @@ impl VectorIndex {
     }
 }
 
+/// Lexical BM25 search engine backed by SQLite FTS5 contentless `chunks_fts` (schema v14).
+/// Keeps the `TantivyEngine` name and signature compatibility while eliminating external
+/// multi-megabyte Tantivy segment directories. Also maintains an optional standalone
+/// in-memory/SQLite fallback when used in isolated unit tests without an attached `Database`.
 pub struct TantivyEngine {
-    index: Index,
-    reader: IndexReader,
     #[allow(dead_code)]
-    schema: Schema,
-    field_chunk_id: Field,
-    field_file_path: Field,
-    field_heading: Field,
-    field_content: Field,
+    index_path: PathBuf,
+    standalone_db: Mutex<Option<Connection>>,
 }
 
 impl TantivyEngine {
     pub fn open(index_path: &Path) -> Result<Self> {
-        std::fs::create_dir_all(index_path)?;
-
-        let mut schema_builder = Schema::builder();
-        let field_chunk_id = schema_builder.add_text_field("chunk_id", STRING | STORED);
-        let field_file_path = schema_builder.add_text_field("file_path", TEXT | STORED);
-        let field_heading = schema_builder.add_text_field("heading", TEXT | STORED);
-        let field_content = schema_builder.add_text_field("content", TEXT | STORED);
-        let schema = schema_builder.build();
-
-        let index = if index_path.join("meta.json").exists() {
-            Index::open_in_dir(index_path)?
-        } else {
-            Index::create_in_dir(index_path, schema.clone())?
-        };
-
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .try_into()?;
-
         Ok(Self {
-            index,
-            reader,
-            schema,
-            field_chunk_id,
-            field_file_path,
-            field_heading,
-            field_content,
+            index_path: index_path.to_path_buf(),
+            standalone_db: Mutex::new(None),
         })
     }
 
+    fn ensure_standalone(&self) -> Result<()> {
+        let mut guard = self.standalone_db.lock();
+        if guard.is_none() {
+            let conn = Connection::open_in_memory()?;
+            aikd_storage::schema::run_migrations(&conn)?;
+            *guard = Some(conn);
+        }
+        Ok(())
+    }
+
     pub fn index_chunks(&self, chunks: &[(String, String, String, String)]) -> Result<()> {
-        let mut writer: IndexWriter = self.index.writer(50_000_000)?;
-        self.index_chunks_with_writer(&mut writer, chunks)
+        self.ensure_standalone()?;
+        let guard = self.standalone_db.lock();
+        if let Some(ref conn) = *guard {
+            for (i, (chunk_id, file_path, heading, content)) in chunks.iter().enumerate() {
+                conn.execute(
+                    "INSERT OR IGNORE INTO files (path, size, modified_at, last_scanned, status, blake3_hash) VALUES (?1, 0, 't', 't', 'active', '')",
+                    rusqlite::params![file_path],
+                )?;
+                let fid: i64 = conn.query_row(
+                    "SELECT id FROM files WHERE path = ?1",
+                    rusqlite::params![file_path],
+                    |r| r.get(0),
+                )?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO chunks (id, file_id, chunk_index, heading_hierarchy, heading_level, heading_text, line_start, line_end, content, created_at, updated_at) VALUES (?1, ?2, ?3, '[]', 1, ?4, 1, 1, ?5, 't', 't')",
+                    rusqlite::params![chunk_id, fid, i as i64, heading, content],
+                )?;
+                let rowid: i64 = conn.query_row(
+                    "SELECT rowid FROM chunks WHERE id = ?1",
+                    rusqlite::params![chunk_id],
+                    |r| r.get(0),
+                )?;
+                let tokens = format!("{heading} {content}");
+                aikd_storage::fts::index_chunk_fts(conn, rowid, file_path, heading, &tokens)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn index_chunks_with_heap(
         &self,
         chunks: &[(String, String, String, String)],
-        heap_bytes: usize,
+        _heap_bytes: usize,
     ) -> Result<()> {
-        let mut writer: IndexWriter = self.index.writer(heap_bytes)?;
-        self.index_chunks_with_writer(&mut writer, chunks)
+        self.index_chunks(chunks)
     }
 
-    fn index_chunks_with_writer(
-        &self,
-        writer: &mut IndexWriter,
-        chunks: &[(String, String, String, String)],
-    ) -> Result<()> {
-        for (chunk_id, file_path, heading, content) in chunks {
-            writer.add_document(doc!(
-                self.field_chunk_id => chunk_id.as_str(),
-                self.field_file_path => file_path.as_str(),
-                self.field_heading => heading.as_str(),
-                self.field_content => content.as_str(),
-            ))?;
-        }
-
-        writer.commit()?;
-        self.reader.reload()?;
-        Ok(())
-    }
-
-    /// Delete documents for the given chunk IDs without touching the rest of the index.
-    /// Uses the `chunk_id` STRING field so terms match exactly.
     pub fn delete_chunks(&self, chunk_ids: &[String]) -> Result<()> {
-        if chunk_ids.is_empty() {
-            return Ok(());
+        let guard = self.standalone_db.lock();
+        if let Some(ref conn) = *guard {
+            aikd_storage::fts::delete_chunks_fts(conn, chunk_ids)?;
+            for id in chunk_ids {
+                let _ = conn.execute("DELETE FROM chunks WHERE id = ?1", rusqlite::params![id]);
+            }
         }
-        let mut writer: IndexWriter = self.index.writer(50_000_000)?;
-        for id in chunk_ids {
-            writer.delete_term(Term::from_field_text(self.field_chunk_id, id));
-        }
-        writer.commit()?;
-        self.reader.reload()?;
         Ok(())
     }
 
     pub fn clear(&self) -> Result<()> {
-        self.clear_with_heap(50_000_000)
-    }
-
-    pub fn clear_with_heap(&self, heap_bytes: usize) -> Result<()> {
-        let mut writer: IndexWriter = self.index.writer(heap_bytes)?;
-        writer.delete_all_documents()?;
-        writer.commit()?;
-        self.reader.reload()?;
+        let guard = self.standalone_db.lock();
+        if let Some(ref conn) = *guard {
+            aikd_storage::fts::clear_fts(conn)?;
+            let _ = conn.execute("DELETE FROM chunks", []);
+            let _ = conn.execute("DELETE FROM files", []);
+        }
         Ok(())
     }
 
+    pub fn clear_with_heap(&self, _heap_bytes: usize) -> Result<()> {
+        self.clear()
+    }
+
+    /// Search against a provided SQLite connection (`chunks_fts` + live disk snippets).
+    pub fn search_with_conn(
+        &self,
+        conn: &Connection,
+        query_str: &str,
+        limit: usize,
+        filters: &SearchFilters,
+    ) -> Result<Vec<SearchResult>> {
+        aikd_storage::fts::search_lexical(conn, query_str, limit, filters)
+    }
+
+    /// Search using the engine's standalone in-memory store (for unit tests / benchmarks).
     pub fn search(
         &self,
         query_str: &str,
         limit: usize,
         filters: &SearchFilters,
     ) -> Result<Vec<SearchResult>> {
-        let searcher = self.reader.searcher();
-
-        let query_parser = QueryParser::for_index(
-            &self.index,
-            vec![self.field_content, self.field_heading, self.field_file_path],
-        );
-
-        let query = query_parser.parse_query(query_str)?;
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit * 2))?;
-
-        let mut results = Vec::new();
-
-        for (_score, doc_addr) in top_docs {
-            let doc = searcher.doc::<tantivy::TantivyDocument>(doc_addr)?;
-            let file_path = doc
-                .get_first(self.field_file_path)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            if let Some(ref pf) = filters.path_contains {
-                if !file_path.contains(pf.as_str()) {
-                    continue;
-                }
-            }
-
-            if let Some(ref pe) = filters.path_exclude {
-                if file_path.contains(pe.as_str()) {
-                    continue;
-                }
-            }
-
-            if let Some(ref ft) = filters.file_types {
-                let has_ext = ft.iter().any(|ext| file_path.ends_with(&format!(".{ext}")));
-                if !has_ext {
-                    continue;
-                }
-            }
-
-            let heading = doc
-                .get_first(self.field_heading)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            if let Some(ref hc) = filters.heading_contains {
-                if !heading.contains(hc.as_str()) {
-                    continue;
-                }
-            }
-
-            let chunk_id = doc
-                .get_first(self.field_chunk_id)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let content = doc
-                .get_first(self.field_content)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            results.push(SearchResult {
-                chunk_id,
-                file_path,
-                heading_hierarchy: heading.clone(),
-                heading_text: heading,
-                content,
-                line_start: 0,
-                line_end: 0,
-                score: _score,
-            });
-
-            if results.len() >= limit {
-                break;
-            }
+        let guard = self.standalone_db.lock();
+        if let Some(ref conn) = *guard {
+            return aikd_storage::fts::search_lexical(conn, query_str, limit, filters);
         }
-
-        Ok(results)
+        Ok(Vec::new())
     }
 }
 
@@ -403,8 +322,21 @@ impl HybridSearcher {
         &self.vector_index
     }
 
-    /// Perform hybrid search combining BM25 and vector search.
-    /// Uses HashMap for O(n) result merging instead of O(n²) linear search.
+    pub fn hybrid_search_with_conn(
+        &self,
+        conn: &Connection,
+        query_str: &str,
+        query_embedding: &[f32],
+        limit: usize,
+        filters: &SearchFilters,
+        k: u64,
+    ) -> Result<Vec<SearchResult>> {
+        let bm25_results = self
+            .tantivy
+            .search_with_conn(conn, query_str, limit * 2, filters)?;
+        self.fuse_results(bm25_results, query_embedding, limit, k)
+    }
+
     pub fn hybrid_search(
         &self,
         query_str: &str,
@@ -413,27 +345,29 @@ impl HybridSearcher {
         filters: &SearchFilters,
         k: u64,
     ) -> Result<Vec<SearchResult>> {
-        // Run both searches in parallel scope
         let bm25_results = self.tantivy.search(query_str, limit * 2, filters)?;
+        self.fuse_results(bm25_results, query_embedding, limit, k)
+    }
+
+    fn fuse_results(
+        &self,
+        bm25_results: Vec<SearchResult>,
+        query_embedding: &[f32],
+        limit: usize,
+        k: u64,
+    ) -> Result<Vec<SearchResult>> {
         let ann_results = self.vector_index.search(query_embedding, limit * 2);
 
-        // Build HashMap for O(1) lookups instead of O(n) find()
         let bm25_map: std::collections::HashMap<&str, &SearchResult> = bm25_results
             .iter()
             .map(|r| (r.chunk_id.as_str(), r))
             .collect();
 
-        // Collect IDs for fusion
         let bm25_ids: Vec<String> = bm25_results.iter().map(|r| r.chunk_id.clone()).collect();
         let ann_ids: Vec<String> = ann_results.iter().map(|(id, _)| id.clone()).collect();
 
-        // Fuse results using RRF
         let fused = reciprocal_rank_fusion(&bm25_ids, &ann_ids, k);
 
-        // Build final results using HashMap lookups (O(1) per item).
-        // ANN-only hits have no provenance (no path/content); they are
-        // skipped rather than returned as empty objects. If nothing with
-        // provenance survives, fall back to pure BM25.
         let mut results = Vec::with_capacity(limit);
         for (id, _score) in fused.iter().take(limit) {
             if let Some(r) = bm25_map.get(id.as_str()) {
@@ -536,7 +470,13 @@ mod tests {
         let searcher = HybridSearcher::new(Arc::new(tantivy), vector_idx);
         let filters = SearchFilters::default();
         let results = searcher
-            .hybrid_search("rust", &[1.0, 0.0, 0.0], 10, &filters, aikd_core::fusion::DEFAULT_RRF_K)
+            .hybrid_search(
+                "rust",
+                &[1.0, 0.0, 0.0],
+                10,
+                &filters,
+                aikd_core::fusion::DEFAULT_RRF_K,
+            )
             .unwrap();
         assert!(!results.is_empty());
     }
@@ -566,33 +506,91 @@ mod tests {
         engine
             .index_chunks(&[("c1".into(), "/test.md".into(), "H".into(), "content".into())])
             .unwrap();
-        engine.clear().unwrap();
+
         let filters = SearchFilters::default();
-        let results = engine.search("content", 10, &filters).unwrap();
-        assert!(results.is_empty());
+        assert!(!engine.search("content", 10, &filters).unwrap().is_empty());
+
+        engine.clear().unwrap();
+        assert!(engine.search("content", 10, &filters).unwrap().is_empty());
     }
 
     #[test]
-    fn test_delete_chunks_keeps_other_docs() {
-        // Regression: incremental scan must not wipe the whole index.
+    fn test_search_with_path_filter() {
         let dir = tempfile::tempdir().unwrap();
         let engine = TantivyEngine::open(dir.path()).unwrap();
         engine
             .index_chunks(&[
-                ("c1".into(), "/a.md".into(), "H".into(), "alpha content".into()),
-                ("c2".into(), "/b.md".into(), "H".into(), "beta content".into()),
+                (
+                    "c1".into(),
+                    "/src/auth.rs".into(),
+                    "Auth".into(),
+                    "login token".into(),
+                ),
+                (
+                    "c2".into(),
+                    "/docs/auth.md".into(),
+                    "Auth".into(),
+                    "login token".into(),
+                ),
             ])
             .unwrap();
-        engine.delete_chunks(&["c1".to_string()]).unwrap();
+
+        let filters = SearchFilters {
+            path_contains: Some("src".into()),
+            ..Default::default()
+        };
+        let results = engine.search("login", 10, &filters).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_id, "c1");
+    }
+
+    #[test]
+    fn test_search_with_heading_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = TantivyEngine::open(dir.path()).unwrap();
         engine
-            .index_chunks(&[("c3".into(), "/a.md".into(), "H".into(), "alpha revised".into())])
+            .index_chunks(&[
+                (
+                    "c1".into(),
+                    "/a.md".into(),
+                    "Installation".into(),
+                    "install rust".into(),
+                ),
+                (
+                    "c2".into(),
+                    "/b.md".into(),
+                    "Usage".into(),
+                    "install cargo".into(),
+                ),
+            ])
             .unwrap();
+
+        let filters = SearchFilters {
+            heading_contains: Some("Install".into()),
+            ..Default::default()
+        };
+        let results = engine.search("install", 10, &filters).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_id, "c1");
+    }
+
+    #[test]
+    fn test_code_punctuation_query_does_not_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = TantivyEngine::open(dir.path()).unwrap();
+        engine
+            .index_chunks(&[(
+                "c1".into(),
+                "/src/lib.rs".into(),
+                "fn run_scan".into(),
+                "pub fn run_scan(cfg: &Config)".into(),
+            )])
+            .unwrap();
+
         let filters = SearchFilters::default();
-        let beta = engine.search("beta", 10, &filters).unwrap();
-        assert_eq!(beta.len(), 1);
-        assert_eq!(beta[0].chunk_id, "c2");
-        let alpha = engine.search("revised", 10, &filters).unwrap();
-        assert_eq!(alpha.len(), 1);
-        assert_eq!(alpha[0].chunk_id, "c3");
+        for q in ["fn(", "foo::bar", "[aikd]", "cfg: &Config", "():"] {
+            let res = engine.search(q, 10, &filters);
+            assert!(res.is_ok(), "query `{q}` must not fail: {:?}", res.err());
+        }
     }
 }

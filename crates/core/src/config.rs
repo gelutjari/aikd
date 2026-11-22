@@ -207,6 +207,7 @@ impl Default for ScanConfig {
         Self {
             include_paths: default_paths(),
             exclude_paths: vec![
+                // Standard build & dependency directories
                 "node_modules",
                 ".git",
                 "__pycache__",
@@ -217,6 +218,34 @@ impl Default for ScanConfig {
                 "build",
                 ".next",
                 ".venv",
+                // Multi-Agent internal garbage, telemetry, browser profiles & scratch logs
+                ".system_generated",
+                "scratch",
+                ".user_uploaded",
+                "browser_recordings",
+                "antigravity-browser-profile",
+                "crashes",
+                "paste-cache",
+                "file-history",
+                "telemetry",
+                "shell-snapshots",
+                "session-env",
+                "archived_sessions",
+                ".sandbox",
+                ".sandbox-bin",
+                ".sandbox-secrets",
+                ".tmp",
+                "tmp",
+                "thread-writer-locks",
+                "audio_cache",
+                "image_cache",
+                "sandboxes",
+                "worktrees",
+                "lancedb",
+                "tantivy_index",
+                ".semantic_search",
+                "all-MiniLM-L6-v2",
+                ".codegraph",
             ]
             .into_iter()
             .map(String::from)
@@ -225,12 +254,33 @@ impl Default for ScanConfig {
             exclude_extensions: Vec::new(),
             include_files: Vec::new(),
             exclude_files: vec![
-                ".env", ".env.*", "*.bak", "*.tmp", "*.secret",
-                "*.pem", "*.key", "*.p12", "*.pfx",
-                "id_rsa", "id_ed25519", "id_ecdsa", "*.pub",
-                "credentials.json", "credentials.yaml", "credentials.yml",
-                "secrets.json", "secrets.yaml", "secrets.yml",
-                ".npmrc", ".pypirc",
+                ".env",
+                ".env.*",
+                "*.bak",
+                "*.tmp",
+                "*.secret",
+                "*.pem",
+                "*.key",
+                "*.p12",
+                "*.pfx",
+                "id_rsa",
+                "id_ed25519",
+                "id_ecdsa",
+                "*.pub",
+                "credentials.json",
+                "credentials.yaml",
+                "credentials.yml",
+                "secrets.json",
+                "secrets.yaml",
+                "secrets.yml",
+                "auth.json",
+                "oauth_creds.json",
+                "google_accounts.json",
+                "device-auth.json",
+                "1p_failed_events.*",
+                "package-lock.json",
+                ".npmrc",
+                ".pypirc",
             ]
             .into_iter()
             .map(String::from)
@@ -336,8 +386,45 @@ impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let expanded = shellexpand::tilde(path);
         let content = std::fs::read_to_string(expanded.as_ref())?;
-        let config: Config = serde_yaml::from_str(&content)?;
+        // Windows tools (e.g. PowerShell 5.1 Set-Content -Encoding UTF8) emit a UTF-8 BOM
+        // that serde_yaml rejects as multiple YAML documents.
+        let clean = content.strip_prefix('\u{feff}').unwrap_or(&content);
+        let config: Config = serde_yaml::from_str(clean)?;
         Ok(config)
+    }
+
+    /// True when `path` resolves to the user's default `~/.aikd/config.yaml`.
+    pub fn is_default_config_path(path: &str) -> bool {
+        let exp = shellexpand::tilde(path).replace('\\', "/");
+        let def = shellexpand::tilde("~/.aikd/config.yaml").replace('\\', "/");
+        exp == def
+    }
+
+    /// Directory for runtime state (`aikd.pid`, `aikd.log`, `aikd.lock`, `mcp.json`).
+    /// Uses `~/.aikd` for the default config. For an explicit `--config`,
+    /// prefers `db_path`'s parent unless `db_path` is still the default
+    /// `~/.aikd/aikd.db`, in which case it falls back to the config's directory.
+    pub fn runtime_dir(&self, config_path: &str) -> PathBuf {
+        if Self::is_default_config_path(config_path) {
+            return PathBuf::from(shellexpand::tilde("~/.aikd").as_ref());
+        }
+        let default_db = shellexpand::tilde("~/.aikd/aikd.db").replace('\\', "/");
+        let cur_db = self.db_path().to_string_lossy().replace('\\', "/");
+        if cur_db != default_db {
+            if let Some(parent) = self
+                .db_path()
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                return parent.to_path_buf();
+            }
+        }
+        let expanded = shellexpand::tilde(config_path);
+        Path::new(expanded.as_ref())
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     /// Load with process-wide policy (C1+C3): an EXPLICIT --config that
@@ -353,9 +440,7 @@ impl Config {
                 cfg
             }
             Err(e) => {
-                let expanded = shellexpand::tilde(path);
-                let is_default = expanded.as_ref() == shellexpand::tilde("~/.aikd/config.yaml").as_ref();
-                if !is_default {
+                if !Self::is_default_config_path(path) {
                     eprintln!("error: cannot read config '{path}': {e}");
                     eprintln!("Refusing to run against the wrong database. Fix the path or create it with: aikd init");
                     std::process::exit(2);
@@ -400,6 +485,30 @@ impl Config {
                 f == file_name
             }
         })
+    }
+
+    pub fn should_exclude_extension(&self, file_name: &str, ext: Option<&str>) -> bool {
+        self.scan.exclude_extensions.iter().any(|pattern| {
+            let clean = pattern.trim_start_matches('.');
+            if clean.is_empty() {
+                return false;
+            }
+            if clean.contains('.') {
+                file_name.ends_with(&format!(".{clean}"))
+            } else {
+                ext.map(|e| e.eq_ignore_ascii_case(clean)).unwrap_or(false)
+            }
+        })
+    }
+
+    pub fn should_include_extension(&self, ext: Option<&str>) -> bool {
+        let Some(ext) = ext else {
+            return false;
+        };
+        self.scan
+            .include_extensions
+            .iter()
+            .any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(ext))
     }
 
     pub fn matches_filename_filter(&self, file_name: &str) -> bool {
@@ -483,9 +592,16 @@ impl Config {
 
         // X5: SQLite over network filesystems risks SQLITE_CORRUPT / missed
         // watcher events (notify has no backend there; locks don't hold).
-        for (label, p) in [("db_path", self.index.db_path.clone()), ("tantivy_path", self.index.tantivy_path.clone())] {
+        for (label, p) in [
+            ("db_path", self.index.db_path.clone()),
+            ("tantivy_path", self.index.tantivy_path.clone()),
+        ] {
             let low = p.replace('\\', "/").to_lowercase();
-            if low.starts_with("//") || low.starts_with("/mnt/") || low.starts_with("/media/") || low.starts_with("/volumes/") {
+            if low.starts_with("//")
+                || low.starts_with("/mnt/")
+                || low.starts_with("/media/")
+                || low.starts_with("/volumes/")
+            {
                 warnings.push(format!("{label} looks like a network/mounted path ({p}): SQLite may corrupt and the watcher may miss events — keep the DB on a local disk"));
             }
         }
@@ -527,11 +643,12 @@ pub fn generate_smart_config(project_root: &Path) -> Config {
     } else if project_root.join("package.json").exists()
         || project_root.join("tsconfig.json").exists()
     {
-        config.scan.include_extensions =
-            vec!["ts", "tsx", "js", "jsx", "mjs", "cjs", "md", "json", "yaml", "yml"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+        config.scan.include_extensions = vec![
+            "ts", "tsx", "js", "jsx", "mjs", "cjs", "md", "json", "yaml", "yml",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         config.scan.exclude_paths.extend(
             vec!["node_modules", ".next", "dist", "build"]
                 .into_iter()
@@ -563,10 +680,33 @@ pub fn generate_smart_config(project_root: &Path) -> Config {
             .into_iter()
             .map(String::from)
             .collect();
+    } else if has_extension_in_dir(project_root, &["csproj", "sln", "cs"]) {
+        config.scan.include_extensions =
+            vec!["cs", "csproj", "sln", "md", "json", "yaml", "yml", "txt"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        config
+            .scan
+            .exclude_paths
+            .extend(vec!["bin", "obj", ".vs"].into_iter().map(String::from));
     }
 
     config.filter.max_file_size = 1_048_576;
     config
+}
+
+fn has_extension_in_dir(dir: &Path, exts: &[&str]) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        e.path()
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| exts.iter().any(|x| s.eq_ignore_ascii_case(x)))
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]
@@ -639,5 +779,47 @@ mod tests {
         cfg.filter.max_file_size = 1000;
         assert!(cfg.check_file_size(500));
         assert!(!cfg.check_file_size(2000));
+    }
+
+    #[test]
+    fn test_load_strips_utf8_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bom.yaml");
+        std::fs::write(
+            &p,
+            "\u{feff}version: \"2.0.0\"\nserver:\n  rest_port: 19099\n",
+        )
+        .unwrap();
+        let cfg = Config::load(p.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.server.rest_port, 19099);
+    }
+
+    #[test]
+    fn test_exclude_extensions_and_csharp_smart_config() {
+        let mut cfg = Config::default();
+        cfg.scan.exclude_extensions = vec!["lock".into(), "min.js".into()];
+        assert!(cfg.should_exclude_extension("Cargo.lock", Some("lock")));
+        assert!(cfg.should_exclude_extension("app.min.js", Some("js")));
+        assert!(!cfg.should_exclude_extension("app.js", Some("js")));
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("App.csproj"), "<Project />").unwrap();
+        let smart = generate_smart_config(dir.path());
+        assert!(smart.scan.include_extensions.contains(&"cs".to_string()));
+        assert!(smart.scan.exclude_paths.contains(&"obj".to_string()));
+    }
+
+    #[test]
+    fn test_runtime_dir_isolates_explicit_config() {
+        let cfg = Config::default();
+        assert!(!Config::is_default_config_path("/tmp/iso/config.yaml"));
+        assert!(Config::is_default_config_path("~/.aikd/config.yaml"));
+        let mut custom = Config::default();
+        custom.index.db_path = "/tmp/iso/custom.db".into();
+        assert_eq!(
+            custom.runtime_dir("/tmp/iso/config.yaml"),
+            std::path::PathBuf::from("/tmp/iso")
+        );
+        let _ = cfg;
     }
 }

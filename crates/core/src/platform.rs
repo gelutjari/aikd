@@ -26,10 +26,28 @@ pub fn default_aikd_dir() -> PathBuf {
 pub fn canonical_path(p: &std::path::Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
+/// Normalize a path string to canonical slash form without trailing slash
+/// (except root `/` or drive root like `C:/`).
+pub fn normalize_project_key(raw: &str) -> String {
+    let s = raw.replace('\\', "/");
+    if s == "/" || (s.len() == 3 && s.ends_with(":/")) {
+        return s;
+    }
+    let trimmed = s.trim_end_matches('/');
+    if trimmed.is_empty() && s.starts_with('/') {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Canonical project identity: the first include path in slash form,
 /// so memory/events/atlas keys never fork on separator style.
 pub fn canonical_project(include_paths: &[String]) -> String {
-    include_paths.first().cloned().unwrap_or_default().replace('\\', "/")
+    include_paths
+        .first()
+        .map(|s| normalize_project_key(s))
+        .unwrap_or_default()
 }
 
 pub fn detect_gpu() -> bool {

@@ -82,25 +82,6 @@ fn detect_file_type(path: &str) -> FileType {
     }
 }
 
-fn cut_at_boundary(lines: &[&str], end: usize, min_keep: usize) -> usize {
-    // R4: never cut a declaration in half. Walk back from the max-token
-    // cut point to the nearest blank line or symbol start; if that would
-    // keep too little, cut at max after all (bounded, never infinite).
-    let mut i = end;
-    while i > min_keep {
-        let t = lines[i].trim_start();
-        if t.is_empty()
-            || t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("pub ") || t.starts_with("struct ") || t.starts_with("impl ")
-            || t.starts_with("def ") || t.starts_with("class ") || t.starts_with("async def ")
-            || t.starts_with("function ") || t.starts_with("export ")
-        {
-            return i;
-        }
-        i -= 1;
-    }
-    end
-}
-
 fn chunk_plain_text(file_path: &str, content: &str, max_tokens: usize) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut current_content = String::new();
@@ -239,7 +220,11 @@ mod tests {
         // Regression: functions below min_tokens used to be discarded.
         let code = "fn tiny() { 1 }\n\nfn also_tiny() { 2 }\n\nfn big() {\n    let mut s = String::new();\n    for i in 0..100 { s.push_str(&i.to_string()); }\n    s\n}\n";
         let chunks = chunk_file("t.rs", code, 1000, 100);
-        let all = chunks.iter().map(|c| c.content.clone()).collect::<Vec<_>>().join("\n");
+        let all = chunks
+            .iter()
+            .map(|c| c.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(all.contains("fn tiny()"), "tiny fn lost: {all}");
         assert!(all.contains("fn also_tiny()"), "also_tiny lost: {all}");
         assert!(all.contains("fn big()"));

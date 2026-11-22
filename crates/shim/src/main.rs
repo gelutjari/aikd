@@ -9,11 +9,18 @@
 //! Update flow (never touches a running file):
 //!   1. `aikd update` writes the new binary to versions/<new>/ (fresh file)
 //!   2. atomically rewrites `active-version` (rename is atomic on all OS)
-use std::path::PathBuf;
+//!
+//! Note on versioning: `aikd --version` reports the binary's compile-time
+//! `CARGO_PKG_VERSION` (e.g. `2.0.0`), while `active-version` stores the
+//! management folder label (e.g. `2.0.0-identity`). Use `aikd update --list`
+//! or `aikd doctor` to see both the active pointer label and binary path.
+use std::path::{Path, PathBuf};
 
 fn aikd_home() -> PathBuf {
     // Single source of truth, same as the CLI (`~/.aikd`).
-    dirs_home().unwrap_or_else(|| PathBuf::from(".")).join(".aikd")
+    dirs_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".aikd")
 }
 
 #[cfg(windows)]
@@ -26,14 +33,14 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn active_version(home: &PathBuf) -> Option<String> {
+fn active_version(home: &Path) -> Option<String> {
     std::fs::read_to_string(home.join("active-version"))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "shim")
 }
 
-fn candidate(home: &PathBuf) -> Option<PathBuf> {
+fn candidate(home: &Path) -> Option<PathBuf> {
     // 1. Pinned active version.
     if let Some(v) = active_version(home) {
         let p = home.join("versions").join(&v).join(exe_name());

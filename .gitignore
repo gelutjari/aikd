@@ -24,3 +24,7 @@ desktop.ini
 # Model files (terlalu besar untuk git)
 *.onnx
 model/
+
+# Local test/temp files
+*.pre-lean
+aikd.db*

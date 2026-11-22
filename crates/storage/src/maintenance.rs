@@ -25,9 +25,7 @@ pub struct DbStatus {
 }
 
 pub fn db_status(conn: &Connection, db_path: &Path) -> Result<DbStatus> {
-    let q = |sql: &str| -> i64 {
-        conn.query_row(sql, [], |r| r.get(0)).unwrap_or(-1)
-    };
+    let q = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(-1) };
     let qs = |sql: &str| -> String {
         conn.query_row(sql, [], |r| r.get(0))
             .unwrap_or_else(|_| "?".to_string())
@@ -96,16 +94,19 @@ pub fn db_restore(backup: &Path, db_path: &Path) -> Result<()> {
     std::fs::copy(backup, &tmp)?;
     std::fs::rename(&tmp, db_path)?;
     // Remove WAL/SHM sidecars so the restored DB opens cleanly.
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let wal = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+    let shm = std::path::PathBuf::from(format!("{}-shm", db_path.display()));
+    let _ = std::fs::remove_file(wal);
+    let _ = std::fs::remove_file(shm);
     Ok(())
 }
 
-/// Compact: VACUUM to reclaim space. (The old FTS5 mirror is gone since v12;
-/// `rebuild_fts` is kept as a no-op flag for CLI back-compat and warns.)
+/// Compact: VACUUM to reclaim space, optionally rebuilding FTS5 from chunks/disk.
 pub fn db_compact(conn: &Connection, rebuild_fts: bool) -> Result<String> {
     if rebuild_fts {
-        log::warn!("--rebuild-fts is a no-op since v12 (Tantivy is the lexical engine)");
+        let n = crate::fts::rebuild_fts(conn)?;
+        conn.execute_batch("VACUUM")?;
+        return Ok(format!("rebuilt FTS ({n} chunks) and vacuumed"));
     }
     conn.execute_batch("VACUUM")?;
     Ok("vacuumed".to_string())
@@ -126,7 +127,10 @@ pub struct RetentionReport {
 /// but only AFTER the Atlas snapshot for the project is refreshed, so the
 /// counts survive in `atlas` and the resume watermark (`MAX(sequence)`)
 /// stays valid — `list_events(since)` simply returns fewer old rows.
-pub fn enforce_retention(conn: &Connection, policy: &aikd_core::RetentionConfig) -> Result<RetentionReport> {
+pub fn enforce_retention(
+    conn: &Connection,
+    policy: &aikd_core::RetentionConfig,
+) -> Result<RetentionReport> {
     let mut report = RetentionReport::default();
     if policy.events_max_per_workstream > 0 {
         let streams: Vec<(String, String)> = conn
@@ -156,7 +160,9 @@ pub fn enforce_retention(conn: &Connection, policy: &aikd_core::RetentionConfig)
         }
     }
     if policy.events_max_age_days > 0 {
-        let cutoff = (chrono::Utc::now() - chrono::Duration::days(policy.events_max_age_days as i64)).to_rfc3339();
+        let cutoff = (chrono::Utc::now()
+            - chrono::Duration::days(policy.events_max_age_days as i64))
+        .to_rfc3339();
         let streams: Vec<String> = conn
             .prepare("SELECT DISTINCT project_id FROM events WHERE timestamp < ?1")
             .and_then(|mut s| {
@@ -167,10 +173,14 @@ pub fn enforce_retention(conn: &Connection, policy: &aikd_core::RetentionConfig)
         for p in &streams {
             let _ = crate::atlas::refresh_atlas(conn, p);
         }
-        report.events_archived += conn.execute("DELETE FROM events WHERE timestamp < ?1", rusqlite::params![cutoff])? as i64;
+        report.events_archived += conn.execute(
+            "DELETE FROM events WHERE timestamp < ?1",
+            rusqlite::params![cutoff],
+        )? as i64;
     }
     if policy.memory_stale_days > 0 {
-        let cutoff = (chrono::Utc::now() - chrono::Duration::days(policy.memory_stale_days as i64)).to_rfc3339();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(policy.memory_stale_days as i64))
+            .to_rfc3339();
         report.memory_marked_stale += conn.execute(
             "UPDATE memory SET status='stale', updated_at=?1 WHERE status='active' AND updated_at < ?2",
             rusqlite::params![chrono::Utc::now().to_rfc3339(), cutoff],
@@ -180,6 +190,17 @@ pub fn enforce_retention(conn: &Connection, policy: &aikd_core::RetentionConfig)
 }
 
 pub fn gc(conn: &Connection, disk_check: bool) -> Result<(i64, i64)> {
+    gc_with_config(conn, disk_check, None)
+}
+
+/// Garbage collect with optional config filtering: drops DB rows for files
+/// that no longer exist on disk OR that match newly added `exclude_paths` /
+/// `exclude_files` rules in `Config`.
+pub fn gc_with_config(
+    conn: &Connection,
+    disk_check: bool,
+    cfg: Option<&aikd_core::Config>,
+) -> Result<(i64, i64)> {
     let paths: Vec<(i64, String)> = {
         let mut stmt = conn.prepare("SELECT id, path FROM files")?;
         let x: Vec<(i64, String)> = stmt
@@ -190,18 +211,28 @@ pub fn gc(conn: &Connection, disk_check: bool) -> Result<(i64, i64)> {
     };
     let mut files_removed = 0i64;
     for (fid, ps) in paths {
+        let clean = ps.strip_prefix("//?/").unwrap_or(&ps);
+        let p = std::path::Path::new(clean);
         let gone = if disk_check {
-            !std::path::Path::new(&ps).exists()
+            !p.exists() && !std::path::Path::new(&ps).exists()
         } else {
             false
         };
-        if gone {
-            conn.execute(
-                "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)",
-                rusqlite::params![fid],
-            )?;
-            conn.execute("DELETE FROM chunks WHERE file_id=?1", rusqlite::params![fid])?;
-            conn.execute("DELETE FROM files WHERE id=?1", rusqlite::params![fid])?;
+        let excluded_by_cfg = if let Some(c) = cfg {
+            let dir_excluded = p.ancestors().any(|a| {
+                a.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| c.should_exclude_dir(n))
+                    .unwrap_or(false)
+            });
+            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let file_excluded = c.should_exclude_file(fname);
+            dir_excluded || file_excluded
+        } else {
+            false
+        };
+        if gone || excluded_by_cfg {
+            crate::cascade::delete_file_id_cascade(conn, fid)?;
             files_removed += 1;
         }
     }
@@ -214,7 +245,16 @@ pub fn gc(conn: &Connection, disk_check: bool) -> Result<(i64, i64)> {
         "DELETE FROM embeddings WHERE chunk_id NOT IN (SELECT id FROM chunks)",
         [],
     )?;
-    // FTS rows follow chunks via triggers on DELETE; verify below in db_check.
+    let _ = conn.execute(
+        "DELETE FROM code_symbols WHERE chunk_id NOT IN (SELECT id FROM chunks)",
+        [],
+    );
+    if crate::fts::fts_ready(conn) {
+        let _ = conn.execute(
+            "DELETE FROM chunks_fts WHERE rowid NOT IN (SELECT rowid FROM chunks)",
+            [],
+        );
+    }
     conn.execute_batch("VACUUM")?;
     Ok((files_removed, orphan_chunks))
 }
@@ -229,7 +269,7 @@ mod tests {
         let db_path = dir.path().join("t.db");
         let db = crate::Database::open(&db_path).unwrap();
         let st = db_status(db.conn(), &db_path).unwrap();
-        assert_eq!(st.schema_version, 13);
+        assert_eq!(st.schema_version, 14);
         assert_eq!(st.files, 0);
         assert!(db_check(db.conn()).unwrap().is_empty());
         let dest = dir.path().join("b.db");
@@ -246,10 +286,27 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::schema::run_migrations(&conn).unwrap();
         for i in 0..10 {
-            crate::events::append_event(&conn, "/p", "ws", "agy", "s", "tool_call", &format!("src{i}"), "{}").unwrap();
+            crate::events::append_event(
+                &conn,
+                "/p",
+                "ws",
+                "agy",
+                "s",
+                "tool_call",
+                &format!("src{i}"),
+                "{}",
+            )
+            .unwrap();
         }
-        assert_eq!(crate::events::latest_sequence(&conn, "/p", "ws").unwrap(), 10);
-        let policy = aikd_core::RetentionConfig { events_max_per_workstream: 4, events_max_age_days: 0, memory_stale_days: 0 };
+        assert_eq!(
+            crate::events::latest_sequence(&conn, "/p", "ws").unwrap(),
+            10
+        );
+        let policy = aikd_core::RetentionConfig {
+            events_max_per_workstream: 4,
+            events_max_age_days: 0,
+            memory_stale_days: 0,
+        };
         let rep = enforce_retention(&conn, &policy).unwrap();
         assert_eq!(rep.events_archived, 6);
         // Newest 4 survive; watermark still the max sequence; resume works.
@@ -266,10 +323,19 @@ mod tests {
     fn retention_marks_stale_memory_by_age() {
         let conn = Connection::open_in_memory().unwrap();
         crate::schema::run_migrations(&conn).unwrap();
-        let m = crate::memory::save_memory(&conn, "/p", "ws", "fact", "F", "b", "explicit", 1.0).unwrap();
+        let m = crate::memory::save_memory(&conn, "/p", "ws", "fact", "F", "b", "explicit", 1.0)
+            .unwrap();
         // Backdate below the threshold.
-        conn.execute("UPDATE memory SET updated_at='2000-01-01T00:00:00+00:00' WHERE id=?1", rusqlite::params![m.id]).unwrap();
-        let policy = aikd_core::RetentionConfig { events_max_per_workstream: 0, events_max_age_days: 0, memory_stale_days: 30 };
+        conn.execute(
+            "UPDATE memory SET updated_at='2000-01-01T00:00:00+00:00' WHERE id=?1",
+            rusqlite::params![m.id],
+        )
+        .unwrap();
+        let policy = aikd_core::RetentionConfig {
+            events_max_per_workstream: 0,
+            events_max_age_days: 0,
+            memory_stale_days: 30,
+        };
         let rep = enforce_retention(&conn, &policy).unwrap();
         assert_eq!(rep.memory_marked_stale, 1);
         let act = crate::memory::list_memory(&conn, "/p", Some("ws"), Some("fact"), false).unwrap();

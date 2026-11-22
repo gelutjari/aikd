@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070b14"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#06121e"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#162033"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <style>
+      .mono { font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace; }
+      .sans { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+      .pulse { animation: pulseAnim 2.6s infinite ease-in-out; }
+      .flow { stroke-dasharray: 8 6; animation: dashFlow 1.4s linear infinite; }
+      .step1 { animation: fadeStep1 12s infinite; }
+      .step2 { animation: fadeStep2 12s infinite; }
+      .step3 { animation: fadeStep3 12s infinite; }
+      .step4 { animation: fadeStep4 12s infinite; }
+      @keyframes pulseAnim {
+        0%, 100% { opacity: 0.75; }
+        50% { opacity: 1; }
+      }
+      @keyframes dashFlow {
+        to { stroke-dashoffset: -28; }
+      }
+      @keyframes fadeStep1 {
+        0%, 5% { opacity: 0.25; }
+        8%, 92% { opacity: 1; }
+        96%, 100% { opacity: 0.25; }
+      }
+      @keyframes fadeStep2 {
+        0%, 24% { opacity: 0.15; }
+        28%, 92% { opacity: 1; }
+        96%, 100% { opacity: 0.15; }
+      }
+      @keyframes fadeStep3 {
+        0%, 48% { opacity: 0.15; }
+        52%, 92% { opacity: 1; }
+        96%, 100% { opacity: 0.15; }
+      }
+      @keyframes fadeStep4 {
+        0%, 70% { opacity: 0.15; }
+        74%, 94% { opacity: 1; }
+        97%, 100% { opacity: 0.15; }
+      }
+    </style>
+  </defs>
+
+  <!-- Main Background -->
+  <rect width="960" height="540" rx="16" fill="url(#bgGrad)" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Top Header Banner -->
+  <rect x="24" y="20" width="912" height="58" rx="12" fill="#111827" stroke="#1e293b" stroke-width="1.5"/>
+  <rect x="40" y="32" width="34" height="34" rx="8" fill="url(#accentGrad)"/>
+  <text x="57" y="55" text-anchor="middle" class="sans" font-size="18" font-weight="800" fill="#070b14">⚡</text>
+  <text x="86" y="47" class="sans" font-size="17" font-weight="800" fill="#f8fafc">AIKD v2.0 — Anti-Context-Rot &amp; Local Memory Engine</text>
+  <text x="86" y="64" class="mono" font-size="11.5" fill="#94a3b8">100% Rust · Schema v14 Lean (SQLite FTS5 Contentless + Live Disk Snippets) · 15 MCP Tools · Embedded Web Studio</text>
+  <rect x="786" y="35" width="134" height="28" rx="14" fill="#064e3b" stroke="#10b981" stroke-width="1"/>
+  <circle cx="802" cy="49" r="4.5" fill="#10b981" class="pulse"/>
+  <text x="814" y="53" class="mono" font-size="11" font-weight="700" fill="#34d399">MCP + UI READY</text>
+
+  <!-- ================= LEFT PANEL: LIVE TERMINAL & MCP FLOW ================= -->
+  <rect x="24" y="94" width="485" height="422" rx="12" fill="#0b1120" stroke="#1e293b" stroke-width="1.5"/>
+  <rect x="24" y="94" width="485" height="34" rx="12" fill="#161f33"/>
+  <circle cx="44" cy="111" r="5.5" fill="#f43f5e"/>
+  <circle cx="62" cy="111" r="5.5" fill="#f59e0b"/>
+  <circle cx="80" cy="111" r="5.5" fill="#10b981"/>
+  <text x="102" y="115" class="mono" font-size="11.5" font-weight="600" fill="#94a3b8">terminal — aikd workflow (Windows / Linux / macOS)</text>
+
+  <!-- Step 1: Scan & Auto-Harvest .md Rules -->
+  <g class="step1">
+    <text x="42" y="152" class="mono" font-size="12" fill="#34d399">$ aikd scan --path ./my-project</text>
+    <text x="42" y="171" class="mono" font-size="11.5" fill="#cbd5e1">⚡ [Blake3 Incremental] Indexed 637 files, 4,665 chunks in 0.21s</text>
+    <text x="42" y="189" class="mono" font-size="11.5" fill="#38bdf8">📜 [Auto-Harvest .md] Synced AGENTS.md, CLAUDE.md &amp; 83 SKILL.md → Memory</text>
+    <text x="42" y="207" class="mono" font-size="11" fill="#64748b">   ↳ Edited .md files auto-supersede older rules (zero stale drift!)</text>
+  </g>
+
+  <!-- Step 2: Fast BM25 + Symbol Lookup -->
+  <g class="step2">
+    <line x1="42" y1="222" x2="490" y2="222" stroke="#1e293b" stroke-width="1"/>
+    <text x="42" y="242" class="mono" font-size="12" fill="#34d399">$ aikd query "run_server stdio discover" --limit 2</text>
+    <text x="42" y="261" class="mono" font-size="11.5" fill="#fbbf24">1. crates/server/src/mcp.rs (Lines 759-812 · BM25: 15.64 · 1.2ms)</text>
+    <text x="42" y="278" class="mono" font-size="11" fill="#94a3b8">   [Live Disk Snippet — 0 bytes duplicated in SQLite DB]</text>
+    <text x="42" y="295" class="mono" font-size="11.5" fill="#38bdf8">$ aikd symbol search_lexical</text>
+    <text x="42" y="312" class="mono" font-size="11" fill="#cbd5e1">   ↳ fn search_lexical — crates/storage/src/fts.rs:242 [rust]</text>
+  </g>
+
+  <!-- Step 3: Anti-Context-Rot Handoff -->
+  <g class="step3">
+    <line x1="42" y1="327" x2="490" y2="327" stroke="#1e293b" stroke-width="1"/>
+    <text x="42" y="347" class="mono" font-size="12" fill="#34d399">$ aikd handoff --workstream default</text>
+    <rect x="42" y="357" width="448" height="74" rx="8" fill="#111827" stroke="#10b981" stroke-width="1"/>
+    <text x="54" y="375" class="mono" font-size="11" font-weight="700" fill="#10b981">=== HANDOFF PACKAGE (~330 tokens vs 200,000 raw chat) ===</text>
+    <text x="54" y="392" class="mono" font-size="10.5" fill="#e2e8f0">• CONSTRAINTS: Synced from AGENTS.md / CLAUDE.md (Active Rules)</text>
+    <text x="54" y="407" class="mono" font-size="10.5" fill="#38bdf8">• DECISIONS  : Schema v14 FTS5 Lean · Cloudflare golekjariguard</text>
+    <text x="54" y="422" class="mono" font-size="10.5" fill="#fbbf24">• CHECKPOINT : Ready for multi-agent resume after /compact</text>
+  </g>
+
+  <!-- Step 4: Studio Dashboard Launch -->
+  <g class="step4">
+    <text x="42" y="454" class="mono" font-size="12" fill="#34d399">$ aikd daemon &amp;&amp; open http://127.0.0.1:9090/ui</text>
+    <text x="42" y="473" class="mono" font-size="11.5" fill="#a855f7">🚀 AIKD Studio listening on http://127.0.0.1:9090/ui (Single Binary SPA)</text>
+    <text x="42" y="492" class="mono" font-size="11" fill="#64748b">   ↳ Connected Agents: Claude Code · Gemini/Antigravity · Cursor · Pi · OMP</text>
+  </g>
+
+  <!-- ================= RIGHT PANEL: ARCHITECTURE & AIKD STUDIO PREVIEW ================= -->
+  <rect x="525" y="94" width="411" height="422" rx="12" fill="url(#cardGrad)" stroke="#1e293b" stroke-width="1.5"/>
+  <text x="545" y="122" class="sans" font-size="14" font-weight="700" fill="#f8fafc">🧠 Multi-Agent Shared Brain Architecture</text>
+  <text x="545" y="139" class="sans" font-size="11.5" fill="#94a3b8">Satu database lokal super ringan untuk semua AI Agent Anda</text>
+
+  <!-- Agent Boxes Top -->
+  <rect x="545" y="154" width="84" height="36" rx="7" fill="#0b1120" stroke="#3b82f6" stroke-width="1.2"/>
+  <text x="587" y="176" text-anchor="middle" class="sans" font-size="11" font-weight="700" fill="#60a5fa">Claude / Cursor</text>
+
+  <rect x="641" y="154" width="84" height="36" rx="7" fill="#0b1120" stroke="#10b981" stroke-width="1.2"/>
+  <text x="683" y="176" text-anchor="middle" class="sans" font-size="11" font-weight="700" fill="#34d399">Antigravity</text>
+
+  <rect x="737" y="154" width="84" height="36" rx="7" fill="#0b1120" stroke="#f59e0b" stroke-width="1.2"/>
+  <text x="779" y="176" text-anchor="middle" class="sans" font-size="11" font-weight="700" fill="#fbbf24">Pi Agent CLI</text>
+
+  <rect x="833" y="154" width="84" height="36" rx="7" fill="#0b1120" stroke="#a855f7" stroke-width="1.2"/>
+  <text x="875" y="176" text-anchor="middle" class="sans" font-size="11" font-weight="700" fill="#c084fc">OMP Agent CLI</text>
+
+  <!-- Animated Flow Lines -->
+  <line x1="587" y1="190" x2="680" y2="225" stroke="#3b82f6" stroke-width="1.5" class="flow"/>
+  <line x1="683" y1="190" x2="710" y2="225" stroke="#10b981" stroke-width="1.5" class="flow"/>
+  <line x1="779" y1="190" x2="750" y2="225" stroke="#f59e0b" stroke-width="1.5" class="flow"/>
+  <line x1="875" y1="190" x2="780" y2="225" stroke="#a855f7" stroke-width="1.5" class="flow"/>
+
+  <!-- Central AIKD Core Box -->
+  <rect x="545" y="225" width="372" height="106" rx="10" fill="#0b1120" stroke="#10b981" stroke-width="1.8"/>
+  <text x="731" y="247" text-anchor="middle" class="sans" font-size="13" font-weight="800" fill="#34d399">⚡ AIKD CORE ENGINE (Single Rust Binary)</text>
+  <rect x="559" y="258" width="110" height="58" rx="7" fill="#161f33" stroke="#1e293b"/>
+  <text x="614" y="278" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#38bdf8">FTS5 Lean v14</text>
+  <text x="614" y="294" text-anchor="middle" class="sans" font-size="10" fill="#94a3b8">Contentless BM25</text>
+  <text x="614" y="308" text-anchor="middle" class="sans" font-size="10" fill="#10b981">-75% DB Size</text>
+
+  <rect x="676" y="258" width="110" height="58" rx="7" fill="#161f33" stroke="#1e293b"/>
+  <text x="731" y="278" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#fbbf24">Rule &amp; Skill Sync</text>
+  <text x="731" y="294" text-anchor="middle" class="sans" font-size="10" fill="#94a3b8">AGENTS / CLAUDE</text>
+  <text x="731" y="308" text-anchor="middle" class="sans" font-size="10" fill="#10b981">Auto-Supersede</text>
+
+  <rect x="793" y="258" width="110" height="58" rx="7" fill="#161f33" stroke="#1e293b"/>
+  <text x="848" y="278" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#c084fc">Handoff Guard</text>
+  <text x="848" y="294" text-anchor="middle" class="sans" font-size="10" fill="#94a3b8">Tasks &amp; Decisions</text>
+  <text x="848" y="308" text-anchor="middle" class="sans" font-size="10" fill="#10b981">Zero Context-Rot</text>
+
+  <!-- Embedded AIKD Studio UI Mini Preview -->
+  <rect x="545" y="346" width="372" height="152" rx="10" fill="#0b1120" stroke="#334155" stroke-width="1.2"/>
+  <rect x="545" y="346" width="372" height="26" rx="10" fill="#1e293b"/>
+  <text x="560" y="363" class="sans" font-size="11" font-weight="700" fill="#f8fafc">🖥️ AIKD Studio Web UI — http://127.0.0.1:9090/ui</text>
+  <text x="905" y="363" text-anchor="end" class="mono" font-size="10" fill="#34d399">4 Tabs</text>
+
+  <!-- Mini Stat Pills inside UI Preview -->
+  <rect x="557" y="382" width="82" height="46" rx="6" fill="#161f33" stroke="#1e293b"/>
+  <text x="565" y="397" class="sans" font-size="9" fill="#94a3b8">FILES</text>
+  <text x="565" y="418" class="mono" font-size="15" font-weight="800" fill="#f8fafc">3,966</text>
+
+  <rect x="646" y="382" width="86" height="46" rx="6" fill="#161f33" stroke="#1e293b"/>
+  <text x="654" y="397" class="sans" font-size="9" fill="#94a3b8">CHUNKS</text>
+  <text x="654" y="418" class="mono" font-size="15" font-weight="800" fill="#38bdf8">26,846</text>
+
+  <rect x="739" y="382" width="82" height="46" rx="6" fill="#161f33" stroke="#1e293b"/>
+  <text x="747" y="397" class="sans" font-size="9" fill="#94a3b8">SYMBOLS</text>
+  <text x="747" y="418" class="mono" font-size="15" font-weight="800" fill="#34d399">2,848</text>
+
+  <rect x="828" y="382" width="77" height="46" rx="6" fill="#161f33" stroke="#1e293b"/>
+  <text x="836" y="397" class="sans" font-size="9" fill="#94a3b8">MEMORY</text>
+  <text x="836" y="418" class="mono" font-size="15" font-weight="800" fill="#fbbf24">93 Rules</text>
+
+  <!-- Mini Feature Badges -->
+  <rect x="557" y="438" width="170" height="22" rx="5" fill="#064e3b"/>
+  <text x="642" y="453" text-anchor="middle" class="sans" font-size="10" font-weight="600" fill="#34d399">✓ Live BM25 &amp; Symbol Playground</text>
+  <rect x="735" y="438" width="170" height="22" rx="5" fill="#1e3a8a"/>
+  <text x="820" y="453" text-anchor="middle" class="sans" font-size="10" font-weight="600" fill="#93c5fd">✓ Visual config.yaml Settings</text>
+  <rect x="557" y="466" width="348" height="22" rx="5" fill="#161f33"/>
+  <text x="731" y="481" text-anchor="middle" class="mono" font-size="10" fill="#cbd5e1">Cross-Platform Releases: Windows (.exe) · Linux (x64/ARM64) · macOS</text>
+</svg>

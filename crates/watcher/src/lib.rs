@@ -6,12 +6,55 @@ use notify::Watcher;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// Pure decision: what should the watcher do with one (event, path) pair?
+/// Extracted so the atomic-save matrix is unit-testable without spawning
+/// a real OS watcher. `exists` = does the path exist when we process it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchAction {
+    Index,
+    Remove,
+    Ignore,
+}
+
+pub fn classify_watched_event(kind: &notify::EventKind, exists: bool) -> WatchAction {
+    use notify::event::ModifyKind;
+    use notify::EventKind::*;
+    match kind {
+        Create(_) => {
+            if exists {
+                WatchAction::Index
+            } else {
+                WatchAction::Ignore
+            }
+        }
+        // Atomic save (VS Code / vim / JetBrains): temp file renamed over
+        // the target arrives as Modify(Name) on a path that EXISTS.
+        // Previously only the !exists arm was handled, so the content
+        // change was silently dropped.
+        Modify(ModifyKind::Name(_)) => {
+            if exists {
+                WatchAction::Index
+            } else {
+                WatchAction::Remove
+            }
+        }
+        Modify(_) => {
+            if exists {
+                WatchAction::Index
+            } else {
+                WatchAction::Ignore
+            }
+        }
+        Remove(_) => WatchAction::Remove,
+        _ => WatchAction::Ignore,
+    }
+}
+
 pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
     let cfg = Config::load_validated(config_path);
     println!("Starting AIKD file watcher (debounce: {debounce_ms}ms)...");
     println!("Watching paths: {:?}", cfg.scan.include_paths);
     println!("Press Ctrl+C to stop.\n");
-
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(tx)?;
     let debounce_duration = std::time::Duration::from_millis(debounce_ms);
@@ -43,11 +86,29 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                         .paths
                         .into_iter()
                         .filter(|p| {
-                            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                                cfg.scan.include_extensions.iter().any(|e2| e2 == ext)
-                            } else {
-                                false
+                            if p.ancestors().any(|a| {
+                                a.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|n| cfg.should_exclude_dir(n))
+                                    .unwrap_or(false)
+                            }) {
+                                return false;
                             }
+                            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            let ext = p.extension().and_then(|e| e.to_str());
+                            if cfg.should_exclude_file(fname)
+                                || !cfg.matches_filename_filter(fname)
+                                || cfg.should_exclude_extension(fname, ext)
+                                || !cfg.should_include_extension(ext)
+                            {
+                                return false;
+                            }
+                            if let Ok(m) = std::fs::metadata(p) {
+                                if !cfg.check_file_size(m.len()) {
+                                    return false;
+                                }
+                            }
+                            true
                         })
                         .collect();
                     // Lock mutex for thread-safe access
@@ -146,6 +207,39 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                                 ps
                             );
                         }
+                        // Atomic save (VS Code, vim, JetBrains): editor writes
+                        // a temp file then renames it over the target. notify
+                        // reports this as Modify(Name) on a path that EXISTS
+                        // — without this arm the change is silently dropped.
+                        notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
+                            if path.exists() {
+                                if let Ok(content) = std::fs::read_to_string(path) {
+                                    if cfg.matches_content_filter(&content) {
+                                        let chunks = aikd_chunker::chunk_file(
+                                            &ps,
+                                            &content,
+                                            cfg.max_chunk_tokens(),
+                                            cfg.min_chunk_tokens(),
+                                        );
+                                        to_index.push((ps.clone(), chunks));
+                                        changed += 1;
+                                        println!(
+                                            "[{}] ~ Renamed/atomic-save: {}",
+                                            chrono::Local::now().format("%H:%M:%S"),
+                                            ps
+                                        );
+                                    }
+                                }
+                            } else {
+                                to_remove.push(ps.clone());
+                                removed += 1;
+                                println!(
+                                    "[{}] - Removed/Renamed: {}",
+                                    chrono::Local::now().format("%H:%M:%S"),
+                                    ps
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -168,7 +262,8 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                 // first (chunk IDs must be read before DB rows are gone),
                 // then delete their rows from the database.
                 if !to_remove.is_empty() {
-                    if let Err(e) = aikd_scanner::remove_from_tantivy(&database, &tantivy, &to_remove)
+                    if let Err(e) =
+                        aikd_scanner::remove_from_tantivy(&database, &tantivy, &to_remove)
                     {
                         log::warn!("Failed to remove docs from tantivy: {e}");
                     }
@@ -191,6 +286,7 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
                 }
 
                 if changed + created + removed > 0 {
+                    let _ = aikd_storage::atlas::mark_all_stale_if_changed(database.conn());
                     println!(
                         "[{}] Summary: +{} created, ~{} changed, -{} removed\n",
                         chrono::Local::now().format("%H:%M:%S"),
@@ -207,4 +303,45 @@ pub async fn run_watcher(config_path: &str, debounce_ms: u64) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod classifier_tests {
+    use super::*;
+    use notify::event::{ModifyKind, RenameMode};
+
+    #[test]
+    fn atomic_save_rename_to_existing_path_indexes() {
+        // VS Code atomic save: Modify(Name, To) on existing target.
+        let kind = notify::EventKind::Modify(ModifyKind::Name(RenameMode::To));
+        assert_eq!(classify_watched_event(&kind, true), WatchAction::Index);
+        // Rename-away: target gone.
+        let kind = notify::EventKind::Modify(ModifyKind::Name(RenameMode::From));
+        assert_eq!(classify_watched_event(&kind, false), WatchAction::Remove);
+    }
+
+    #[test]
+    fn create_modify_remove_matrix() {
+        assert_eq!(
+            classify_watched_event(
+                &notify::EventKind::Create(notify::event::CreateKind::File),
+                true
+            ),
+            WatchAction::Index
+        );
+        assert_eq!(
+            classify_watched_event(
+                &notify::EventKind::Remove(notify::event::RemoveKind::File),
+                true
+            ),
+            WatchAction::Remove
+        );
+        assert_eq!(
+            classify_watched_event(
+                &notify::EventKind::Access(notify::event::AccessKind::Read),
+                true
+            ),
+            WatchAction::Ignore
+        );
+    }
 }

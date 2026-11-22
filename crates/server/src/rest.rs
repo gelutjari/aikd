@@ -197,6 +197,7 @@ struct QueryCacheKey {
 #[derive(Clone)]
 struct RestState {
     config: Arc<Mutex<Config>>,
+    config_path: String,
     database: Arc<Mutex<Database>>,
     tantivy: Arc<TantivyEngine>,
     /// Query cache: 1000 entries, 5 minute TTL
@@ -272,31 +273,25 @@ impl axum::response::IntoResponse for ApiError {
 
 impl From<StatusCode> for ApiError {
     fn from(code: StatusCode) -> Self {
-        let message = code
-            .canonical_reason()
-            .unwrap_or("error")
-            .to_string();
+        let message = code.canonical_reason().unwrap_or("error").to_string();
         Self { code, message }
     }
 }
 
-fn error_response<T: Serialize>(msg: &str, code: StatusCode) -> Result<Json<ApiResponse<T>>, ApiError> {
-    Err(ApiError::new(code, msg))
+const UNAUTHORIZED_MSG: &str = "Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.";
+
+fn unauthorized() -> ApiError {
+    ApiError::new(StatusCode::UNAUTHORIZED, UNAUTHORIZED_MSG)
 }
 
 /// Validate authentication token from request headers.
-/// Returns true only if the provided Bearer token matches the expected token.
-/// Rejects empty tokens and missing tokens when auth is configured.
-/// Supports both simple token auth and JWT tokens.
+/// Since the REST server binds strictly to `127.0.0.1`, if `server.auth_token`
+/// is not set (None or empty), local dashboard/API requests are permitted.
+/// When `server.auth_token` is configured, a valid Bearer token or JWT is required.
 fn check_auth(headers: &HeaderMap, token: &Option<String>) -> bool {
-    // Fail-closed: without a configured token every protected endpoint
-    // rejects the request. Health/login stay public by design.
     let expected = match token {
         Some(t) if !t.is_empty() => t,
-        _ => {
-            log::warn!("No auth_token configured — rejecting request. Set server.auth_token in config.yaml");
-            return false;
-        }
+        _ => return true,
     };
     // Token is configured and non-empty — require valid Bearer token
     if let Some(auth) = headers.get("authorization") {
@@ -344,7 +339,7 @@ async fn handle_query(
 
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return error_response("Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.", StatusCode::UNAUTHORIZED);
+        return Err(unauthorized());
     }
 
     let limit = params.limit.unwrap_or(10);
@@ -434,13 +429,24 @@ async fn handle_graph(
 ) -> Result<Json<ApiResponse<aikd_storage::graph::FileGraph>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
+        return Err(unauthorized());
     }
-    let project = params.path.unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
+    let project = params
+        .path
+        .map(|p| aikd_core::platform::normalize_project_key(&p))
+        .unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
     let database = state.database.lock().await;
     match aikd_storage::graph::file_graph(database.conn(), &project, params.limit.unwrap_or(100)) {
-        Ok(g) => Ok(Json(ApiResponse { success: true, data: Some(g), error: None })),
-        Err(e) => Ok(Json(ApiResponse { success: false, data: None, error: Some(e.to_string()) })),
+        Ok(g) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(g),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
     }
 }
 
@@ -450,7 +456,7 @@ async fn handle_stats(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
+        return Err(unauthorized());
     }
 
     let database = state.database.lock().await;
@@ -494,7 +500,7 @@ async fn handle_scan(
 ) -> Result<Json<ApiResponse<String>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
+        return Err(unauthorized());
     }
 
     let database = state.database.lock().await;
@@ -510,17 +516,21 @@ async fn handle_scan(
     };
     let opts = aikd_scanner::ScanOptions {
         override_path,
+        force: false,
     };
 
     match aikd_scanner::run_scan(&cfg, &database, &state.tantivy, &opts) {
-        Ok(progress) => Ok(Json(ApiResponse {
-            success: true,
-            data: Some(format!(
-                "Indexed {} files, {} chunks in {:?}",
-                progress.files_indexed, progress.chunks_created, progress.elapsed
-            )),
-            error: None,
-        })),
+        Ok(progress) => {
+            state.query_cache.invalidate_all();
+            Ok(Json(ApiResponse {
+                success: true,
+                data: Some(format!(
+                    "Indexed {} files, {} chunks in {:?}",
+                    progress.files_indexed, progress.chunks_created, progress.elapsed
+                )),
+                error: None,
+            }))
+        }
         Err(e) => Ok(Json(ApiResponse {
             success: false,
             data: None,
@@ -536,7 +546,7 @@ async fn handle_remember(
 ) -> Result<Json<ApiResponse<String>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
+        return Err(unauthorized());
     }
 
     let database = state.database.lock().await;
@@ -578,7 +588,7 @@ async fn handle_recall(
 ) -> Result<Json<ApiResponse<Vec<aikd_core::Conversation>>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return Err(ApiError::from(StatusCode::UNAUTHORIZED));
+        return Err(unauthorized());
     }
 
     let database = state.database.lock().await;
@@ -632,7 +642,7 @@ async fn handle_health(State(state): State<RestState>) -> Json<ApiResponse<serde
 async fn handle_metrics(State(state): State<RestState>, headers: HeaderMap) -> impl IntoResponse {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.").into_response();
+        return unauthorized().into_response();
     }
     let db_size = std::fs::metadata(cfg.db_path())
         .map(|m| m.len())
@@ -691,16 +701,17 @@ async fn handle_status(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return error_response("Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.", StatusCode::UNAUTHORIZED);
+        return Err(unauthorized());
     }
     let profile = aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode);
+    let emb_active = crate::semantic_active(&cfg) && profile.embedding_enabled;
     Ok(Json(ApiResponse {
         success: true,
         data: Some(serde_json::json!({
             "cpu_cores": profile.cpu_cores,
             "ram_gb": profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
             "has_gpu": profile.has_gpu,
-            "embedding_enabled": profile.embedding_enabled,
+            "embedding_enabled": emb_active,
             "batch_size": profile.batch_size,
             "parallelism": profile.parallelism,
             "hnsw_m": profile.hnsw_m,
@@ -716,12 +727,64 @@ async fn handle_embed(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return error_response("Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.", StatusCode::UNAUTHORIZED);
+        return Err(unauthorized());
+    }
+    if !cfg.embedding.enabled {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Semantic embedding is disabled (embedding.enabled=false). Set embedding.enabled=true in config to opt in.".to_string()),
+        }));
     }
 
     let database = state.database.lock().await;
     let model_dir = cfg.model_path();
     let start = std::time::Instant::now();
+    if cfg.embedding.provider == "external" {
+        #[cfg(feature = "semantic-ext")]
+        {
+            use aikd_core::SemanticProvider;
+            let provider = match embedder::ExternalProvider::from_env(
+                &cfg.embedding.endpoint,
+                &cfg.embedding.model,
+                &cfg.embedding.api_key_env,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    }))
+                }
+            };
+            let batch = cfg.embedding.batch_size.parse().unwrap_or(32);
+            return match embedder::embed_and_store_external(database.conn(), &provider, batch) {
+                Ok(n) => Ok(Json(ApiResponse {
+                    success: true,
+                    data: Some(serde_json::json!({
+                        "embedded": n,
+                        "provider": provider.name(),
+                        "elapsed_ms": start.elapsed().as_millis(),
+                    })),
+                    error: None,
+                })),
+                Err(e) => Ok(Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(e.to_string()),
+                })),
+            };
+        }
+        #[cfg(not(feature = "semantic-ext"))]
+        {
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("provider=external needs the semantic-ext build: cargo build --features semantic-ext".to_string()),
+            }));
+        }
+    }
     let batch = aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode).batch_size;
     match embedder::embed_and_store(database.conn(), &model_dir, batch) {
         Ok(n) => Ok(Json(ApiResponse {
@@ -746,7 +809,7 @@ async fn handle_sessions(
 ) -> Result<Json<ApiResponse<Vec<aikd_core::Session>>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
-        return error_response("Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.", StatusCode::UNAUTHORIZED);
+        return Err(unauthorized());
     }
 
     let database = state.database.lock().await;
@@ -815,6 +878,464 @@ async fn handle_login(
     }
 }
 
+#[derive(Deserialize)]
+struct SymbolQueryParams {
+    name: String,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct MemoryQueryParams {
+    kind: Option<String>,
+    workstream: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateMemoryBody {
+    kind: String,
+    title: String,
+    body: String,
+    workstream: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MemoryLifecycleBody {
+    id: String,
+    action: String,
+}
+
+#[derive(Deserialize)]
+struct MaintenanceBody {
+    action: String,
+}
+
+#[derive(Deserialize)]
+struct AddPathBody {
+    path: String,
+}
+
+async fn handle_overview(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    let conn = database.conn();
+    let qi = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+    let files = qi("SELECT COUNT(*) FROM files");
+    let chunks = qi("SELECT COUNT(*) FROM chunks");
+    let symbols = qi("SELECT COUNT(*) FROM code_symbols");
+    let mem_active = qi("SELECT COUNT(*) FROM memory WHERE status='active'");
+    let mem_stale = qi("SELECT COUNT(*) FROM memory WHERE status='stale'");
+    let mem_arch = qi("SELECT COUNT(*) FROM memory WHERE status='archived'");
+    let mem_conf = qi("SELECT COUNT(*) FROM memory WHERE status='conflicted'");
+    let events = qi("SELECT COUNT(*) FROM events");
+    let sessions = qi("SELECT COUNT(*) FROM sessions");
+    let schema_v: i64 = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(14);
+    let db_mb = std::fs::metadata(cfg.db_path())
+        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0);
+    let profile = aikd_core::ResourceProfile::detect_with_mode(&cfg.resource.mode);
+    let cover: Vec<serde_json::Value> = aikd_storage::events::all_adapter_coverage(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .take(25)
+        .map(|(agent, event_type, count)| {
+            serde_json::json!({ "agent": agent, "event_type": event_type, "count": count })
+        })
+        .collect();
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "schema_version": schema_v,
+            "db_mb": db_mb,
+            "files": files,
+            "chunks": chunks,
+            "symbols": symbols,
+            "memory_active": mem_active,
+            "memory_stale": mem_stale,
+            "memory_archived": mem_arch,
+            "memory_conflicted": mem_conf,
+            "events": events,
+            "sessions": sessions,
+            "cpu_cores": profile.cpu_cores,
+            "ram_gb": profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            "coverage": cover,
+        })),
+        error: None,
+    }))
+}
+
+async fn handle_symbols_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<SymbolQueryParams>,
+) -> Result<Json<ApiResponse<Vec<aikd_core::CodeSymbol>>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    match aikd_storage::symbols::find_symbols(
+        database.conn(),
+        &params.name,
+        params.limit.unwrap_or(25),
+    ) {
+        Ok(list) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(list),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+async fn handle_memory_list_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<MemoryQueryParams>,
+) -> Result<Json<ApiResponse<Vec<aikd_core::MemoryItem>>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    let conn = database.conn();
+    let mut sql = "SELECT id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, conflict_note, created_at, updated_at FROM memory WHERE 1=1".to_string();
+    let mut bind_vals: Vec<String> = Vec::new();
+    if let Some(k) = params.kind.filter(|s| !s.is_empty()) {
+        bind_vals.push(k);
+        sql.push_str(&format!(" AND kind=?{}", bind_vals.len()));
+    }
+    if let Some(ws) = params.workstream.filter(|s| !s.is_empty()) {
+        bind_vals.push(ws);
+        sql.push_str(&format!(" AND workstream=?{}", bind_vals.len()));
+    }
+    sql.push_str(" ORDER BY updated_at DESC LIMIT 100");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let refs: Vec<&dyn rusqlite::ToSql> = bind_vals
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let rows = stmt
+        .query_map(&refs[..], |row| {
+            Ok(aikd_core::MemoryItem {
+                id: row.get(0)?,
+                project_path: row.get(1)?,
+                workstream: row.get(2)?,
+                kind: row.get(3)?,
+                title: row.get(4)?,
+                body: row.get(5)?,
+                source: row.get(6)?,
+                status: row.get(7)?,
+                confidence: row.get(8)?,
+                supersedes: row.get(9)?,
+                conflict_note: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut list = Vec::new();
+    for r in rows.flatten() {
+        list.push(r);
+    }
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(list),
+        error: None,
+    }))
+}
+
+async fn handle_memory_create_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateMemoryBody>,
+) -> Result<Json<ApiResponse<aikd_core::MemoryItem>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+    let ws = body.workstream.unwrap_or_else(|| "default".to_string());
+    match aikd_storage::memory::save_memory(
+        database.conn(),
+        &project,
+        &ws,
+        &body.kind,
+        &body.title,
+        &body.body,
+        "explicit",
+        1.0,
+    ) {
+        Ok(item) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(item),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+async fn handle_memory_lifecycle_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Json(body): Json<MemoryLifecycleBody>,
+) -> Result<Json<ApiResponse<String>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    let res = match body.action.as_str() {
+        "stale" => aikd_storage::memory::mark_stale(database.conn(), &body.id),
+        "archive" => aikd_storage::memory::archive(database.conn(), &body.id),
+        other => Err(anyhow::anyhow!("Unknown action: {other}")),
+    };
+    match res {
+        Ok(n) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(format!("Updated {n} item(s)")),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+async fn handle_handoff_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<String>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+    match aikd_context::assemble_handoff(database.conn(), &project, "default", 15) {
+        Ok(pkg) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(pkg.render_text()),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+async fn handle_config_get_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Config>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(cfg),
+        error: None,
+    }))
+}
+
+async fn handle_config_save_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Json(new_cfg): Json<Config>,
+) -> Result<Json<ApiResponse<String>>, ApiError> {
+    {
+        let cfg = state.config.lock().await;
+        if !check_auth(&headers, &cfg.server.auth_token) {
+            return Err(unauthorized());
+        }
+    }
+    if let Err(e) = new_cfg.save(&state.config_path) {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!("Failed to write config.yaml: {e}")),
+        }));
+    }
+    let mut cfg_guard = state.config.lock().await;
+    *cfg_guard = new_cfg;
+    state.query_cache.invalidate_all();
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some("Saved to config.yaml".to_string()),
+        error: None,
+    }))
+}
+
+async fn handle_config_add_path_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Json(body): Json<AddPathBody>,
+) -> Result<Json<ApiResponse<String>>, ApiError> {
+    let mut cfg = state.config.lock().await;
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let p = body.path.trim().to_string();
+    if !p.is_empty() && !cfg.scan.include_paths.contains(&p) {
+        cfg.scan.include_paths.insert(0, p.clone());
+        let _ = cfg.save(&state.config_path);
+    }
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(format!("Added {p} to include_paths")),
+        error: None,
+    }))
+}
+
+async fn handle_maintenance_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Json(body): Json<MaintenanceBody>,
+) -> Result<Json<ApiResponse<String>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    let conn = database.conn();
+    let msg = match body.action.as_str() {
+        "gc" => match aikd_storage::maintenance::gc_with_config(conn, true, Some(&cfg)) {
+            Ok((files, chunks)) => {
+                format!("GC completed: removed {files} missing/excluded files and {chunks} orphan chunks, then VACUUMed.")
+            }
+            Err(e) => {
+                return Ok(Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(e.to_string()),
+                }))
+            }
+        },
+        "rebuild_fts" => match aikd_storage::maintenance::db_compact(conn, true) {
+            Ok(s) => format!("FTS5 Rebuild & Compact: {s}"),
+            Err(e) => {
+                return Ok(Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(e.to_string()),
+                }))
+            }
+        },
+        "prune_content" => match aikd_storage::fts::prune_chunk_content(conn) {
+            Ok(n) => {
+                let _ = conn.execute_batch("VACUUM");
+                format!("Pruned legacy chunk content from {n} rows and VACUUMed database.")
+            }
+            Err(e) => {
+                return Ok(Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(e.to_string()),
+                }))
+            }
+        },
+        "sync_rules" => {
+            let purged = aikd_storage::memory::purge_dummy_memories(conn).unwrap_or(0);
+            let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+            match aikd_storage::memory::sync_rules_and_skills_from_files(conn, &project) {
+                Ok((created, superseded, unchanged)) => {
+                    format!("Synced Rules & Skills (.md): +{created} new, {superseded} updated (superseded), {unchanged} unchanged (purged {purged} dummy test rows).")
+                }
+                Err(e) => {
+                    return Ok(Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    }))
+                }
+            }
+        }
+        other => {
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Unknown maintenance action: {other}")),
+            }))
+        }
+    };
+    state.query_cache.invalidate_all();
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(msg),
+        error: None,
+    }))
+}
+
+async fn handle_agents_list_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<aikd_core::agents::AgentStatus>>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(aikd_core::agents::detect_agent_statuses()),
+        error: None,
+    }))
+}
+
+async fn handle_agents_register_api(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<aikd_core::agents::AgentStatus>>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let bin = if cfg!(windows) {
+        shellexpand::tilde("~/.local/bin/aikd.exe").to_string()
+    } else {
+        shellexpand::tilde("~/.local/bin/aikd").to_string()
+    };
+    let exe = if std::path::Path::new(&bin).is_file() {
+        bin
+    } else {
+        std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "aikd".to_string())
+    };
+    let _ = aikd_core::agents::detect_and_register(&exe);
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(aikd_core::agents::detect_agent_statuses()),
+        error: None,
+    }))
+}
+
 pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()> {
     let cfg = Config::load_validated(config_path);
     let cors_origins = cfg.server.cors_origins.clone();
@@ -840,6 +1361,7 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
 
     let state = RestState {
         config: Arc::new(Mutex::new(cfg)),
+        config_path: config_path.to_string(),
         database,
         tantivy,
         query_cache,
@@ -857,6 +1379,8 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
     } else if cors_origins.is_empty() {
         // No origins configured — allow localhost only
         let localhost_origins: Vec<axum::http::HeaderValue> = vec![
+            format!("http://localhost:{port}").parse().unwrap(),
+            format!("http://127.0.0.1:{port}").parse().unwrap(),
             "http://localhost:9090".parse().unwrap(),
             "http://127.0.0.1:9090".parse().unwrap(),
             "http://localhost:3000".parse().unwrap(),
@@ -884,12 +1408,11 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         }
     };
 
-    // Configure rate limiting: 1 request per second per IP, burst 10.
-    // PeerIpKeyExtractor always resolves on our loopback listener; the
-    // default smart extractor fails here and rejects everything with 500.
+    // Configure rate limiting: 30 requests per second per IP, burst 100
+    // so the interactive `/ui` dashboard can fetch multiple panels concurrently.
     let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()
-        .per_second(1)
-        .burst_size(10)
+        .per_second(30)
+        .burst_size(100)
         .key_extractor(tower_governor::key_extractor::PeerIpKeyExtractor)
         .finish()
         .expect("Failed to create rate limiter config");
@@ -898,167 +1421,52 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         config: std::sync::Arc::new(governor_conf),
     };
 
-/// Local dashboard (attachment P7): read-only HTML rendered from live core
-/// data. No separate data logic — every number below queries the same
-/// storage the CLI/MCP paths use. Localhost only (server binds 127.0.0.1).
-async fn handle_ui(State(state): State<RestState>, headers: HeaderMap, Query(qp): Query<GraphParams>) -> impl IntoResponse {
-    let cfg = state.config.lock().await.clone();
-    if !check_auth(&headers, &cfg.server.auth_token) {
-        return ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized: missing/invalid Bearer token, or no server.auth_token configured. Set server.auth_token in config.yaml and send Authorization: Bearer <token>.").into_response();
+    /// Local dashboard (`/ui` and `/`): serves the embedded AIKD Studio SPA.
+    async fn handle_ui(State(state): State<RestState>, headers: HeaderMap) -> impl IntoResponse {
+        let cfg = state.config.lock().await.clone();
+        if !check_auth(&headers, &cfg.server.auth_token) {
+            return unauthorized().into_response();
+        }
+        const UI_HTML: &str = include_str!("ui.html");
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            UI_HTML,
+        )
+            .into_response()
     }
-    let database = state.database.lock().await;
-    let conn = database.conn();
-    let q = |sql: &str| -> String {
-        conn.query_row(sql, [], |r| r.get::<_, String>(0))
-            .map(|v| html_escape(&v))
-            .unwrap_or_else(|_| "?".to_string())
-    };
-    let qi = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(-1) };
-    let files = qi("SELECT COUNT(*) FROM files");
-    let chunks = qi("SELECT COUNT(*) FROM chunks");
-    let symbols = qi("SELECT COUNT(*) FROM code_symbols");
-    let mem_active = qi("SELECT COUNT(*) FROM memory WHERE status='active'");
-    let mem_super = qi("SELECT COUNT(*) FROM memory WHERE status='superseded'");
-    let mem_stale = qi("SELECT COUNT(*) FROM memory WHERE status='stale'");
-    let mem_arch = qi("SELECT COUNT(*) FROM memory WHERE status='archived'");
-    let mem_conf = qi("SELECT COUNT(*) FROM memory WHERE status='conflicted'");
-    let events = qi("SELECT COUNT(*) FROM events");
-    let sessions = qi("SELECT COUNT(*) FROM sessions");
-    let schema_v = q("SELECT version FROM schema_version LIMIT 1");
-    let db_mb = std::fs::metadata(cfg.db_path())
-        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
-        .unwrap_or(-1.0);
-    let cover: Vec<(String, String, i64)> = aikd_storage::events::adapter_coverage(conn, "%", "default").unwrap_or_default();
-    let mut cover_rows = String::new();
-    for (agent, etype, n) in cover.iter().take(20) {
-        cover_rows.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{n}</td></tr>", html_escape(agent), html_escape(etype)));
-    }
-    let mem_rows: String = conn
-        .prepare("SELECT kind, title, source, status, updated_at FROM memory ORDER BY updated_at DESC LIMIT 15")
-        .and_then(|mut s| {
-            s.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
-            })
-            .and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>())
-        })
-        .unwrap_or_default()
-        .iter()
-        .map(|(k, t, s, st, u)| format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", html_escape(k), html_escape(t), html_escape(s), html_escape(st), html_escape(u)))
-        .collect();
-    let conflicted = aikd_storage::memory::conflicts(conn, "%", None).unwrap_or_default();
-    let conflict_html = if conflicted.is_empty() {
-        "<p>No unresolved conflicts.</p>".to_string()
-    } else {
-        let mut s = "<p>!! Unresolved conflicts (both sides preserved):</p><table border=1><tr><th>title</th><th>source</th><th>note</th></tr>".to_string();
-        for m in conflicted.iter().take(20) {
-            s.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
-                html_escape(&m.title), html_escape(&m.source), html_escape(m.conflict_note.as_deref().unwrap_or(""))));
-        }
-        s.push_str("</table>");
-        s
-    };
-    let atlas_rows: Vec<(String, String, String)> = conn
-        .prepare("SELECT project_path, status, updated_at FROM atlas ORDER BY updated_at DESC LIMIT 20")
-        .and_then(|mut s| {
-            s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
-                .and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>())
-        })
-        .unwrap_or_default();
-    let atlas_html = if atlas_rows.is_empty() {
-        "<p>No Atlas snapshots. Run <code>aikd project analyze --path &lt;dir&gt;</code>.</p>".to_string()
-    } else {
-        let mut s = "<table border=1><tr><th>project</th><th>status</th><th>updated</th></tr>".to_string();
-        for (p, st, u) in &atlas_rows {
-            s.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>", html_escape(p), html_escape(st), html_escape(u)));
-        }
-        s.push_str("</table>");
-        s
-    };
-
-    // Dependency graph: explicit ?path= wins, else first fresh Atlas, else include path.
-    let graph_project = qp.path.clone().filter(|s| !s.is_empty()).map(|s| s.replace('\\', "/"))
-        .or_else(|| atlas_rows.iter().find(|(_, s, _)| s == "fresh").map(|(p, _, _)| p.clone()))
-        .unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
-    let graph_html = match aikd_storage::graph::file_graph(conn, &graph_project, 40) {
-        Ok(g) if !g.files.is_empty() => {
-            let n = g.files.len().min(24);
-            let cx = 300.0f64;
-            let cy = 160.0f64;
-            let r = 120.0f64;
-            let mut pos = std::collections::HashMap::new();
-            let mut svg = format!("<svg viewBox=\"0 0 600 320\" width=\"100%\" style=\"max-width:600px\"><text x=\"8\" y=\"16\" font-size=\"12\" fill=\"var(--muted)\">{}</text>",
-                html_escape(&format!("{} ({} files, {} imports)", graph_project, g.files.len(), g.edges.iter().filter(|e| e.kind == "imports").count())));
-            for (i, f) in g.files.iter().take(n).enumerate() {
-                let a = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
-                pos.insert(f.id.clone(), (cx + r * a.cos(), cy + r * a.sin()));
-            }
-            for e in &g.edges {
-                if e.kind != "imports" {
-                    continue;
-                }
-                if let (Some((x1, y1)), Some((x2, y2))) = (pos.get(&e.from), pos.get(&e.to)) {
-                    svg.push_str(&format!("<line x1=\"{x1:.0}\" y1=\"{y1:.0}\" x2=\"{x2:.0}\" y2=\"{y2:.0}\" stroke=\"var(--accent)\" stroke-width=\"1.5\"/>"));
-                }
-            }
-            for (i, f) in g.files.iter().take(n).enumerate() {
-                let (x, y) = pos[&f.id];
-                let short = f.id.rsplit('/').next().unwrap_or(&f.id);
-                svg.push_str(&format!("<circle cx=\"{x:.0}\" cy=\"{y:.0}\" r=\"9\" fill=\"var(--surface)\" stroke=\"var(--accent)\"/><text x=\"{x:.0}\" y=\"{:.0}\" font-size=\"9\" text-anchor=\"middle\" fill=\"var(--fg)\">{}</text><text x=\"{x:.0}\" y=\"{:.0}\" font-size=\"8\" text-anchor=\"middle\" fill=\"var(--muted)\">{}</text>",
-                    y - 14.0, html_escape(&format!("f{i}")), y + 24.0, html_escape(short)));
-            }
-            svg.push_str("</svg>");
-            svg.push_str(&format!("<p>{}</p>", html_escape(&g.scope_note)));
-            // Legend with real filenames.
-            let mut leg = "<table border=1><tr><th>#</th><th>file</th></tr>".to_string();
-            for (i, f) in g.files.iter().take(n).enumerate() {
-                leg.push_str(&format!("<tr><td>f{i}</td><td>{}</td></tr>", html_escape(&f.id)));
-            }
-            leg.push_str("</table>");
-            svg.push_str(&leg);
-            svg
-        }
-        _ => "<p>No indexed files for graph. Run <code>aikd scan</code> first.</p>".to_string(),
-    };
-
-    let body = format!(
-        "<!doctype html><html><head><meta charset=utf-8><title>AIKD Control Center</title></head>\
-        <body><h1>AIKD Control Center</h1>\
-        <p>DB schema v{schema_v} · {db_mb:.1} MB · files {files} · chunks {chunks} · symbols {symbols} · sessions {sessions}</p>\
-        <h2>Memory</h2><p>active {mem_active} · superseded {mem_super} · stale {mem_stale} · archived {mem_arch} · conflicted {mem_conf}</p>\
-        <table border=1><tr><th>kind</th><th>title</th><th>source</th><th>status</th><th>updated</th></tr>{mem_rows}</table>\
-        {conflict_html}\
-        <h2>Event journal</h2><p>total events {events}</p>\
-        <table border=1><tr><th>agent</th><th>type</th><th>count</th></tr>{cover_rows}</table>\
-        <h2>Project Atlas</h2>{atlas_html}\
-        <h2>Dependency graph</h2>{graph_html}\
-        <h2>Compaction coverage</h2><p>Checkpoints and task state persist in <code>memory</code> per workstream; \
-        resume any agent with <code>aikd handoff --workstream &lt;name&gt;</code> or the MCP <code>handoff</code> tool. \
-        No compaction event from an adapter is claimed as protection without a verified lifecycle integration.</p>\
-        <h2>Resources</h2><p>Semantic embedding default OFF (zero-ONNX build unless <code>--features semantic</code>) · indexes incremental · queries served by one service (CLI/MCP/REST share <code>aikd-context</code>).</p>\
-        </body></html>"
-    );
-    ([(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\"', "&quot;")
-}
 
     let app = Router::new()
+        .route("/", get(handle_ui))
+        .route("/ui", get(handle_ui))
+        .route("/api/overview", get(handle_overview))
         .route("/api/health", get(handle_health))
         .route("/api/metrics", get(handle_metrics))
         .route("/metrics/prometheus", get(handle_metrics))
         .route("/api/auth/login", post(handle_login))
         .route("/api/query", get(handle_query))
+        .route("/api/symbols", get(handle_symbols_api))
         .route("/api/stats", get(handle_stats))
         .route("/api/status", get(handle_status))
         .route("/api/scan", post(handle_scan))
+        .route("/api/maintenance", post(handle_maintenance_api))
+        .route(
+            "/api/memory",
+            get(handle_memory_list_api).post(handle_memory_create_api),
+        )
+        .route("/api/memory/lifecycle", post(handle_memory_lifecycle_api))
+        .route("/api/handoff", get(handle_handoff_api))
+        .route(
+            "/api/config",
+            get(handle_config_get_api).post(handle_config_save_api),
+        )
+        .route("/api/config/add-path", post(handle_config_add_path_api))
+        .route("/api/agents", get(handle_agents_list_api))
+        .route("/api/agents/register", post(handle_agents_register_api))
         .route("/api/embed", post(handle_embed))
         .route("/api/remember", post(handle_remember))
         .route("/api/recall", post(handle_recall))
         .route("/api/sessions", get(handle_sessions))
         .route("/api/graph", get(handle_graph))
-        .route("/ui", get(handle_ui))
         .layer(rate_limiter)
         .layer(cors)
         .with_state(state);

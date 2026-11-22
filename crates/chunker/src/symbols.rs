@@ -14,6 +14,7 @@ fn language_name(lang: SourceLanguage) -> Option<&'static str> {
         SourceLanguage::TypeScript => Some("typescript"),
         SourceLanguage::JavaScript => Some("javascript"),
         SourceLanguage::Go => Some("go"),
+        SourceLanguage::CSharp => Some("csharp"),
         SourceLanguage::Unknown => None,
     }
 }
@@ -35,14 +36,16 @@ fn parse_heading(heading: &str, lang: SourceLanguage) -> Option<(String, String,
     if words.is_empty() {
         return None;
     }
-    let visibility = if words[0] == "pub" || words.iter().any(|w| *w == "export") {
+    let visibility = if words[0] == "pub" || words[0] == "public" || words.contains(&"export") {
         "public"
     } else {
         "private"
     };
     match lang {
         SourceLanguage::Rust => {
-            let kinds = ["fn", "struct", "enum", "trait", "impl", "const", "static", "type", "mod"];
+            let kinds = [
+                "fn", "struct", "enum", "trait", "impl", "const", "static", "type", "mod",
+            ];
             let pos = words.iter().position(|w| kinds.contains(w))?;
             if pos > 3 {
                 return None;
@@ -65,7 +68,11 @@ fn parse_heading(heading: &str, lang: SourceLanguage) -> Option<(String, String,
             if pos > 3 {
                 return None;
             }
-            let kind = if words[pos] == "def" { "function" } else { "class" };
+            let kind = if words[pos] == "def" {
+                "function"
+            } else {
+                "class"
+            };
             let name = ident(words.get(pos + 1)?);
             if name.is_empty() {
                 return None;
@@ -77,14 +84,21 @@ fn parse_heading(heading: &str, lang: SourceLanguage) -> Option<(String, String,
                 if pos > 3 {
                     return None;
                 }
-                let kind = if words[pos] == "function" { "function" } else { "class" };
+                let kind = if words[pos] == "function" {
+                    "function"
+                } else {
+                    "class"
+                };
                 let name = ident(words.get(pos + 1)?);
                 if name.is_empty() {
                     return None;
                 }
                 return Some((kind.to_string(), name, visibility.to_string()));
             }
-            if let Some(pos) = words.iter().position(|w| *w == "const" || *w == "let" || *w == "var") {
+            if let Some(pos) = words
+                .iter()
+                .position(|w| *w == "const" || *w == "let" || *w == "var")
+            {
                 if pos > 3 {
                     return None;
                 }
@@ -124,6 +138,39 @@ fn parse_heading(heading: &str, lang: SourceLanguage) -> Option<(String, String,
             }
             None
         }
+        SourceLanguage::CSharp => {
+            let kinds = ["class", "struct", "interface", "enum", "record"];
+            if let Some(pos) = words.iter().position(|w| kinds.contains(w)) {
+                if pos > 3 {
+                    return None;
+                }
+                let name = ident(words.get(pos + 1)?);
+                if name.is_empty() {
+                    return None;
+                }
+                return Some((words[pos].to_string(), name, visibility.to_string()));
+            }
+            // Method declarations with explicit access modifier: `public static int Foo(...)`
+            if matches!(words[0], "public" | "private" | "internal" | "protected")
+                && heading.contains('(')
+            {
+                for w in &words[1..] {
+                    if let Some(prefix) = w.split('(').next() {
+                        if w.contains('(') {
+                            let name = ident(prefix);
+                            if !name.is_empty() {
+                                return Some((
+                                    "function".to_string(),
+                                    name,
+                                    visibility.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
         SourceLanguage::Unknown => None,
     }
 }
@@ -142,7 +189,14 @@ pub fn extract_symbols(file_path: &str, chunks: &[Chunk]) -> Vec<CodeSymbol> {
         for (i, line) in c.content.lines().enumerate() {
             let trimmed = line.trim_start();
             // Skip comments and attributes to cut obvious false positives.
-            if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("--") || trimmed.starts_with('*') || trimmed.starts_with("/*") || trimmed.starts_with("#[") || trimmed.starts_with('@') {
+            if trimmed.starts_with("//")
+                || trimmed.starts_with('#')
+                || trimmed.starts_with("--")
+                || trimmed.starts_with('*')
+                || trimmed.starts_with("/*")
+                || trimmed.starts_with("#[")
+                || trimmed.starts_with('@')
+            {
                 continue;
             }
             if let Some((kind, name, visibility)) = parse_heading(trimmed, lang) {
@@ -200,13 +254,28 @@ mod tests {
 
     #[test]
     fn python_and_go_and_js() {
-        let py = extract_symbols("a.py", &[chunk("def process(self):\n    pass\n\nclass Foo:\n    pass")]);
+        let py = extract_symbols(
+            "a.py",
+            &[chunk(
+                "def process(self):\n    pass\n\nclass Foo:\n    pass",
+            )],
+        );
         assert_eq!(py[0].name, "process");
         assert_eq!(py[1].kind, "class");
-        let go = extract_symbols("a.go", &[chunk("func (s *Server) Start() {\n}\n\ntype Config struct {\n}")]);
+        let go = extract_symbols(
+            "a.go",
+            &[chunk(
+                "func (s *Server) Start() {\n}\n\ntype Config struct {\n}",
+            )],
+        );
         assert_eq!(go[0].name, "Start");
         assert_eq!(go[1].name, "Config");
-        let js = extract_symbols("a.ts", &[chunk("export function handle(x) {\n}\n\nexport const router = express()")]);
+        let js = extract_symbols(
+            "a.ts",
+            &[chunk(
+                "export function handle(x) {\n}\n\nexport const router = express()",
+            )],
+        );
         assert_eq!(js[0].name, "handle");
         assert_eq!(js[0].visibility, "public");
         assert_eq!(js[1].name, "router");
@@ -224,5 +293,24 @@ mod tests {
     fn non_code_yields_nothing() {
         assert!(extract_symbols("a.md", &[chunk("# Title")]).is_empty());
         assert!(extract_symbols("a.rs", &[chunk("")]).is_empty());
+    }
+
+    #[test]
+    fn csharp_and_cjs_symbols() {
+        let cs = extract_symbols(
+            "Service.cs",
+            &[chunk("public class OrderService {\n    public static int Compute(int x) { return x; }\n}\n")],
+        );
+        assert!(cs
+            .iter()
+            .any(|s| s.name == "OrderService" && s.kind == "class" && s.language == "csharp"));
+        assert!(cs
+            .iter()
+            .any(|s| s.name == "Compute" && s.kind == "function"));
+
+        let cjs = extract_symbols("mod.cjs", &[chunk("function greet() {}\n")]);
+        assert!(cjs
+            .iter()
+            .any(|s| s.name == "greet" && s.language == "javascript"));
     }
 }

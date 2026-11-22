@@ -18,7 +18,16 @@ const REST_HOST: &str = "127.0.0.1";
 const REST_PORT: u16 = 9090;
 
 fn aikd_exe() -> std::path::PathBuf {
-    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("aikd"))
+    let bin = if cfg!(windows) { "aikd.exe" } else { "aikd" };
+    if let Ok(cur) = std::env::current_exe() {
+        if let Some(dir) = cur.parent() {
+            let sibling = dir.join(bin);
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    std::path::PathBuf::from("aikd")
 }
 
 fn daemon_running() -> bool {
@@ -45,8 +54,11 @@ fn daemon_running() -> bool {
             }
         })
         .unwrap_or(false);
-    let tcp_ok =
-        TcpStream::connect_timeout(&format!("{REST_HOST}:{REST_PORT}").parse().unwrap(), Duration::from_millis(400)).is_ok();
+    let tcp_ok = TcpStream::connect_timeout(
+        &format!("{REST_HOST}:{REST_PORT}").parse().unwrap(),
+        Duration::from_millis(400),
+    )
+    .is_ok();
     pid_ok && tcp_ok
 }
 
@@ -66,7 +78,9 @@ fn open_ui() {
     let url = format!("http://{REST_HOST}:{REST_PORT}/ui");
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("cmd").args(["/C", "start", "", &url]).status();
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .status();
     }
     #[cfg(not(windows))]
     {
@@ -75,36 +89,41 @@ fn open_ui() {
 }
 
 fn load_icon() -> Option<tray_icon::Icon> {
-    // Prefer the repo logo next to the exe; fall back to a 1x1 icon.
-    let candidates = [
-        aikd_exe().parent().map(|p| p.join("logo.png")),
-        Some(std::path::PathBuf::from("assets/logo.png")),
-    ];
-    for c in candidates.into_iter().flatten() {
-        if let Ok(bytes) = std::fs::read(&c) {
-            if let Ok(img) = decode_png_rgba(&bytes) {
-                if let Ok(icon) = tray_icon::Icon::from_rgba(img.0, img.1, img.2) {
-                    return Some(icon);
+    // Generate a crisp 32x32 emerald-cyan gradient icon programmatically
+    // (zero external image crate dependency).
+    let w = 32u32;
+    let h = 32u32;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let dx = (x as f32 - 15.5).abs();
+            let dy = (y as f32 - 15.5).abs();
+            if dx > 14.5
+                || dy > 14.5
+                || (dx > 12.0 && dy > 12.0 && (dx - 12.0).hypot(dy - 12.0) > 2.5)
+            {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                // Lightning bolt center shape in dark navy, emerald-teal background
+                let fx = x as f32;
+                let fy = y as f32;
+                let in_bolt = (fy >= 6.0
+                    && fy <= 17.0
+                    && fx >= (18.0 - (fy - 6.0) * 0.6)
+                    && fx <= 18.5)
+                    || (fy >= 15.0 && fy <= 26.0 && fx >= 13.5 && fx <= (14.0 + (26.0 - fy) * 0.6));
+                if in_bolt {
+                    rgba.extend_from_slice(&[9, 13, 22, 255]);
+                } else {
+                    let r = 16u8;
+                    let g = (185u32.saturating_sub(y * 2)) as u8;
+                    let b = (129u32 + x * 3).min(235) as u8;
+                    rgba.extend_from_slice(&[r, g, b, 255]);
                 }
             }
         }
     }
-    tray_icon::Icon::from_rgba(vec![255, 255, 255, 255], 1, 1).ok()
-}
-
-/// Minimal PNG decoder for 8-bit RGBA logos (no new dependencies).
-fn decode_png_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
-    // Tiny hand-rolled reader: signature + IHDR only; full IDAT inflate is
-    // out of scope — return Err so callers use the fallback icon.
-    if bytes.len() < 33 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
-        return Err("not png".into());
-    }
-    let w = u32::from_be_bytes(bytes[16..20].try_into().map_err(|_| "bad ihdr")?);
-    let h = u32::from_be_bytes(bytes[20..24].try_into().map_err(|_| "bad ihdr")?);
-    if w == 0 || h == 0 || w > 256 || h > 256 {
-        return Err("bad size".into());
-    }
-    Err("full decode skipped".into())
+    tray_icon::Icon::from_rgba(rgba, w, h).ok()
 }
 
 fn main() {
@@ -127,7 +146,9 @@ fn main() {
         &quit_item,
     ]);
 
-    let mut builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("AIKD");
+    let mut builder = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("AIKD");
     if let Some(icon) = load_icon() {
         builder = builder.with_icon(icon);
     }
@@ -137,7 +158,14 @@ fn main() {
     let tray_rx = TrayIconEvent::receiver();
 
     // Refresh status line every 5s without blocking menu events.
-    status_item.set_text(format!("Status: {}", if daemon_running() { "running" } else { "stopped" }));
+    status_item.set_text(format!(
+        "Status: {}",
+        if daemon_running() {
+            "running"
+        } else {
+            "stopped"
+        }
+    ));
     let mut last = std::time::Instant::now();
 
     #[allow(deprecated)]
@@ -145,9 +173,19 @@ fn main() {
         elwt.set_control_flow(ControlFlow::WaitUntil(last + Duration::from_secs(5)));
         if last.elapsed() >= Duration::from_secs(5) {
             last = std::time::Instant::now();
-            status_item.set_text(format!("Status: {}", if daemon_running() { "running" } else { "stopped" }));
+            status_item.set_text(format!(
+                "Status: {}",
+                if daemon_running() {
+                    "running"
+                } else {
+                    "stopped"
+                }
+            ));
         }
-        if let winit::event::Event::NewEvents(winit::event::StartCause::ResumeTimeReached { .. }) = event {
+        if let winit::event::Event::NewEvents(winit::event::StartCause::ResumeTimeReached {
+            ..
+        }) = event
+        {
             elwt.set_control_flow(ControlFlow::WaitUntil(last + Duration::from_secs(5)));
         }
         while let Ok(ev) = menu_rx.try_recv() {
@@ -155,7 +193,15 @@ fn main() {
                 "open" => open_ui(),
                 "start" => {
                     let out = run_aikd(&["daemon"]);
-                    status_item.set_text(format!("Status: {} ({})", if daemon_running() { "running" } else { "start?" }, truncate(&out, 40)));
+                    status_item.set_text(format!(
+                        "Status: {} ({})",
+                        if daemon_running() {
+                            "running"
+                        } else {
+                            "start?"
+                        },
+                        truncate(&out, 40)
+                    ));
                 }
                 "stop" => {
                     let out = run_aikd(&["daemon-stop"]);
@@ -164,7 +210,15 @@ fn main() {
                 "doctor" => {
                     #[cfg(windows)]
                     {
-                        let _ = std::process::Command::new("cmd").args(["/C", "start", "", &aikd_exe().to_string_lossy().to_string(), "doctor"]).status();
+                        let _ = std::process::Command::new("cmd")
+                            .args([
+                                "/C",
+                                "start",
+                                "",
+                                &aikd_exe().to_string_lossy().to_string(),
+                                "doctor",
+                            ])
+                            .status();
                     }
                 }
                 "quit" => elwt.exit(),
@@ -183,5 +237,3 @@ fn truncate(s: &str, n: usize) -> String {
         format!("{}…", &flat[..n])
     }
 }
-
-

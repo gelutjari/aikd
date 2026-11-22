@@ -1,497 +1,178 @@
 <div align="center">
 
-# 🧠 AIKD
+# ⚡ AIKD — Stop AI Context Rot & Code Amnesia
 
-### The Ultra-Fast Local Memory Layer for AI Coding Agents
+### The Ultra-Fast Local Memory, Code Search & Anti-Context-Rot Engine for Every AI Agent
 
-[![Crates.io](https://img.shields.io/crates/v/aikd.svg)](https://crates.io/crates/aikd)
-[![GitHub Release](https://img.shields.io/github/v/release/gelutjari/aikd)](https://github.com/gelutjari/aikd/releases)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/gelutjari/aikd/ci.yml?branch=master)](https://github.com/gelutjari/aikd/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
-[![Downloads](https://img.shields.io/github/downloads/gelutjari/aikd/total.svg)](https://github.com/gelutjari/aikd/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/gelutjari/aikd?style=for-the-badge&color=10b981)](https://github.com/gelutjari/aikd/releases)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/gelutjari/aikd/ci.yml?branch=master&style=for-the-badge)](https://github.com/gelutjari/aikd/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
+[![Rust](https://img.shields.io/badge/100%25_Rust-Zero_Runtime_Deps-orange?style=for-the-badge)](https://www.rust-lang.org)
+[![Platforms](https://img.shields.io/badge/OS-Windows_%7C_Linux_%7C_macOS-blueviolet?style=for-the-badge)](#-cross-platform-installation)
 
-**Give Claude, Cursor, and Cline instant memory of your entire codebase.**
-*Written in Rust. Zero cloud dependency. Search 10,000 chunks in 0.21ms.*
+**One tiny ~10 MB Rust binary that gives Claude Code, Antigravity, Gemini CLI, Codex CLI, OpenCode, Cursor, Windsurf, Pi & OMP a shared, indestructible brain.**
 
-[Install](#-installation) • [Quick Start](#-quick-start-3-minutes) • [Demo](#-see-it-in-action) • [Docs](docs/)
+*Zero cloud dependency. Zero Tantivy/Python bloat. Sub-millisecond BM25 search + Live Disk Snippets + Auto-Synced Rules (`AGENTS.md` / `CLAUDE.md` / `SKILL.md`) + Built-in Web Studio.*
+
+[Why AIKD?](#-why-aikd-solving-the-10-biggest-ai-agent-pain-points) • [Code Motion](#-see-it-in-action-code-motion) • [30s Quick Start](#-30-second-quick-start) • [Supported Agents](#-works-with-16-cli--ide-agents) • [AIKD Studio UI](#-aikd-studio--built-in-web-dashboard) • [🇮🇩 Bahasa Indonesia](README.id.md)
 
 </div>
 
 ---
 
-## 🤔 Why AIKD?
+## 🎬 See It In Action (Code Motion)
 
-**The Problem:** AI coding agents are powerful but forgetful. Every new conversation starts from zero — no memory of your codebase, your patterns, your architecture.
-
-| Pain Point | Without AIKD | With AIKD |
-|------------|--------------|-----------|
-| 😵 **Context Amnesia** | Agent asks "what does this file do?" every session | Instant recall of entire codebase |
-| 🐌 **Slow Search** | Python-based RAG takes 500ms+ per query | Rust-powered BM25+Vector in 0.21ms |
-| ☁️ **Cloud Dependency** | Your code sent to external servers | 100% local, zero data leaves your machine |
-| 🔧 **Complex Setup** | Install Python, pip, CUDA, models... | Single binary, one command install |
-
-### How AIKD Compares
-
-| Feature | `grep` | LlamaIndex | ai-devkit | **AIKD** |
-|---------|--------|------------|-----------|----------|
-| Speed | Fast | Slow | Medium | **⚡ 0.21ms** |
-| Semantic Search | ❌ | ✅ | ✅ | **✅ Hybrid** |
-| Local Only | ✅ | ❌ | ❌ | **✅ 100%** |
-| MCP Native | ❌ | ❌ | ❌ | **✅ Built-in** |
-| Memory Usage | Low | High (Python) | High | **📊 27% RAM** |
-| Setup Time | 0s | ~10min | ~5min | **⏱️ 30s** |
+<div align="center">
+  <img src="assets/code-motion.svg" alt="AIKD v2.0 Code Motion — Anti-Context-Rot & Multi-Agent Memory Engine" width="100%" />
+</div>
 
 ---
 
-## ✨ Key Features
+## 🤔 Why AIKD? (Solving the #1 Complaints About AI Coding Agents)
 
-### 🔍 Search Engine
-- **Hybrid Search**: BM25 (Tantivy) + Vector (ONNX all-MiniLM-L6-v2, 384d)
-- **Reciprocal Rank Fusion**: Combines keyword + semantic results intelligently
-- **Incremental Indexing**: Blake3 hashing for zero-redundancy scans
-- **Resource Adaptive**: Auto-detects CPU/GPU and adjusts batch sizes
+Every developer using **Claude Code, Gemini CLI, ChatGPT/Codex, Cursor, Windsurf, OpenCode, or Pi/OMP** hits the exact same walls:
 
-### 🤖 AI Integration
-- **MCP Protocol**: Native support for Model Context Protocol
-- **7 Built-in Tools**: `scan`, `query`, `embed`, `stats`, `remember`, `recall`, `status`
-- **Auto-Registration**: Works with Claude Code, Cursor, Cline, Continue, Windsurf, MiMoCode
-- **Session Memory**: Persistent conversation context across sessions
-
-### 🛠️ Developer Experience
-- **Single Binary**: No Python, no Node, no dependencies
-- **File Watcher**: Auto-reindex on file changes
-- **REST API**: HTTP endpoint on port 9090 for custom integrations
-- **CLI First**: Full control from terminal
+| Pain Point | What Happens Without AIKD | How AIKD v2.0 Fixes It |
+| :--- | :--- | :--- |
+| 😵 **Context Rot & Amnesia** | After 30–50 messages or `/compact`, the AI forgets your architecture rules and breaks working code. | **`aikd handoff`** re-anchors active constraints, decisions, tasks, and checkpoints in ~300–1,000 tokens — outside the chat window. |
+| 💸 **Token Burn (`read_file` Spam)** | Agents `cat` entire 2,000-line files repeatedly just to locate one function. | **SQLite FTS5 Contentless (`chunks_fts`) + `symbol` lookup** returns exact line ranges & bounded live disk snippets in **~1–2ms**. |
+| 🧩 **Multi-Agent Split-Brain** | Switching from Antigravity/Claude to Codex, OpenCode, Pi, or OMP forces you to re-explain everything from scratch. | **SQLite WAL Shared Brain** (`~/.aikd/aikd.db`) lets every CLI and IDE agent read & write the exact same memory concurrently. |
+| 📜 **Stale Rules (`AGENTS.md` Drift)** | You update `AGENTS.md`, `CLAUDE.md`, or a `SKILL.md`, but the agent keeps following outdated rules. | **Auto-Harvest & Auto-Supersede** tracks Blake3 file hashes on every scan and automatically retires (`superseded`) old rules when `.md` files change. |
+| 🐘 **Heavy Vector/Python Bloat** | Python RAG tools hog 2GB+ RAM, Docker containers, or duplicate gigabytes of chunk text. | **Schema v14 Lean Mode** stores tokens only (zero text duplication in DB) with a **single ~10 MB static Rust binary**. |
 
 ---
 
-## 🎬 See It In Action
+## ⚡ 30-Second Quick Start
 
-![AIKD Demo](assets/demo.gif)
-
-```
-$ aikd init
-✅ AIKD initialized for project
-
-$ aikd scan
-📊 Indexed 847 files, 12,453 chunks in 1.2s
-
-$ aikd query "authentication flow"
-1. src/auth/login.rs (Lines 45-89, Score: 0.923)
-   Implements JWT-based authentication with refresh tokens...
-
-2. src/middleware/auth.rs (Lines 12-34, Score: 0.871)
-   Validates Bearer tokens on protected routes...
-
-3. docs/architecture/auth.md (Lines 1-25, Score: 0.845)
-   Authentication flow diagram and security considerations...
-```
-
----
-
-## 📦 Installation
-
-### Recommended (One-Line)
-
-**Linux / macOS:**
-```bash
-curl -sSf https://raw.githubusercontent.com/gelutjari/aikd/main/install.sh | bash
-```
+### 1. Install (One Command — No Python, No Node, No Docker)
 
 **Windows (PowerShell):**
 ```powershell
 irm https://raw.githubusercontent.com/gelutjari/aikd/main/install.ps1 | iex
 ```
 
-### Alternatives
-
-<details>
-<summary><b>📦 From crates.io (if you have Rust)</b></summary>
-
+**Linux / macOS (Bash / Zsh):**
 ```bash
-cargo install aikd
+curl -sSf https://raw.githubusercontent.com/gelutjari/aikd/main/install.sh | bash
 ```
-</details>
 
 <details>
-<summary><b>🍺 Homebrew (macOS/Linux)</b></summary>
-
-```bash
-brew install gelutjari/tap/aikd
-```
-</details>
-
-<details>
-<summary><b>🔧 Build from Source</b></summary>
+<summary><b>🔧 Or Build From Source / Cargo</b></summary>
 
 ```bash
 git clone https://github.com/gelutjari/aikd.git
 cd aikd
-cargo build --release
-cp target/release/aikd ~/.local/bin/
+cargo build --release --bin aikd
+# Binary is at target/release/aikd (or aikd.exe on Windows)
 ```
 </details>
 
-<details>
-<summary><b>🐳 Docker</b></summary>
-
-```bash
-docker run -v $(pwd):/workspace -p 9090:9090 ghcr.io/gelutjari/aikd:latest
-```
-</details>
-
----
-
-## ⚡ Quick Start (3 minutes)
-
-### Step 1: Initialize
+### 2. Initialize, Auto-Connect All Your AI Agents & Launch Studio
 ```bash
 cd your-project
-aikd init
-```
-<details>
-<summary>What does <code>aikd init</code> do?</summary>
-
-Creates `~/.aikd/config.yaml` with smart defaults based on your project type (Rust, Node, Python, Go). It detects `.git`, `Cargo.toml`, `package.json`, etc. and sets appropriate file filters.
-</details>
-
-### Step 2: Scan Your Codebase
-```bash
-aikd scan
-```
-<details>
-<summary>What happens during scan?</summary>
-
-1. Walks directory tree (skipping `node_modules`, `.git`, `target`, etc.)
-2. Chunks files by semantic boundaries (functions, headings)
-3. Generates BM25 index (Tantivy) and vector embeddings (ONNX)
-4. Stores everything in local SQLite database
-</details>
-
-### Step 3: Search
-```bash
-# Keyword search (fast)
-aikd query "error handling"
-
-# Semantic search (smart)
-aikd query "how does login work" --hybrid
-
-# Get JSON output for scripting
-aikd query "database connection" --json
+aikd init          # Generates smart config & scans project
+aikd register      # Auto-registers AIKD MCP across ALL installed CLI & IDE agents!
+aikd scan          # Blake3 incremental scan + syncs AGENTS.md / CLAUDE.md / SKILL.md
+aikd daemon        # Starts REST API + AIKD Studio at http://127.0.0.1:9090/ui
 ```
 
-### Step 4: Connect to Your AI Agent
-
-<details>
-<summary><b>Claude Code / Cursor / Cline</b></summary>
-
-AIKD auto-registers via MCP. Just restart your AI agent after running `aikd scan`.
-
-The MCP config is at `~/.aikd/mcp.json`:
-```json
-{
-  "mcpServers": {
-    "aikd": {
-      "command": "aikd",
-      "args": ["serve"]
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>REST API</b></summary>
-
-```bash
-# Start the daemon
-aikd daemon
-
-# Query via HTTP
-curl "http://localhost:9090/api/query?q=authentication&limit=5"
-```
-</details>
+That's it! Restart your AI agents and ask them:
+> *"Check `aikd` `handoff` for active rules and tasks, then use `aikd` `query` / `symbol` before editing."*
 
 ---
 
-## 🎛️ Usage Modes
+## 🤖 Works With 16+ CLI & IDE Agents Out-of-the-Box
+
+Run **`aikd register`** (or click **"Auto-Register"** in **AIKD Studio**) to automatically wire up `aikd serve` across all installed tools on your machine:
+
+| Category | Supported AI Agents | Config Auto-Detection Path |
+| :--- | :--- | :--- |
+| **CLI Agents** | **Claude Code**, **Gemini CLI**, **OpenAI Codex CLI**, **OpenCode CLI**, **Pi Agent CLI**, **OMP Agent CLI**, **Qwen Code CLI**, **Hermes Agent CLI**, **MiMoCode** | `~/.claude.json`, `~/.gemini/settings.json`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json`, `~/.pi/agent/mcp.json`, `~/.qwen/settings.json`, `~/.hermes/config.yaml`, `~/.mcp.json` |
+| **IDEs & Desktop Apps** | **Antigravity IDE & CLI**, **Claude Desktop**, **Cursor**, **Windsurf**, **Cline (VSCode)**, **Continue**, **Qoder** | `~/.gemini/antigravity/mcp_config.json`, `claude_desktop_config.json`, `~/.cursor/mcp.json`, `~/.windsurf/mcp.json`, `~/.cline/mcp.json`, `~/.continue/config.json`, `~/.qoder/mcp.json` |
+
+> **Built-in Protocol Compatibility:** `aikd serve` speaks standard MCP (`initialize` `2024-11-05`) **and** gracefully handles pre-handshake discovery probes like `server/discover` (used by OMP v19.1+), so **multiple CLI and GUI agents can share the same knowledge base simultaneously**.
+
+---
+
+## 🖥️ AIKD Studio — Built-In Web Dashboard (`/ui`)
+
+Start the daemon (`aikd daemon`) and open **[http://127.0.0.1:9090/ui](http://127.0.0.1:9090/ui)** — a modern, zero-dependency SPA embedded directly inside the Rust binary:
+
+1. **📊 Overview & Quick Scan:** Live database metrics, 1-click **On-Demand Directed Scan**, **Garbage Collect (GC)**, **Rebuild FTS5**, **Sync Rules & Skills (`.md`)**, Interactive **SVG File Dependency Graph**, and **Multi-Agent Event Coverage**.
+2. **🔍 Live Search & Symbol Playground:** Test BM25 full-text queries and function/struct/class symbol lookups with sub-10ms latency, extension/path filters, and live syntax snippets read directly from disk.
+3. **🧠 Structured Memory & Handoff Generator:** Browse, filter, create, or retire (`stale` / `archive`) `decision`, `constraint`, `fact`, `task`, `checkpoint`, and `discovery` entries, plus **1-click Copy Handoff** for instant context recovery.
+4. **⚙️ Settings, Smart Agent Noise Presets & Connected Agents:**
+   - Manage `scan.include_paths` visually without touching YAML by hand.
+   - **3 Smart Multi-Agent Exclusion Presets** (`✨ Recommended`, `🎯 Strict Code & Rules Only`, `💬 Include Agent Sessions`) that automatically strip `.system_generated`, `scratch`, `.codex/.tmp`, browser profiles, telemetry, `node_modules`, `target`, and secrets (`auth.json`, `.env`).
+   - **Connected AI Agents Matrix** with 1-click **Auto-Register** for every agent detected on your system.
+
+---
+
+## 🛠️ 15 Native MCP Tools (`aikd serve`)
+
+| Tool | Purpose |
+| :--- | :--- |
+| `scan` | Incremental Blake3 file discovery, chunking, symbol extraction & `.md` rule sync |
+| `query` | Ranked BM25 SQLite FTS5 search (+ optional hybrid vector search) with live disk snippets |
+| `symbol` | Exact & prefix lookup for functions, structs, classes, interfaces with file + line ranges |
+| `handoff` | Assembles anti-context-rot resume package (tasks, checkpoint, decisions, synced rules, events) |
+| `memory_save` | Save typed durable memory (`fact`, `decision`, `constraint`, `discovery`, `task`, `checkpoint`) |
+| `memory_list` | Inspect active or superseded memory items by kind & workstream |
+| `memory_task` | Fetch active tasks & latest checkpoint after `/compact` or agent switch |
+| `memory_lifecycle` | Mark outdated memory `stale` or `archive` without losing audit provenance |
+| `memory_conflict` | Flag contradictory assertions across agents so neither silently overwrites truth |
+| `event_append` | Append idempotent agent lifecycle events (`tool_call`, `file_change`, `checkpoint`, etc.) |
+| `remember` / `recall` | Store and search raw session conversation history |
+| `embed` | Optional vector embedding generation (`--features semantic` or `semantic-ext`) |
+| `stats` / `status` | Index footprint, DB schema version, CPU/RAM profile, and health status |
+
+---
+
+## 🏗️ Lean Schema v14 Architecture
 
 ```
-                    ┌─────────────────┐
-                    │   How to use    │
-                    │     AIKD?       │
-                    └────────┬────────┘
-                             │
-            ┌────────────────┼────────────────┐
-            ▼                ▼                ▼
-     ┌──────────┐     ┌──────────┐     ┌──────────┐
-     │   CLI    │     │   MCP    │     │ REST API │
-     │  Mode    │     │  Server  │     │  Daemon  │
-     └──────────┘     └──────────┘     └──────────┘
-     Best for:        Best for:        Best for:
-     • Quick search   • AI agents      • Web apps
-     • Scripts        • Claude Code    • Custom UIs
-     • CI/CD          • Cursor         • Team shared
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  Claude Code · Antigravity · Gemini CLI · Codex · OpenCode · Pi/OMP │
+  └──────────────┬───────────────────────────────────────┬──────────────┘
+                 │ MCP (stdio JSON-RPC)                  │ HTTP / Browser
+                 ▼                                       ▼
+  ┌─────────────────────────────┐         ┌─────────────────────────────┐
+  │       aikd serve (MCP)      │         │   aikd daemon (Axum REST)   │
+  │  • 15 Built-in MCP Tools    │         │  • /ui  (AIKD Studio SPA)   │
+  │  • Pre-init server/discover │         │  • /api/* (Query/Config/GC) │
+  └──────────────┬──────────────┘         └──────────────┬──────────────┘
+                 └───────────────────┬───────────────────┘
+                                     ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │               Shared Rust Core (WAL SQLite — aikd.db)               │
+  ├─────────────────────┬──────────────────────┬────────────────────────┤
+  │ FTS5 Contentless    │ Auto Rule/Skill Sync │ Structured Memory      │
+  │ (chunks_fts)        │ (AGENTS/CLAUDE/SKILL)│ & Event Journal        │
+  │ + Live Disk Snippet │ + Blake3 Auto-       │ (decision, constraint, │
+  │   (120 lines/16KB)  │   Supersede          │  task, checkpoint)     │
+  └─────────────────────┴──────────────────────┴────────────────────────┘
 ```
 
-**CLI Mode** (default):
-```bash
-aikd query "rust error handling" --limit 5
-aikd stats
-aikd status
-```
+- **Zero-Downtime Windows Self-Update Shim:** Installs versioned binaries under `~/.aikd/versions/<ver>/` and atomically flips a tiny shim at `~/.local/bin/aikd.exe` — never fails with `os error 5 (Access Denied)` even while MCP servers are running!
+- **Cross-Platform Ready:** Official CI & Release workflows build binaries for **Windows (`x86_64`)**, **Linux (`x86_64`, `aarch64`)**, and **macOS (`x86_64`, `aarch64`)**.
 
-**MCP Server** (for AI agents):
-```bash
-aikd serve  # Starts stdio MCP server
-```
+---
 
-**REST Daemon** (background service):
-```bash
-aikd daemon              # Start in background
-aikd daemon foreground   # Start in foreground
-aikd daemon-stop         # Stop daemon
+## ⚙️ Recommended `AGENTS.md` / `CLAUDE.md` Snippet
+
+Drop these 4 lines into your project's `AGENTS.md` or `CLAUDE.md` so every AI agent automatically uses AIKD:
+
+```markdown
+## AIKD Memory & Anti-Context-Rot Protocol
+- Call `aikd` `handoff` or `memory_list` when starting complex tasks or resuming after `/compact`.
+- Prefer `aikd` `query` and `aikd` `symbol` over blind full-file reads to save tokens.
+- Save major architectural decisions, bug fixes, and server configs via `aikd` `memory_save`.
 ```
 
 ---
 
-## 📊 Benchmark Results
+## 📄 License & Community
 
-![AIKD Benchmarks](assets/benchmarks.png)
-
-**Hardware:** AMD EPYC 7B13, 7.8GB RAM, NVMe SSD
-
-| Operation | Time | Throughput |
-|-----------|------|------------|
-| Index 1,000 files | 144ms | 6,934 files/s |
-| BM25 Search | 0.21ms | 4,762 queries/s |
-| Hybrid Search | 0.35ms | 2,857 queries/s |
-| Concurrent (500) | 28ms | 17,669 queries/s |
-| Embedding (batch) | 12ms/batch | ~800 chunks/s |
-
-**Resource Usage:**
-```
-CPU: ████████░░░░░░░░░░░░ 22.9%
-RAM: █████░░░░░░░░░░░░░░░ 27.4%
-```
-
-> 💡 **Real-world context:** A human eye blink takes ~300ms. In that time, AIKD can complete **857 hybrid searches** across your entire codebase.
-
----
-
-## ⚙️ Configuration
-
-**Default config** (`~/.aikd/config.yaml`):
-
-```yaml
-version: 2.0.0
-scan:
-  include_paths: ["."]
-  exclude_paths: ["node_modules", ".git", "target"]
-  include_extensions: ["rs", "ts", "py", "md", "json"]
-  follow_symlinks: false
-chunk:
-  max_tokens: 1000
-  min_tokens: 100
-embedding:
-  enabled: true
-  model: all-MiniLM-L6-v2
-  batch_size: auto
-server:
-  rest_port: 9090
-  auth_token: null
-  cors_origins: ["*"]
-```
-
-<details>
-<summary><b>🐌 Slow Machine (4GB RAM, 2 cores)</b></summary>
-
-```yaml
-embedding:
-  enabled: true
-  batch_size: 8
-  device: cpu
-resource:
-  mode: Low
-```
-</details>
-
-<details>
-<summary><b>💪 Beefy Machine (32GB RAM, 16 cores, GPU)</b></summary>
-
-```yaml
-embedding:
-  enabled: true
-  batch_size: 64
-  device: gpu
-resource:
-  mode: Max
-```
-</details>
-
-<details>
-<summary><b>📝 Docs-Only Project</b></summary>
-
-```yaml
-scan:
-  include_extensions: ["md", "txt", "rst"]
-  exclude_paths: [".git"]
-filter:
-  max_file_size: 524288  # 512KB
-```
-</details>
-
-<details>
-<summary><b>👥 Team Sharing</b></summary>
-
-```yaml
-server:
-  rest_port: 9090
-  auth_token: "your-secret-token"
-  cors_origins:
-    - "https://your-team-app.com"
-```
-</details>
-
----
-
-## 🏗️ Architecture
-
-![AIKD Architecture](assets/architecture.png)
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        AIKD v2.0.0                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────┐  │
-│  │  CLI    │  │  MCP    │  │  REST   │  │ File Watcher│  │
-│  │ (clap)  │  │ (rmcp)  │  │ (axum)  │  │  (notify)   │  │
-│  └────┬────┘  └────┬────┘  └────┬────┘  └──────┬──────┘  │
-│       │            │            │               │          │
-│       └────────────┴────────────┴───────────────┘          │
-│                            │                                │
-│  ┌─────────────────────────┴──────────────────────────┐    │
-│  │                   Core Engine                       │    │
-│  ├─────────────┬─────────────┬─────────────────────────┤    │
-│  │  Scanner    │   Chunker   │      Session Manager    │    │
-│  │ (walkdir)   │(pulldown-   │    (conversation DB)    │    │
-│  │             │  cmark)     │                         │    │
-│  └──────┬──────┴──────┬──────┴─────────────────────────┘    │
-│         │             │                                      │
-│  ┌──────┴──────┐ ┌────┴─────┐ ┌──────────────────────┐     │
-│  │  Indexer    │ │ Embedder │ │     Storage           │     │
-│  │  (Tantivy)  │ │ (ONNX)   │ │   (SQLite + WAL)     │     │
-│  │  BM25 +     │ │ 384d     │ │   + r2d2 pool        │     │
-│  │  HNSW ANN   │ │ MiniLM   │ │   + blake3 hashing   │     │
-│  └─────────────┘ └──────────┘ └──────────────────────┘     │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed breakdown.
-
----
-
-## 🆘 Troubleshooting
-
-**Diagnostic Commands:**
-```bash
-aikd status --json     # System info
-aikd stats             # Index statistics
-aikd daemon-pid        # Check if daemon running
-```
-
-<details>
-<summary><b>"No results found"</b></summary>
-
-1. Run `aikd scan` first
-2. Check `aikd stats` to verify files indexed
-3. Try broader search terms
-4. Check `include_extensions` in config
-</details>
-
-<details>
-<summary><b>"Model not downloaded"</b></summary>
-
-```bash
-aikd model download
-```
-
-This downloads ~90MB ONNX model to `~/.local/share/aikd/model/`.
-</details>
-
-<details>
-<summary><b>"Port 9090 already in use"</b></summary>
-
-```bash
-# Change port in config
-# ~/.aikd/config.yaml
-server:
-  rest_port: 9091
-```
-
-Or stop existing process: `aikd daemon-stop`
-</details>
-
-<details>
-<summary><b>High memory usage</b></summary>
-
-Set resource mode to Low:
-```yaml
-resource:
-  mode: Low
-  max_memory_mb: 512
-```
-</details>
-
-<details>
-<summary><b>MCP not connecting to Claude/Cursor</b></summary>
-
-1. Check `~/.aikd/mcp.json` exists
-2. Restart your AI agent
-3. Verify `aikd serve` works: `echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | aikd serve`
-</details>
-
-<details>
-<summary><b>Windows: "vcruntime140.dll not found"</b></summary>
-
-Install [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
-</details>
-
----
-
-## 🤝 Community
-
-**Get Help:**
-- 💬 [GitHub Discussions](https://github.com/gelutjari/aikd/discussions) — Ask questions
-- 🐛 [Issues](https://github.com/gelutjari/aikd/issues) — Report bugs
-- 📧 Email: gelutjari@github.com
-
-**Contributors:**
-
-| Contribution | Who |
-|--------------|-----|
-| 🏗️ Architecture & Core | [@gelutjari](https://github.com/gelutjari) |
-| 🔒 Security Audit | AI-assisted (MiMo) |
-| ⚡ Performance Optimization | Community |
-| 📖 Documentation | Community |
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute.
-
----
-
-## 📄 License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-<div align="center">
-
-**⭐ Star this repo if AIKD helps your AI agents remember!**
-
-[![Star History Chart](https://api.star-history.com/svg?repos=gelutjari/aikd&type=Date)](https://star-history.com/#gelutjari/aikd&Date)
-
-</div>
+- **License:** MIT — see [LICENSE](LICENSE)
+- **Repository:** [github.com/gelutjari/aikd](https://github.com/gelutjari/aikd)
+- **Issues & Feature Requests:** [GitHub Issues](https://github.com/gelutjari/aikd/issues)

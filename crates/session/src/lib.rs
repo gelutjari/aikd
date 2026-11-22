@@ -1,5 +1,6 @@
 use aikd_core::{Conversation, Session};
-use aikd_embedder::{self, DIMENSIONS, MODEL_NAME};
+#[cfg(feature = "semantic")]
+use aikd_embedder::{DIMENSIONS, MODEL_NAME};
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -293,7 +294,11 @@ mod tests {
         assert_eq!(ids.len(), 1, "all racers must get the same session");
         let conn = Connection::open(&path).unwrap();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sessions WHERE project_path='/project'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE project_path='/project'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 1);
     }

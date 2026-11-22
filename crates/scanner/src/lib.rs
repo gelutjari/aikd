@@ -25,6 +25,7 @@ pub struct ScanProgress {
 #[derive(Debug, Clone, Default)]
 pub struct ScanOptions {
     pub override_path: Option<PathBuf>,
+    pub force: bool,
 }
 /// Discovery outcome: matched files plus WHY others were skipped, so a
 /// "found 1 files" surprise is always explainable (C2).
@@ -46,7 +47,13 @@ pub fn discover_files_report(cfg: &Config, opts: &ScanOptions) -> Discovery {
         .override_path
         .as_ref()
         .map(|p| vec![aikd_core::platform::canonical_path(p)])
-        .unwrap_or_else(|| cfg.scan.include_paths.iter().map(|s| s.replace('\\', "/")).collect());
+        .unwrap_or_else(|| {
+            cfg.scan
+                .include_paths
+                .iter()
+                .map(|s| s.replace('\\', "/"))
+                .collect()
+        });
 
     let mut out = Discovery::default();
     for sp in &scan_paths {
@@ -74,18 +81,15 @@ pub fn discover_files_report(cfg: &Config, opts: &ScanOptions) -> Discovery {
                 continue;
             }
             let fname = entry.file_name().to_str().unwrap_or("");
-            if cfg.should_exclude_file(fname) || !cfg.matches_filename_filter(fname) {
+            let ext = entry.path().extension().and_then(|s| s.to_str());
+            if cfg.should_exclude_file(fname)
+                || !cfg.matches_filename_filter(fname)
+                || cfg.should_exclude_extension(fname, ext)
+            {
                 out.skipped_filter += 1;
                 continue;
             }
-            if !cfg.scan.include_extensions.iter().any(|ext| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s == ext.as_str())
-                    .unwrap_or(false)
-            }) {
+            if !cfg.should_include_extension(ext) {
                 out.skipped_ext += 1;
                 continue;
             }
@@ -172,10 +176,16 @@ pub fn store_chunks(indexed: &[(String, Vec<Chunk>)], db: &Database) -> Result<(
         for c in chunks {
             let hj = serde_json::to_string(&c.heading_hierarchy).unwrap_or_default();
             let mj = serde_json::to_string(&c.metadata).unwrap_or_default();
+            // Lean mode: do not duplicate file content in chunks.content;
+            // tokenize into chunks_fts and read snippets live from disk on query.
             tx.conn().execute(
-                "INSERT INTO chunks (id,file_id,chunk_index,heading_hierarchy,heading_level,heading_text,line_start,line_end,content,metadata_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                rusqlite::params![c.id, fid, c.chunk_index as i64, hj, c.heading_level as i64, c.heading_text, c.line_start as i64, c.line_end as i64, c.content, mj, now, now],
+                "INSERT INTO chunks (id,file_id,chunk_index,heading_hierarchy,heading_level,heading_text,line_start,line_end,content,metadata_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'',?9,?10,?11)",
+                rusqlite::params![c.id, fid, c.chunk_index as i64, hj, c.heading_level as i64, c.heading_text, c.line_start as i64, c.line_end as i64, mj, now, now],
             )?;
+            let rowid = tx.conn().last_insert_rowid();
+            let heading = format!("{} {}", c.heading_hierarchy_str(), c.heading_text);
+            let tokens = format!("{heading} {}", c.content);
+            let _ = aikd_storage::fts::index_chunk_fts(tx.conn(), rowid, ps, &heading, &tokens);
         }
 
         // Symbol index (EXTRACTED provenance — heuristic, not resolved AST).
@@ -200,11 +210,9 @@ pub fn replaced_chunk_ids(db: &Database, paths: &[String]) -> Vec<String> {
             rusqlite::params![ps],
             |r| r.get(0),
         ) {
-            if let Ok(mut stmt) = db
-                .conn()
-                .prepare("SELECT id FROM chunks WHERE file_id=?1")
-            {
-                if let Ok(rows) = stmt.query_map(rusqlite::params![fid], |r| r.get::<_, String>(0)) {
+            if let Ok(mut stmt) = db.conn().prepare("SELECT id FROM chunks WHERE file_id=?1") {
+                if let Ok(rows) = stmt.query_map(rusqlite::params![fid], |r| r.get::<_, String>(0))
+                {
                     ids.extend(rows.filter_map(|r| r.ok()));
                 }
             }
@@ -248,7 +256,6 @@ pub fn remove_from_tantivy(db: &Database, tantivy: &TantivyEngine, paths: &[Stri
     Ok(())
 }
 
-
 pub fn run_scan(
     cfg: &Config,
     db: &Database,
@@ -268,7 +275,11 @@ pub fn run_scan(
     }
 
     eprint!("[aikd] Checking for changes...");
-    let files_to_index = filter_changed(files, db);
+    let files_to_index = if opts.force {
+        files
+    } else {
+        filter_changed(files, db)
+    };
     let files_found = files_to_index.len();
     eprintln!(" {files_found} to index");
 
@@ -331,6 +342,9 @@ pub fn run_scan(
 
     eprint!("[aikd] Updating search index...");
     update_tantivy_incremental(&indexed, &stale_ids, tantivy)?;
+    let _ = aikd_storage::atlas::mark_all_stale_if_changed(db.conn());
+    let project_key = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+    let _ = aikd_storage::memory::sync_rules_and_skills_from_files(db.conn(), &project_key);
     eprintln!(" done");
 
     let files_indexed = indexed.len();

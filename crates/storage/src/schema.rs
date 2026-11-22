@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 13;
+const SCHEMA_VERSION: i32 = 14;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -67,6 +67,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if current < 13 {
         migrate_v13(conn)?;
+    }
+
+    if current < 14 {
+        migrate_v14(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -308,7 +312,9 @@ fn migrate_v6(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(symbol_name);")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(symbol_name);",
+    )?;
 
     log::info!("Migration v6 applied — code_symbols line ranges");
     Ok(())
@@ -457,7 +463,10 @@ fn migrate_v11(conn: &Connection) -> Result<()> {
         }
     }
     conn.execute("UPDATE files SET path = replace(path, '\\', '/')", [])?;
-    log::info!("Migration v11 applied — canonical slash paths ({} dup groups merged)", groups.len());
+    log::info!(
+        "Migration v11 applied — canonical slash paths ({} dup groups merged)",
+        groups.len()
+    );
     Ok(())
 }
 
@@ -484,9 +493,44 @@ fn migrate_v13(conn: &Connection) -> Result<()> {
     // Canonical project keys everywhere (follow-up of v11 which only fixed
     // files.path). Rows written with backslash keys (memory, events,
     // sessions, atlas) were invisible to slash-key readers — data looked
-    // "lost" while present. Rewrite in place, no dedup needed (keys are
-    // not UNIQUE-indexed; worst case two spellings merge into one scope,
-    // which is the correct scope anyway).
+    // "lost" while present.
+    // `sessions.project_path` has a UNIQUE index (idx_sessions_project_path),
+    // so merge colliding groups first (re-pointing conversations to the
+    // most recently active session) before rewriting separators.
+    let colliding_sessions: Vec<String> = conn
+        .prepare("SELECT replace(project_path, '\\', '/') FROM sessions GROUP BY replace(project_path, '\\', '/') HAVING COUNT(*) > 1")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get(0))
+                .and_then(|rows| rows.collect::<std::result::Result<Vec<String>, _>>())
+        })
+        .unwrap_or_default();
+    for canonical in &colliding_sessions {
+        let keep: String = conn.query_row(
+            "SELECT id FROM sessions WHERE replace(project_path, '\\', '/') = ?1 ORDER BY last_active DESC, rowid DESC LIMIT 1",
+            rusqlite::params![canonical],
+            |r| r.get(0),
+        )?;
+        let victims: Vec<String> = conn
+            .prepare(
+                "SELECT id FROM sessions WHERE replace(project_path, '\\', '/') = ?1 AND id != ?2",
+            )
+            .and_then(|mut s| {
+                s.query_map(rusqlite::params![canonical, keep], |r| r.get(0))
+                    .and_then(|rows| rows.collect::<std::result::Result<Vec<String>, _>>())
+            })
+            .unwrap_or_default();
+        for victim in victims {
+            conn.execute(
+                "UPDATE conversations SET session_id = ?1 WHERE session_id = ?2",
+                rusqlite::params![keep, victim],
+            )?;
+            conn.execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                rusqlite::params![victim],
+            )?;
+        }
+    }
+
     for (table, col) in [
         ("memory", "project_path"),
         ("events", "project_id"),
@@ -503,6 +547,12 @@ fn migrate_v13(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v14(conn: &Connection) -> Result<()> {
+    crate::fts::ensure_fts(conn)?;
+    log::info!("Migration v14 applied — contentless FTS5 (chunks_fts)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,7 +562,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         // Simulate a legacy DB: rewind version, insert pre-fix rows, migrate.
-        conn.execute("UPDATE schema_version SET version = 12", []).unwrap();
+        conn.execute("UPDATE schema_version SET version = 12", [])
+            .unwrap();
         // Simulate a pre-fix row written with a Windows backslash key.
         conn.execute(
             "INSERT INTO memory (id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, conflict_note, created_at, updated_at) VALUES ('m1', 'C:\\proj', 'ws', 'task', 'T', 'b', 'explicit', 'active', 1.0, NULL, NULL, 't', 't')",
@@ -523,13 +574,61 @@ mod tests {
             [],
         ).unwrap();
         run_migrations(&conn).unwrap();
-        let mp: String = conn.query_row("SELECT project_path FROM memory WHERE id='m1'", [], |r| r.get(0)).unwrap();
-        let ep: String = conn.query_row("SELECT project_id FROM events WHERE event_id='e1'", [], |r| r.get(0)).unwrap();
+        let mp: String = conn
+            .query_row("SELECT project_path FROM memory WHERE id='m1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let ep: String = conn
+            .query_row(
+                "SELECT project_id FROM events WHERE event_id='e1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(mp, "C:/proj");
         assert_eq!(ep, "C:/proj");
         // And the canonical reader finds it.
-        let items = crate::memory::list_memory(&conn, "C:/proj", Some("ws"), Some("task"), false).unwrap();
+        let items =
+            crate::memory::list_memory(&conn, "C:/proj", Some("ws"), Some("task"), false).unwrap();
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn test_v13_merges_colliding_sessions() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute("UPDATE schema_version SET version = 12", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, name, project_path, created_at, last_active) VALUES ('s_bs', 'Old', 'C:\\proj', '2026-01-01', '2026-01-01')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, name, project_path, created_at, last_active) VALUES ('s_sl', 'New', 'C:/proj', '2026-01-02', '2026-01-02')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO conversations (id, session_id, role, content, tokens, chunk_refs, created_at) VALUES ('c_old', 's_bs', 'user', 'hello', 1, '[]', '2026-01-01')",
+            [],
+        ).unwrap();
+        run_migrations(&conn).unwrap();
+        let sess_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE project_path='C:/proj'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sess_count, 1);
+        let moved: String = conn
+            .query_row(
+                "SELECT session_id FROM conversations WHERE id='c_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(moved, "s_sl");
     }
 
     #[test]

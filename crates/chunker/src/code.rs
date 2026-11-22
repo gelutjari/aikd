@@ -10,6 +10,7 @@ pub(crate) enum SourceLanguage {
     TypeScript,
     JavaScript,
     Go,
+    CSharp,
     Unknown,
 }
 
@@ -20,10 +21,16 @@ pub(crate) fn detect_language(path: &str) -> SourceLanguage {
         SourceLanguage::Python
     } else if path.ends_with(".ts") || path.ends_with(".tsx") {
         SourceLanguage::TypeScript
-    } else if path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") {
+    } else if path.ends_with(".js")
+        || path.ends_with(".jsx")
+        || path.ends_with(".mjs")
+        || path.ends_with(".cjs")
+    {
         SourceLanguage::JavaScript
     } else if path.ends_with(".go") {
         SourceLanguage::Go
+    } else if path.ends_with(".cs") {
+        SourceLanguage::CSharp
     } else {
         SourceLanguage::Unknown
     }
@@ -83,6 +90,30 @@ pub fn chunk_source_code(
             config,
             metadata,
             &["func ", "type ", "func ("],
+        ),
+        SourceLanguage::CSharp => chunk_by_function(
+            content,
+            file_path,
+            config,
+            metadata,
+            &[
+                "namespace ",
+                "class ",
+                "struct ",
+                "interface ",
+                "enum ",
+                "record ",
+                "public class ",
+                "public struct ",
+                "public interface ",
+                "public enum ",
+                "public record ",
+                "internal class ",
+                "public static ",
+                "public async ",
+                "private static ",
+                "private async ",
+            ],
         ),
         SourceLanguage::Unknown => chunk_by_lines(content, file_path, config, metadata),
     }
@@ -379,7 +410,11 @@ const world = () => {
             body.push_str(&format!("    let x{i} = {i};\n"));
         }
         body.push_str("}\n\nfn next() {}\n");
-        let cfg = ChunkConfig { max_tokens: 50, min_tokens: 1, overlap_tokens: 0 };
+        let cfg = ChunkConfig {
+            max_tokens: 50,
+            min_tokens: 1,
+            overlap_tokens: 0,
+        };
         let chunks = chunk_source_code("t.rs", &body, &cfg, HashMap::new());
         assert!(chunks.len() >= 2);
         // No chunk may end in the middle of a statement: every chunk except
@@ -394,5 +429,4 @@ const world = () => {
         // The trailing function survives intact.
         assert!(chunks.last().unwrap().content.contains("fn next"));
     }
-
 }

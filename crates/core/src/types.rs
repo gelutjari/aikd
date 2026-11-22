@@ -63,6 +63,45 @@ pub struct SearchFilters {
     pub heading_contains: Option<String>,
 }
 
+impl SearchFilters {
+    /// True when `file_path` satisfies path include/exclude and extension filters,
+    /// normalizing `\` and `/` so Windows filter arguments match slash-normalized DB/Tantivy paths.
+    pub fn matches_path(&self, file_path: &str) -> bool {
+        let norm_file = file_path.replace('\\', "/");
+        if let Some(ref pf) = self.path_contains {
+            let needle = crate::platform::normalize_project_key(pf);
+            if !norm_file.contains(needle.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref pe) = self.path_exclude {
+            let needle = crate::platform::normalize_project_key(pe);
+            if norm_file.contains(needle.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref ft) = self.file_types {
+            let has_ext = ft
+                .iter()
+                .any(|ext| norm_file.ends_with(&format!(".{}", ext.trim_start_matches('.'))));
+            if !has_ext {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// True when `heading` satisfies the optional heading substring filter.
+    pub fn matches_heading(&self, heading: &str) -> bool {
+        if let Some(ref hc) = self.heading_contains {
+            if !heading.contains(hc.as_str()) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -201,6 +240,21 @@ mod tests {
         let filters = SearchFilters::default();
         assert!(filters.path_contains.is_none());
         assert!(filters.heading_contains.is_none());
+    }
+
+    #[test]
+    fn test_search_filters_matches_backslash_paths() {
+        let filters = SearchFilters {
+            path_contains: Some(r"C:\Users\hp\proj\".into()),
+            path_exclude: Some(r"src\generated".into()),
+            file_types: Some(vec![".rs".into()]),
+            heading_contains: Some("compute".into()),
+        };
+        assert!(filters.matches_path("C:/Users/hp/proj/src/lib.rs"));
+        assert!(!filters.matches_path("C:/Users/hp/proj/src/generated/mod.rs"));
+        assert!(!filters.matches_path("C:/Users/hp/proj/src/app.ts"));
+        assert!(filters.matches_heading("pub fn compute_tax"));
+        assert!(!filters.matches_heading("pub struct Other"));
     }
 
     #[test]

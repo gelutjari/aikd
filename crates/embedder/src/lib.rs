@@ -32,12 +32,21 @@ pub struct ExternalProvider {
 #[cfg(feature = "semantic-ext")]
 impl ExternalProvider {
     pub fn from_env(endpoint: &str, model: &str, api_key_env: &str) -> Result<Self> {
-        let api_key = std::env::var(api_key_env)
-            .map_err(|_| anyhow::anyhow!("env {api_key_env} is not set (key never lives in config)"))?;
+        let api_key = std::env::var(api_key_env).map_err(|_| {
+            anyhow::anyhow!("env {api_key_env} is not set (key never lives in config)")
+        })?;
         if endpoint.is_empty() {
-            anyhow::bail!("embedding.endpoint is empty; set it to an OpenAI-compatible /embeddings URL");
+            anyhow::bail!(
+                "embedding.endpoint is empty; set it to an OpenAI-compatible /embeddings URL"
+            );
         }
-        Ok(Self { name: "external-http".into(), model_id: model.into(), dimensions: 0, endpoint: endpoint.into(), api_key })
+        Ok(Self {
+            name: "external-http".into(),
+            model_id: model.into(),
+            dimensions: 0,
+            endpoint: endpoint.into(),
+            api_key,
+        })
     }
 
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
@@ -51,7 +60,9 @@ impl ExternalProvider {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(Self::embed_batch_async(&endpoint, &api_key, &model_id, &owned))
+            rt.block_on(Self::embed_batch_async(
+                &endpoint, &api_key, &model_id, &owned,
+            ))
         };
         match tokio::runtime::Handle::try_current() {
             // Inside async context: escape to a plain OS thread and run the
@@ -63,7 +74,12 @@ impl ExternalProvider {
         }
     }
 
-    async fn embed_batch_async(endpoint: &str, api_key: &str, model_id: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_batch_async(
+        endpoint: &str,
+        api_key: &str,
+        model_id: &str,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
@@ -74,15 +90,24 @@ impl ExternalProvider {
             .send()
             .await?;
         if !resp.status().is_success() {
-            anyhow::bail!("embedding endpoint {endpoint} returned HTTP {}", resp.status());
+            anyhow::bail!(
+                "embedding endpoint {endpoint} returned HTTP {}",
+                resp.status()
+            );
         }
         let v: serde_json::Value = resp.json().await?;
-        let arr = v["data"].as_array().ok_or_else(|| anyhow::anyhow!("bad embeddings response: no data[]"))?;
+        let arr = v["data"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("bad embeddings response: no data[]"))?;
         let mut out = Vec::with_capacity(arr.len());
         for item in arr {
             let emb: Vec<f32> = item["embedding"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_f64().map(|f| f as f32))
+                        .collect()
+                })
                 .unwrap_or_default();
             if emb.is_empty() {
                 anyhow::bail!("bad embeddings response: empty vector");
@@ -115,7 +140,11 @@ impl aikd_core::SemanticProvider for ExternalProvider {
 /// Store vectors from an external provider for chunks missing them.
 /// Dimensions are learned from the first response (provider-declared).
 #[cfg(feature = "semantic-ext")]
-pub fn embed_and_store_external(conn: &Connection, provider: &ExternalProvider, batch_size: usize) -> Result<usize> {
+pub fn embed_and_store_external(
+    conn: &Connection,
+    provider: &ExternalProvider,
+    batch_size: usize,
+) -> Result<usize> {
     let mut stmt = conn.prepare("SELECT id, content FROM chunks WHERE id NOT IN (SELECT chunk_id FROM embeddings WHERE model = ?1)")?;
     let rows: Vec<(String, String)> = stmt
         .query_map(rusqlite::params![provider.model_id()], |row| {
@@ -324,12 +353,12 @@ pub fn embed_and_store_with_profile(
 // Pure vector math, storage IO and cache live in `aikd_core::vector` so the
 // default build uses them without linking ONNX. Re-exported here for
 // backward compatibility of the `aikd_embedder::` paths.
+pub use aikd_core::fusion::reciprocal_rank_fusion;
 pub use aikd_core::{
     bytes_to_f32, cosine_similarity, export_chunks_for_embedding, f32_to_bytes,
     import_embeddings_json, load_all_embeddings, vector_search, EmbeddingCache, SemanticProvider,
     EMBEDDING_DIMENSIONS as DIMENSIONS, EMBEDDING_MODEL as MODEL_NAME,
 };
-pub use aikd_core::fusion::reciprocal_rank_fusion;
 
 #[cfg(test)]
 mod tests {
@@ -338,7 +367,7 @@ mod tests {
     #[test]
     fn zero_onnx_default_has_no_semantic() {
         // Default build: pure helpers work, inference entry points fail honestly.
-        assert!(!SEMANTIC_COMPILED);
+        const { assert!(!SEMANTIC_COMPILED) };
         assert!(create_model(std::path::Path::new("nope")).is_err());
         assert!(download_model(std::path::Path::new("nope")).is_err());
         assert!(embed_and_store_with_profile(
@@ -364,7 +393,12 @@ mod ext_tests {
     fn external_provider_contract_holds() {
         use aikd_core::SemanticProvider;
         // Missing env → honest error, never a silent stub.
-        assert!(super::ExternalProvider::from_env("http://127.0.0.1:9/embed", "m", "AIKD_TEST_MISSING_KEY_XYZ").is_err());
+        assert!(super::ExternalProvider::from_env(
+            "http://127.0.0.1:9/embed",
+            "m",
+            "AIKD_TEST_MISSING_KEY_XYZ"
+        )
+        .is_err());
         // Empty endpoint → honest error even with key present.
         std::env::set_var("AIKD_TEST_KEY_TMP", "k");
         assert!(super::ExternalProvider::from_env("", "m", "AIKD_TEST_KEY_TMP").is_err());
@@ -376,7 +410,7 @@ mod ext_tests {
     #[test]
     #[cfg(not(any(feature = "semantic-ext", feature = "semantic")))]
     fn zero_onnx_stays_zero() {
-        assert!(!super::SEMANTIC_COMPILED);
-        assert!(!super::SEMANTIC_EXT_COMPILED);
+        const { assert!(!super::SEMANTIC_COMPILED) };
+        const { assert!(!super::SEMANTIC_EXT_COMPILED) };
     }
 }

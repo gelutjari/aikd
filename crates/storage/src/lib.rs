@@ -1,11 +1,12 @@
 pub mod atlas;
 pub mod cascade;
 pub mod events;
+pub mod fts;
 pub mod graph;
 pub mod maintenance;
+pub mod memory;
 pub mod schema;
 pub mod symbols;
-pub mod memory;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -215,35 +216,18 @@ impl Database {
                 let (cid, fp, hj, ht, co, ls, le) = row?;
 
                 // Apply filters in application layer
-                if let Some(ref p) = filters.path_contains {
-                    if !fp.contains(p.as_str()) {
-                        continue;
-                    }
-                }
-                if let Some(ref pe) = filters.path_exclude {
-                    if fp.contains(pe.as_str()) {
-                        continue;
-                    }
-                }
-                if let Some(ref ft) = filters.file_types {
-                    let has_ext = ft.iter().any(|ext| fp.ends_with(&format!(".{ext}")));
-                    if !has_ext {
-                        continue;
-                    }
-                }
-                if let Some(ref h) = filters.heading_contains {
-                    if !ht.contains(h.as_str()) {
-                        continue;
-                    }
+                if !filters.matches_path(&fp) || !filters.matches_heading(&ht) {
+                    continue;
                 }
 
                 let hier: Vec<String> = serde_json::from_str(&hj).unwrap_or_default();
+                let snippet = fts::read_snippet_or_fallback(&fp, ls, le, &co);
                 results.push(aikd_core::SearchResult {
                     chunk_id: cid,
                     file_path: fp,
                     heading_hierarchy: hier.join(" > "),
                     heading_text: ht,
-                    content: co,
+                    content: snippet,
                     line_start: ls,
                     line_end: le,
                     score: 0.0,

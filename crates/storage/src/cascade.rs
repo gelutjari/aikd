@@ -23,11 +23,19 @@ pub fn delete_file_cascade(conn: &Connection, path: &str) -> Result<usize> {
 
 /// Delete by `files.id`. Returns chunks removed.
 pub fn delete_file_id_cascade(conn: &Connection, fid: i64) -> Result<usize> {
+    let _ = crate::fts::remove_file_fts(conn, fid);
     conn.execute(
         "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)",
         rusqlite::params![fid],
     )?;
-    let chunks = conn.execute("DELETE FROM chunks WHERE file_id=?1", rusqlite::params![fid])?;
+    let _ = conn.execute(
+        "DELETE FROM code_symbols WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?1)",
+        rusqlite::params![fid],
+    );
+    let chunks = conn.execute(
+        "DELETE FROM chunks WHERE file_id=?1",
+        rusqlite::params![fid],
+    )?;
     conn.execute("DELETE FROM files WHERE id=?1", rusqlite::params![fid])?;
     Ok(chunks)
 }
@@ -43,7 +51,10 @@ pub fn delete_session_cascade(conn: &Connection, session_id: &str) -> Result<usi
         "DELETE FROM conversations WHERE session_id=?1",
         rusqlite::params![session_id],
     )?;
-    conn.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![session_id])?;
+    conn.execute(
+        "DELETE FROM sessions WHERE id=?1",
+        rusqlite::params![session_id],
+    )?;
     Ok(convs)
 }
 
@@ -74,9 +85,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(delete_file_cascade(&conn, "/a.md").unwrap(), 1);
-        let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
-        let chunks: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).unwrap();
-        let emb: i64 = conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap();
+        let files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        let chunks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap();
+        let emb: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+            .unwrap();
         assert_eq!((files, chunks, emb), (0, 0, 0));
     }
 
@@ -101,7 +118,9 @@ mod tests {
         .unwrap();
         assert_eq!(delete_session_cascade(&conn, "s1").unwrap(), 1);
         let ce: i64 = conn
-            .query_row("SELECT COUNT(*) FROM conversation_embeddings", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM conversation_embeddings", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(ce, 0);
     }

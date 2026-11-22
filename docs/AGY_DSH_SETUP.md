@@ -16,9 +16,14 @@ agy -p "Gunakan tool aikd_stats dari MCP aikd. Jika tidak ada, jawab: NO-AIKD-TO
 ```
 
 Harapan: AGY memanggil `query`, `symbol`, `memory_*`, `handoff`, `event_append`
-dari server `aikd` (19 tool). Bila AGY tidak melihat tool: pastikan binary di
+dari server `aikd` (15 tool MCP). Bila AGY tidak melihat tool: pastikan binary di
 PATH (`aikd --version`), atau ganti command ke absolute path di atas
 (GUI/daemon kadang PATH minim — riset: penyebab #1 spawn ENOENT).
+
+Catatan versi shim: `aikd --version` melaporkan `CARGO_PKG_VERSION` compile-time
+dari binary (mis. `2.0.0`), sedangkan `~/.aikd/active-version` adalah label folder
+manajemen (mis. `2.0.0-identity`). Jalankan `aikd update --list` atau `aikd doctor`
+untuk melihat keduanya sekaligus.
 
 ## DSH — via CLI + skill (TIDAK BISA diuji: config DSH rusak)
 
