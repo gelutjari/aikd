@@ -20,10 +20,13 @@
 
 ---
 
-## 🎬 See It In Action (Code Motion)
+## 🎬 See It In Action (Code Motion Video & Architecture)
 
 <div align="center">
-  <img src="assets/code-motion.svg" alt="AIKD v2.0 Code Motion — Anti-Context-Rot & Multi-Agent Memory Engine" width="100%" />
+  <img src="assets/demo.gif" alt="AIKD v2.0 Code Motion Demo — Context Rot Fix, 16+ Agents, FTS5 Search & AIKD Studio" width="100%" />
+  <br /><br />
+  <img src="assets/code-motion.svg" alt="AIKD v2.0 Animated Architecture & Terminal Workflow" width="100%" />
+  <p><sub>📺 Full HD 1280×720 MP4 also available in <a href="assets/demo.mp4"><code>assets/demo.mp4</code></a></sub></p>
 </div>
 
 ---
