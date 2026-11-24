@@ -389,6 +389,15 @@ kbd {
 .graph-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; text-align: center; padding: 20px; background: rgba(6, 10, 17, .66); }
 .graph-empty strong { font-size: 14px; }
 .graph-empty p { font-size: 12px; color: var(--muted); max-width: 48ch; }
+.graph-alt-stage { position: relative; height: clamp(430px, calc(100vh - 318px), 860px); border-radius: 0 0 var(--radius) var(--radius); overflow: hidden; background: radial-gradient(700px 420px at 50% 45%, #101b2c 0%, #070c14 68%); }
+.graph-alt-stage > canvas, .graph-alt-stage canvas { display: block; touch-action: none; }
+.graph-alt-stage .gv-loading, .graph-alt-stage .gv-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center; padding: 24px; font-size: 12px; color: var(--muted); }
+#graph-view-switcher { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.graph-view-fallback-group { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: rgba(8, 13, 22, .72); }
+.graph-view-fallback-group button { border: 1px solid transparent; background: transparent; color: var(--muted); font-size: 10.5px; padding: 4px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.graph-view-fallback-group button.active { color: #e8eff8; background: rgba(91, 140, 255, .18); border-color: rgba(91, 140, 255, .42); }
+.graph-view-fallback-group button:hover { color: var(--fg-2); }
+@media (max-width: 900px) { .graph-alt-stage { height: 66vh; } }
 
 /* ---------- Notes ---------- */
 .notes-layout { display: grid; grid-template-columns: 238px minmax(0, 1fr) 264px; gap: 10px; height: calc(100vh - var(--topbar-h) - 148px); min-height: 520px; }
@@ -840,7 +849,7 @@ kbd {
             <button data-preset="code">Code Map</button>
             <button data-preset="all">All</button>
           </div>
-          <button class="btn btn-sm btn-primary" id="graph-view-toggle" title="Toggle renderer">◉ Force-Directed Galaxy</button>
+          <div id="graph-view-switcher" title="Switch graph view mode"></div>
           <div class="segmented" id="graph-mode-seg" title="Graph scope">
             <button data-mode="global" class="active">Global</button>
             <button data-mode="local">Local</button>
@@ -864,7 +873,7 @@ kbd {
           <div id="graph-types" class="chip-row"></div>
         </div>
       </div>
-      <div class="panel">
+      <div class="panel" id="graph-canvas-panel">
         <div class="graph-stage" id="graph-stage">
           <canvas id="graph-canvas"></canvas>
           <div id="graph-legend" class="graph-legend"></div>
@@ -875,6 +884,9 @@ kbd {
             <button class="btn btn-sm btn-primary" id="btn-graph-empty-scan">Scan workspace</button>
           </div>
         </div>
+      </div>
+      <div class="panel hidden" id="graph-alt-panel">
+        <div id="graph-alt-stage" class="graph-alt-stage"></div>
       </div>
     </section>
 
@@ -1318,6 +1330,7 @@ GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz</textarea>
 <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 <datalist id="project-list"></datalist>
 
+<script src="/ui/graph-modules.js"></script>
 <script>
 "use strict";
 /* ============================================================
@@ -1361,6 +1374,7 @@ const state = {
     selected: null, hover: null, view: { x: 0, y: 0, z: 1 },
     preset: 'knowledge', mode: 'global', depth: 1, types: new Set(['project', 'note', 'memory', 'tag', 'agent']),
     hideOrphans: false, tree: false, search: '',
+    viewMode: 'galaxy', activeView: null, switcher: null,
     canvasW: 0, canvasH: 0, dpr: 1,
     dragging: null, panning: false, panStart: null, pointerDown: null,
     alpha: 1, raf: 0, dirtyDraw: true, rendered: false, loading: false
@@ -1991,7 +2005,7 @@ function showPage(page, options) {
   url.searchParams.set('tab', target);
   url.searchParams.delete('capture');
   try { history.replaceState(null, '', url.toString()); } catch (e) { /* ignore */ }
-  if (target !== 'graph') stopGraphLoop();
+  if (target !== 'graph') { stopGraphLoop(); destroyActiveGraphView(); }
   if (target !== 'notes' && target !== 'graph' && target !== 'code') { /* inspector may stay */ }
   ensurePage(target, !!(options && options.force));
 }
@@ -1999,7 +2013,7 @@ function ensurePage(page, force) {
   const meta = PAGE_META[page];
   if (!meta) return;
   if (!force && state.loaded[page]) {
-    if (page === 'graph') { resizeGraph(); startGraphLoop(); }
+    if (page === 'graph') { ensureGraphViewMounted(); }
     return;
   }
   if (page === 'graph') {
@@ -2416,7 +2430,7 @@ async function runMaintenance(action) {
 async function loadGraphPage(force) {
   const g = state.graph;
   if (!g.rendered || force) await loadGraph(force);
-  else { resizeGraph(); startGraphLoop(); }
+  ensureGraphViewMounted();
 }
 function graphQueryParams() {
   const g = state.graph;
@@ -2490,6 +2504,8 @@ function normalizeGraphData(data) {
       scope: raw.scope || '',
       provenance: raw.provenance || '',
       degree: toNum(raw.degree, 0),
+      updated_at: raw.updated_at || raw.updated || '',
+      created_at: raw.created_at || raw.created || '',
       x: NaN, y: NaN, vx: 0, vy: 0, r: 6
     });
   });
@@ -2662,12 +2678,13 @@ function recomputeGraph(resetView) {
     const title = empty.querySelector('strong');
     if (title) title.textContent = nodes.length ? '' : (g.rawNodes.length ? 'No nodes match the current filters' : 'Nothing to draw yet');
   }
+  refreshGraphView();
 }
 function renderGraphStats() {
   const g = state.graph;
   const host = $('graph-stats');
   if (!host) return;
-  const modeLabel = g.tree ? 'tree' : 'galaxy';
+  const modeLabel = g.viewMode || (g.tree ? 'tree' : 'galaxy');
   host.textContent = g.nodes.length + '/' + g.rawNodes.length + ' nodes · ' + g.edges.length + ' edges · ' + modeLabel + ' · ' + g.mode;
 }
 function renderGraphLegend() {
@@ -2695,24 +2712,10 @@ function syncGraphModeUI() {
   $$('#graph-mode-seg button').forEach((btn) => btn.classList.toggle('active', btn.dataset.mode === g.mode));
   const depth = $('graph-depth');
   if (depth) depth.disabled = g.mode !== 'local';
-  const toggle = $('graph-view-toggle');
-  if (toggle) toggle.textContent = g.tree ? '▤ Hierarchy Tree' : '◉ Force-Directed Galaxy';
+  syncGraphSwitcher();
 }
 function toggleGraphView() {
-  const g = state.graph;
-  g.tree = !g.tree;
-  if (g.tree) {
-    assignTreePositions();
-  } else {
-    g.posMode = 'galaxy';
-    g.nodes.forEach((n) => { n.x = NaN; n.y = NaN; n.vx = 0; n.vy = 0; });
-    initGalaxyPositions(g.nodes);
-  }
-  g.alpha = 1;
-  g.dirtyDraw = true;
-  syncGraphModeUI();
-  fitGraph();
-  startGraphLoop();
+  setGraphViewMode(state.graph.tree ? 'galaxy' : 'tree');
 }
 function resizeGraph() {
   const g = state.graph;
@@ -3109,6 +3112,7 @@ function selectGraphNode(node) {
   state.graph.dirtyDraw = true;
   inspectNode(node.id);
   drawGraph();
+  refreshGraphView();
 }
 function focusLocal(id) {
   const g = state.graph;
@@ -3120,8 +3124,15 @@ function focusLocal(id) {
   if ($('graph-search')) $('graph-search').value = '';
   g.search = '';
   loadGraph(true).then(() => {
-    const focusNode = g.nodeMap.get(id);
-    if (focusNode) centerOnNode(id);
+    if (!isLegacyGraphMode(g.viewMode)) {
+      if (g.activeView && typeof g.activeView.focusNode === 'function') {
+        try { g.activeView.focusNode(id); } catch (e) { /* optional */ }
+      }
+      refreshGraphView();
+    } else {
+      const focusNode = g.nodeMap.get(id);
+      if (focusNode) centerOnNode(id);
+    }
     toast('Focused local graph on ' + graphLabel(node), 'info');
   });
 }
@@ -3279,6 +3290,216 @@ async function openNoteForNode(node) {
   });
 }
 
+/* ---------- 10-mode graph view orchestration ---------- */
+const GRAPH_VIEW_GROUPS = [
+  { label: '2D & Structured', modes: [
+    { key: 'galaxy', label: '2D Galaxy' },
+    { key: 'tree', label: 'Hierarchy Tree' },
+    { key: 'treemap', label: 'Treemap / 3D City' },
+    { key: 'packing', label: 'Circle Packing' },
+    { key: 'sunburst', label: 'Sunburst' },
+    { key: 'islands', label: 'Semantic Islands' },
+    { key: 'miller', label: 'Miller Columns' },
+    { key: 'timeline', label: 'Swimlane Timeline' }
+  ] },
+  { label: '3D Spatial', modes: [
+    { key: '3d-galaxy', label: '3D Force Galaxy' },
+    { key: '3d-sphere', label: '3D Fibonacci Sphere' },
+    { key: '3d-orbital', label: '3D Orbital Rings' },
+    { key: '3d-layers', label: '3D Semantic Layers' }
+  ] }
+];
+const GRAPH_VIEW_LABELS = {};
+GRAPH_VIEW_GROUPS.forEach((group) => group.modes.forEach((mode) => { GRAPH_VIEW_LABELS[mode.key] = mode.label; }));
+function isLegacyGraphMode(mode) { return mode === 'galaxy' || mode === 'tree'; }
+function graphViewModules() {
+  return (window.AIKD_GRAPH && window.AIKD_GRAPH.views) || {};
+}
+function graphViewSwitcherApi() {
+  return (window.AIKD_GRAPH && window.AIKD_GRAPH.ViewModeSwitcher) || null;
+}
+function buildGraphCtx() {
+  const g = state.graph;
+  const nodes = g.nodes.map((node) => ({
+    id: node.id, kind: node.kind, subtype: node.subtype || '', label: node.label,
+    project: node.project || '', scope: node.scope || '', provenance: node.provenance || '',
+    degree: toNum(node.degree), updated_at: node.updated_at || '', created_at: node.created_at || ''
+  }));
+  const edges = g.edges.map((edge) => ({
+    from: edge.from, to: edge.to, kind: edge.kind, provenance: edge.provenance || ''
+  }));
+  return {
+    container: $('graph-alt-stage'),
+    nodes: nodes,
+    edges: edges,
+    rawNodes: g.rawNodes,
+    rawEdges: g.rawEdges,
+    selectedId: g.selected,
+    depth: g.depth,
+    mode: g.mode,
+    helpers: {
+      kindColor: kindColor,
+      graphLabel: graphLabel,
+      basename: basename,
+      clampText: clampText,
+      esc: esc,
+      onSelectNode: (node) => selectGraphNode(node),
+      onFocusLocal: (nodeId) => focusLocal(nodeId)
+    }
+  };
+}
+function mountFallbackGraphSwitcher(host) {
+  host.classList.add('graph-view-fallback');
+  host.innerHTML = GRAPH_VIEW_GROUPS.map((group) =>
+    '<span class="graph-view-fallback-group" role="group" aria-label="' + esc(group.label) + '">' +
+    group.modes.map((mode) =>
+      '<button type="button" data-graph-view="' + mode.key + '" title="' + esc(mode.label) + '">' + esc(mode.label) + '</button>'
+    ).join('') + '</span>'
+  ).join('');
+  return {
+    setActive(mode) {
+      $$('#graph-view-switcher [data-graph-view]').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.graphView === mode);
+      });
+    }
+  };
+}
+function ensureGraphViewSwitcher() {
+  const g = state.graph;
+  if (g.switcher) return;
+  const host = $('graph-view-switcher');
+  if (!host) return;
+  host.innerHTML = '';
+  const api = graphViewSwitcherApi();
+  if (api && typeof api.mount === 'function') {
+    try {
+      const mounted = api.mount(host, g.viewMode, setGraphViewMode);
+      g.switcher = mounted && typeof mounted.setActive === 'function' ? mounted : api;
+    } catch (e) {
+      g.switcher = null;
+      notifyErr(e);
+    }
+  }
+  if (!g.switcher) {
+    g.switcher = mountFallbackGraphSwitcher(host);
+  }
+  if (typeof g.switcher.setActive === 'function') g.switcher.setActive(g.viewMode);
+}
+function syncGraphSwitcher() {
+  const g = state.graph;
+  ensureGraphViewSwitcher();
+  if (!g.switcher || typeof g.switcher.setActive !== 'function') return;
+  try { g.switcher.setActive(g.viewMode); } catch (e) { /* switcher optional */ }
+}
+function applyGraphViewChrome() {
+  const g = state.graph;
+  const legacy = isLegacyGraphMode(g.viewMode);
+  const canvasPanel = $('graph-canvas-panel');
+  const altPanel = $('graph-alt-panel');
+  if (canvasPanel) canvasPanel.classList.toggle('hidden', !legacy);
+  if (altPanel) altPanel.classList.toggle('hidden', legacy);
+  if (!legacy) stopGraphLoop();
+  syncGraphSwitcher();
+}
+function destroyActiveGraphView() {
+  const g = state.graph;
+  const view = g.activeView;
+  g.activeView = null;
+  if (view && typeof view.destroy === 'function') {
+    try { view.destroy(); } catch (e) { console.warn('Graph view destroy failed', e); }
+  }
+  const stage = $('graph-alt-stage');
+  if (stage) stage.innerHTML = '';
+}
+function mountActiveGraphView(force) {
+  const g = state.graph;
+  if (isLegacyGraphMode(g.viewMode)) return false;
+  const stage = $('graph-alt-stage');
+  if (!stage) return false;
+  if (g.activeView && !force) { refreshGraphView(); return true; }
+  destroyActiveGraphView();
+  const view = graphViewModules()[g.viewMode];
+  if (!view || typeof view.mount !== 'function') {
+    stage.innerHTML = '<div class="gv-empty"><strong>View module unavailable</strong><p>The ' +
+      esc(GRAPH_VIEW_LABELS[g.viewMode] || g.viewMode) + ' module did not load. Pick another mode to keep exploring.</p></div>';
+    return false;
+  }
+  try {
+    g.activeView = view.mount(buildGraphCtx()) || view;
+    return true;
+  } catch (e) {
+    g.activeView = null;
+    stage.innerHTML = '<div class="gv-empty"><strong>View failed to mount</strong><p>' + esc(e && e.message ? e.message : 'Unknown error') + '</p></div>';
+    notifyErr(e);
+    return false;
+  }
+}
+function refreshGraphView() {
+  const g = state.graph;
+  if (isLegacyGraphMode(g.viewMode)) return;
+  if (!g.activeView) {
+    if (state.page === 'graph') mountActiveGraphView(true);
+    return;
+  }
+  if (typeof g.activeView.update !== 'function') return;
+  try { g.activeView.update(buildGraphCtx()); } catch (e) { console.warn('Graph view update failed', e); }
+}
+function ensureGraphViewMounted() {
+  const g = state.graph;
+  ensureGraphViewSwitcher();
+  applyGraphViewChrome();
+  if (isLegacyGraphMode(g.viewMode)) {
+    if (state.page === 'graph') { resizeGraph(); startGraphLoop(); }
+    return;
+  }
+  if (state.page !== 'graph') return;
+  if (!g.activeView) mountActiveGraphView(true);
+  else refreshGraphView();
+}
+function setGraphViewMode(mode) {
+  const g = state.graph;
+  const next = GRAPH_VIEW_LABELS[mode] ? mode : 'galaxy';
+  if (next === g.viewMode) { syncGraphSwitcher(); return; }
+  destroyActiveGraphView();
+  g.viewMode = next;
+  g.tree = next === 'tree';
+  const legacy = isLegacyGraphMode(next);
+  if (legacy) {
+    if (g.tree) {
+      assignTreePositions();
+    } else {
+      g.posMode = 'galaxy';
+      g.nodes.forEach((node) => { node.x = NaN; node.y = NaN; node.vx = 0; node.vy = 0; });
+      initGalaxyPositions(g.nodes);
+    }
+    g.alpha = 0.95;
+    g.dirtyDraw = true;
+  }
+  applyGraphViewChrome();
+  syncGraphModeUI();
+  renderGraphStats();
+  if (legacy) {
+    if (state.page === 'graph') { fitGraph(); startGraphLoop(); }
+  } else if (state.page === 'graph') {
+    mountActiveGraphView(true);
+  }
+  syncGraphSwitcher();
+}
+function focusGraphNode(id) {
+  if (!id) return;
+  const g = state.graph;
+  const node = g.nodeMap.get(id) || g.rawNodes.find((n) => n.id === id);
+  if (!node) return;
+  selectGraphNode(node);
+  if (isLegacyGraphMode(g.viewMode)) {
+    centerOnNode(id);
+    return;
+  }
+  if (g.activeView && typeof g.activeView.focusNode === 'function') {
+    try { g.activeView.focusNode(id); } catch (e) { console.warn('Graph focus failed', e); }
+  }
+}
+
 /* ---------- Graph event bindings ---------- */
 let graphBound = false;
 function bindGraph() {
@@ -3388,7 +3609,10 @@ function bindGraph() {
     const node = graphPick(canvasPoint(event));
     if (node) focusLocal(node.id);
   });
-  $('graph-view-toggle').addEventListener('click', toggleGraphView);
+  $('graph-view-switcher').addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-graph-view]');
+    if (btn) setGraphViewMode(btn.dataset.graphView);
+  });
   $$('#graph-preset-seg button').forEach((btn) => btn.addEventListener('click', () => {
     const preset = btn.dataset.preset || 'knowledge';
     state.graph.preset = preset;
@@ -3406,18 +3630,18 @@ function bindGraph() {
   $('graph-orphans').addEventListener('change', () => {
     state.graph.hideOrphans = $('graph-orphans').checked;
     recomputeGraph(true);
-    startGraphLoop();
+    if (isLegacyGraphMode(state.graph.viewMode)) startGraphLoop();
   });
   $('graph-search').addEventListener('input', debounce(() => {
     state.graph.search = $('graph-search').value.trim();
     recomputeGraph(true);
-    startGraphLoop();
+    if (isLegacyGraphMode(state.graph.viewMode)) startGraphLoop();
   }, 200));
   $('graph-search').addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
     event.preventDefault();
     const first = state.graph.nodes.slice().sort((a, b) => b.degree - a.degree)[0];
-    if (first) { selectGraphNode(first); centerOnNode(first.id); }
+    if (first) { focusGraphNode(first.id); }
     else toast('No node matches that search.', 'warn');
   });
   $('graph-types').addEventListener('click', (event) => {
@@ -3427,7 +3651,10 @@ function bindGraph() {
     setGraphTypes(kind, !state.graph.types.has(kind));
   });
   $('btn-graph-refresh').addEventListener('click', () => loadGraph(true));
-  $('btn-graph-fit').addEventListener('click', () => { fitGraph(); startGraphLoop(); });
+  $('btn-graph-fit').addEventListener('click', () => {
+    if (isLegacyGraphMode(state.graph.viewMode)) { fitGraph(); startGraphLoop(); }
+    else mountActiveGraphView(true);
+  });
   $('btn-graph-capture').addEventListener('click', () => openSend({ folder: 'Inbox', project: state.workspace }));
   $('graph-empty').addEventListener('click', (event) => {
     if (event.target.closest('#btn-graph-empty-scan')) runScan(state.workspace || '');
@@ -3444,6 +3671,8 @@ function bindGraph() {
     } catch (e) { /* observer optional */ }
   }
   syncGraphModeUI();
+  ensureGraphViewSwitcher();
+  applyGraphViewChrome();
   renderGraphLegend();
   renderTypeChips();
 }
@@ -5213,10 +5442,8 @@ function bindGlobalUI() {
     if (goto) {
       const id = goto.dataset.goto;
       const node = state.graph.rawNodes.find((n) => n.id === id);
-      state.graph.selected = id;
-      inspectNode(id);
-      if (node) centerOnNode(id);
-      else inspectNode(id);
+      if (node || (state.graph.nodeMap && state.graph.nodeMap.has(id))) focusGraphNode(id);
+      else { state.graph.selected = id; inspectNode(id); refreshGraphView(); }
       return;
     }
     const action = event.target.closest('[data-insp-action]');

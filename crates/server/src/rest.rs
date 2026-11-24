@@ -2541,9 +2541,55 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
             .into_response()
     }
 
+    /// Modular knowledge-graph views (10-mode upgrade), served as one embedded
+    /// bundle so AIKD Studio stays 100% offline with zero external requests.
+    async fn handle_graph_modules(
+        State(state): State<RestState>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        let cfg = state.config.lock().await.clone();
+        if !check_auth(&headers, &cfg.server.auth_token) {
+            return unauthorized().into_response();
+        }
+        // Concatenated in load order: shared adapter -> switcher -> view modules.
+        // `include_str!` keeps every byte inside the compiled binary.
+        const GRAPH_MODULES: &str = concat!(
+            include_str!("ui/adapters/graphViewAdapter.js"),
+            "\n;\n",
+            include_str!("ui/components/ViewModeSwitcher.js"),
+            "\n;\n",
+            include_str!("ui/views/SpatialGraph3DView.js"),
+            "\n;\n",
+            include_str!("ui/views/CityTreemapView.js"),
+            "\n;\n",
+            include_str!("ui/views/CirclePackingView.js"),
+            "\n;\n",
+            include_str!("ui/views/SunburstView.js"),
+            "\n;\n",
+            include_str!("ui/views/SemanticIslandsView.js"),
+            "\n;\n",
+            include_str!("ui/views/MillerColumnsView.js"),
+            "\n;\n",
+            include_str!("ui/views/SwimlaneTimelineView.js"),
+            "\n",
+        );
+        (
+            [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/javascript; charset=utf-8",
+                ),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+            ],
+            GRAPH_MODULES,
+        )
+            .into_response()
+    }
+
     let app = Router::new()
         .route("/", get(handle_ui))
         .route("/ui", get(handle_ui))
+        .route("/ui/graph-modules.js", get(handle_graph_modules))
         .route("/api/overview", get(handle_overview))
         .route("/api/health", get(handle_health))
         .route("/api/metrics", get(handle_metrics))
