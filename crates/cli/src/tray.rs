@@ -390,8 +390,59 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Opens AIKD Studio in App mode. Throttled so a left click that is followed by
-/// a double-click (or a held hotkey) does not open several windows.
+#[cfg(windows)]
+fn focus_existing_studio_window() -> bool {
+    use std::ffi::c_void;
+
+    extern "system" {
+        fn EnumWindows(
+            cb: unsafe extern "system" fn(*mut c_void, isize) -> i32,
+            lparam: isize,
+        ) -> i32;
+        fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+        fn IsIconic(hwnd: *mut c_void) -> i32;
+        fn GetWindowTextW(hwnd: *mut c_void, buf: *mut u16, max: i32) -> i32;
+        fn ShowWindow(hwnd: *mut c_void, cmd: i32) -> i32;
+        fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+    }
+    const SW_RESTORE: i32 = 9;
+    const SW_SHOW: i32 = 5;
+
+    unsafe extern "system" fn enum_cb(hwnd: *mut c_void, lparam: isize) -> i32 {
+        if IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let mut buf = [0u16; 256];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len > 0 {
+            let title = String::from_utf16_lossy(&buf[..len as usize]);
+            if title.contains("AIKD Studio") {
+                let target = lparam as *mut *mut c_void;
+                *target = hwnd;
+                return 0; // found
+            }
+        }
+        1
+    }
+
+    unsafe {
+        let mut found: *mut c_void = std::ptr::null_mut();
+        EnumWindows(enum_cb, (&mut found as *mut *mut c_void) as isize);
+        if !found.is_null() {
+            if IsIconic(found) != 0 {
+                ShowWindow(found, SW_RESTORE);
+            } else {
+                ShowWindow(found, SW_SHOW);
+            }
+            SetForegroundWindow(found);
+            return true;
+        }
+    }
+    false
+}
+
+/// Opens AIKD Studio in App mode. If an AIKD Studio window is already open,
+/// focuses it instead of spawning duplicates.
 fn open_ui(port: u16, capture: bool) {
     let now = now_ms();
     let last = LAST_OPEN_MS.load(Ordering::Relaxed);
@@ -399,6 +450,11 @@ fn open_ui(port: u16, capture: bool) {
         return;
     }
     LAST_OPEN_MS.store(now, Ordering::Relaxed);
+
+    #[cfg(windows)]
+    if !capture && focus_existing_studio_window() {
+        return;
+    }
 
     let mut url = format!("http://127.0.0.1:{port}/ui");
     if capture {
@@ -504,65 +560,8 @@ fn acquire_single_instance() -> bool {
 // Global hotkey Ctrl+Alt+N (Windows): dedicated message-loop thread
 // ---------------------------------------------------------------------------
 
-#[cfg(windows)]
-fn spawn_hotkey_thread(port: u16) {
-    std::thread::spawn(move || unsafe {
-        #[repr(C)]
-        struct Point {
-            x: i32,
-            y: i32,
-        }
-        #[repr(C)]
-        struct Msg {
-            hwnd: *mut std::ffi::c_void,
-            message: u32,
-            w_param: usize,
-            l_param: isize,
-            time: u32,
-            pt: Point,
-            l_private: u32,
-        }
-
-        extern "system" {
-            fn RegisterHotKey(hwnd: *mut std::ffi::c_void, id: i32, modifiers: u32, vk: u32)
-                -> i32;
-            fn GetMessageW(
-                msg: *mut Msg,
-                hwnd: *mut std::ffi::c_void,
-                filter_min: u32,
-                filter_max: u32,
-            ) -> i32;
-        }
-
-        const MOD_ALT: u32 = 0x0001;
-        const MOD_CONTROL: u32 = 0x0002;
-        const MOD_NOREPEAT: u32 = 0x4000;
-        const VK_N: u32 = 0x4E;
-        const WM_HOTKEY: u32 = 0x0312;
-
-        if RegisterHotKey(
-            std::ptr::null_mut(),
-            1,
-            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
-            VK_N,
-        ) == 0
-        {
-            // Combination already owned by another app: tray keeps working.
-            return;
-        }
-        let mut msg: Msg = std::mem::zeroed();
-        loop {
-            if GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) <= 0 {
-                break;
-            }
-            if msg.message == WM_HOTKEY {
-                open_ui(port, true);
-            }
-        }
-    });
-}
-
 #[cfg(not(windows))]
+fn spawn_hotkey_thread(_port: u16) {}
 fn spawn_hotkey_thread(_port: u16) {}
 
 // ---------------------------------------------------------------------------
@@ -881,6 +880,7 @@ mod win32_tray {
         fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
         fn RegisterHotKey(hwnd: *mut c_void, id: i32, modifiers: u32, vk: u32) -> i32;
         fn UnregisterHotKey(hwnd: *mut c_void, id: i32) -> i32;
+        fn GetLastError() -> u32;
         fn CreateBitmap(w: i32, h: i32, planes: u32, bpp: u32, bits: *const c_void) -> *mut c_void;
         fn CreateIconIndirect(info: *const IconInfo) -> *mut c_void;
         fn DestroyIcon(hicon: *mut c_void) -> i32;
@@ -932,7 +932,7 @@ mod win32_tray {
 
     static mut STATE_PTR: *mut State = std::ptr::null_mut();
 
-    unsafe fn register_or_modify(st: &State, cmd: u32) {
+    unsafe fn register_or_modify(st: &State, cmd: u32) -> i32 {
         let mut nid: NotifyIconDataW = std::mem::zeroed();
         nid.cb_size = std::mem::size_of::<NotifyIconDataW>() as u32;
         nid.h_wnd = st.hwnd;
@@ -944,7 +944,8 @@ mod win32_tray {
         for i in 0..tip.len().min(127) {
             nid.sz_tip[i] = tip[i];
         }
-        Shell_NotifyIconW(cmd, &mut nid);
+        let _ = GetLastError();
+        Shell_NotifyIconW(cmd, &mut nid)
     }
 
     unsafe fn show_menu(st: &mut State) {
