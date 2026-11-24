@@ -7,14 +7,35 @@
  *   POST /api/send          save captured content
  *   GET  /api/context-pack  copy a dense Markdown pack for web AI chats
  *
- * Settings persist in chrome.storage.local: aikdPort, aikdProject, aikdNotify.
+ * Settings persist in chrome.storage.local: aikdPort, aikdProject, aikdNotify,
+ * aikdKind, aikdScope, aikdFolder. Capture preferences are restored on every open.
  */
 "use strict";
 
 const DEFAULT_PORT = 9090;
 const HOSTS = ["127.0.0.1", "localhost"];
 const MAX_TAGS = 12;
+const EXTRACT_LIMIT = 12000;
 const TAG_RE = /#([\p{L}\p{N}_-]{2,40})/gu;
+const DOMAIN_TAGS = [
+  [/chatgpt\.com|chat\.openai\.com|openai\.com/i, "chatgpt"],
+  [/claude\.ai|anthropic\.com/i, "claude"],
+  [/gemini\.google\.com|bard\.google\.com/i, "gemini"],
+  [/copilot\.microsoft\.com/i, "copilot"],
+  [/perplexity\.ai/i, "perplexity"],
+  [/grok\.com/i, "grok"],
+  [/deepseek\.com/i, "deepseek"],
+  [/chat\.mistral\.ai|mistral\.ai/i, "mistral"],
+  [/poe\.com/i, "poe"],
+  [/github\.com/i, "github"],
+  [/stackoverflow\.com|stackexchange\.com/i, "stackoverflow"],
+  [/youtube\.com|youtu\.be/i, "youtube"],
+  [/reddit\.com/i, "reddit"],
+  [/medium\.com|substack\.com|dev\.to|hashnode\.com/i, "blog"],
+  [/notion\.so/i, "notion"],
+  [/docs\.google\.com/i, "google-docs"],
+  [/arxiv\.org/i, "paper"],
+];
 const SECRET_RE =
   /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}|\bAIza[0-9A-Za-z_-]{20,}|\bgh[pousr]_[A-Za-z0-9_]{20,}|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{12,}|\bBearer\s+[A-Za-z0-9._-]{20,}|\b(?:api_key|token|secret|password)\s*[:=]\s*["']?[^\s"']{16,}/gi;
 
@@ -40,11 +61,21 @@ async function boot() {
   cacheElements();
   bindEvents();
 
-  const settings = await storageGet({ aikdPort: DEFAULT_PORT, aikdProject: "", aikdNotify: true });
+  const settings = await storageGet({
+    aikdPort: DEFAULT_PORT,
+    aikdProject: "",
+    aikdNotify: true,
+    aikdKind: "note",
+    aikdScope: "project",
+    aikdFolder: "Inbox",
+  });
   state.port = normalizePort(settings.aikdPort);
   state.project = typeof settings.aikdProject === "string" ? settings.aikdProject : "";
   el.port.value = String(state.port);
   el.notify.checked = settings.aikdNotify !== false;
+  el.kind.value = pickOption(el.kind, settings.aikdKind, "note");
+  el.scope.value = pickOption(el.scope, settings.aikdScope, "project");
+  el.folder.value = pickOption(el.folder, settings.aikdFolder, "Inbox");
   el.project.disabled = el.scope.value === "global";
 
   renderTags();
@@ -119,12 +150,15 @@ function bindEvents() {
   el.scope.addEventListener("change", () => {
     const isGlobal = el.scope.value === "global";
     el.project.disabled = isGlobal;
+    persistCapturePrefs();
     if (isGlobal) setStatus("Scope global — project will be ignored.", "info");
   });
+  el.kind.addEventListener("change", persistCapturePrefs);
+  el.folder.addEventListener("change", persistCapturePrefs);
 
   el.project.addEventListener("change", () => {
     state.project = el.project.value;
-    storageSet({ aikdProject: state.project });
+    persistCapturePrefs();
   });
 
   el.tagInput.addEventListener("keydown", (event) => {
@@ -156,6 +190,167 @@ function bindEvents() {
 
 /* ------------------------------ tab capture ------------------------------ */
 
+/**
+ * Injected into the active page by chrome.scripting.executeScript.
+ * Must stay fully self-contained (it is serialized, not closed over).
+ *
+ * Priority: live selection -> AI chat transcript -> article/main text -> body text.
+ * Returns `{ mode, text, title, url, description }` so the popup can always
+ * compose a non-empty BODY even on protected pages.
+ */
+function extractPageForAikd() {
+  const LIMIT = 12000;
+  const clean = (value) =>
+    String(value || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  const meta = (selector) => {
+    const node = document.querySelector(selector);
+    return node && node.content ? clean(node.content) : "";
+  };
+
+  const url = String(location.href || "");
+  const title = String(document.title || location.hostname || "");
+  const description =
+    meta('meta[name="description"]') || meta('meta[property="og:description"]');
+
+  let selection = "";
+  try {
+    selection = clean(window.getSelection ? window.getSelection().toString() : "");
+  } catch (_) {
+    selection = "";
+  }
+  if (selection) {
+    return {
+      mode: "selection",
+      text: selection.slice(0, LIMIT),
+      title,
+      url,
+      description,
+    };
+  }
+
+  const chatSelector = [
+    "[data-message-author-role]",
+    "[data-testid='user-message']",
+    "[data-testid='assistant-message']",
+    ".font-claude-message",
+    "user-query",
+    "model-response",
+    "[data-testid^='conversation-turn-']",
+  ].join(",");
+
+  const roleOf = (node) => {
+    const attr = node.getAttribute ? node.getAttribute("data-message-author-role") : "";
+    if (attr) {
+      const role = String(attr).toLowerCase();
+      if (role === "user" || role === "human") return "You";
+      if (role === "assistant" || role === "ai" || role === "model") return "Assistant";
+      return attr;
+    }
+    const testid = node.getAttribute ? node.getAttribute("data-testid") : "";
+    if (testid === "user-message") return "You";
+    if (testid === "assistant-message") return "Assistant";
+    const tag = node.tagName ? node.tagName.toLowerCase() : "";
+    if (tag === "user-query") return "You";
+    if (tag === "model-response") return "Assistant";
+    if (node.classList && node.classList.contains("font-claude-message")) return "Assistant";
+    return "";
+  };
+
+  let messages = [];
+  try {
+    const candidates = Array.prototype.slice
+      .call(document.querySelectorAll(chatSelector), 0, 250)
+      .filter((node) => clean(node.innerText).length >= 2);
+    // Keep the innermost nodes so wrappers do not duplicate whole turns.
+    const picked = candidates.filter(
+      (node) => !candidates.some((other) => other !== node && node.contains(other))
+    );
+    const seen = Object.create(null);
+    for (const node of picked) {
+      const text = clean(node.innerText);
+      if (!text) continue;
+      const key = text.slice(0, 180);
+      if (seen[key]) continue;
+      seen[key] = true;
+      messages.push({ role: roleOf(node), text: text.slice(0, 4000) });
+      if (messages.length >= 80) break;
+    }
+  } catch (_) {
+    messages = [];
+  }
+
+  if (messages.length) {
+    const transcript = messages
+      .slice(-50)
+      .map((message) => `${message.role || "Message"}:\n${message.text}`)
+      .join("\n\n");
+    const text = transcript.length > LIMIT ? transcript.slice(-LIMIT) : transcript;
+    return { mode: "chat", text, title, url, description };
+  }
+
+  const articleSelectors = [
+    "article",
+    "main",
+    "[role='main']",
+    ".markdown-body",
+    ".post-content",
+    ".entry-content",
+    ".article-body",
+    ".article-content",
+    "#content",
+    ".content",
+  ];
+  let articleText = "";
+  for (const selector of articleSelectors) {
+    let best = "";
+    try {
+      document.querySelectorAll(selector).forEach((node) => {
+        const text = clean(node.innerText);
+        if (text.length > best.length) best = text;
+      });
+    } catch (_) {
+      best = "";
+    }
+    if (best.length >= 160) {
+      articleText = best;
+      break;
+    }
+    if (best.length > articleText.length) articleText = best;
+  }
+
+  if (articleText.length >= 80) {
+    return {
+      mode: "article",
+      text: articleText.slice(0, LIMIT),
+      title,
+      url,
+      description,
+    };
+  }
+
+  let bodyText = "";
+  try {
+    bodyText = clean(document.body ? document.body.innerText : "");
+  } catch (_) {
+    bodyText = "";
+  }
+  if (bodyText) {
+    return {
+      mode: "page",
+      text: bodyText.slice(0, LIMIT),
+      title,
+      url,
+      description,
+    };
+  }
+
+  return { mode: "none", text: "", title, url, description };
+}
+
 async function fillFromTab() {
   let tab = null;
   try {
@@ -173,30 +368,113 @@ async function fillFromTab() {
   const url = tab.url || "";
   el.sourceHost.textContent = url || "active tab";
   el.sourceHost.title = url;
+  el.selectionHint.hidden = false;
+  el.selectionHint.textContent = "reading page…";
 
-  if (!el.title.value.trim()) {
-    el.title.value = String(tab.title || "").replace(/\s+/g, " ").trim();
+  let extraction = null;
+  if (typeof tab.id === "number") {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: extractPageForAikd,
+      });
+      extraction = results && results[0] ? results[0].result : null;
+    } catch (_) {
+      /* chrome://, Web Store, PDF viewer and other protected pages */
+      extraction = null;
+    }
   }
 
-  if (!tab.id) return;
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => {
-        const selected = window.getSelection ? window.getSelection().toString() : "";
-        return selected.slice(0, 8000);
-      },
-    });
-    const selection = results && results[0] && results[0].result ? String(results[0].result).trim() : "";
-    if (selection && !el.body.value.trim()) {
-      el.body.value = selection;
-      el.selectionHint.hidden = false;
-      el.selectionHint.textContent = `${selection.length.toLocaleString()} chars selected`;
-      updateCounter();
-      scheduleSecretScan();
+  const selection =
+    extraction && extraction.mode === "selection" ? String(extraction.text || "").trim() : "";
+
+  if (!el.title.value.trim()) {
+    el.title.value = String((extraction && extraction.title) || tab.title || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  if (!el.body.value.trim()) {
+    let body = "";
+    let hint = "";
+    if (selection) {
+      body = selection.slice(0, EXTRACT_LIMIT);
+      hint = `${body.length.toLocaleString()} chars selected`;
+    } else if (extraction && extraction.text) {
+      body = composeAutoBody(extraction, url);
+      hint = `auto · ${body.length.toLocaleString()} chars · ${modeLabel(extraction.mode)}`;
+      suggestDomainTag(extraction.url || url, extraction.mode);
+    } else {
+      body = fallbackBody(tab, extraction);
+      hint = "auto · readable text unavailable — placeholder added";
+      suggestDomainTag(url, "page");
     }
+    el.body.value = body;
+    el.selectionHint.hidden = false;
+    el.selectionHint.textContent = hint;
+    updateCounter();
+    scheduleSecretScan();
+  } else {
+    el.selectionHint.hidden = true;
+  }
+
+  if (!el.title.value.trim()) {
+    el.title.value = deriveTitle(el.body.value);
+  }
+}
+
+function composeAutoBody(extraction, url) {
+  const source = String(extraction.url || url || "").trim();
+  const description = String(extraction.description || "").trim();
+  const text = String(extraction.text || "").trim();
+  const parts = [];
+  if (source) parts.push(`> Source: ${source}`);
+  if (description) parts.push(`> ${truncate(description, 300)}`);
+  if (text) parts.push(text);
+  return parts.join("\n\n").slice(0, EXTRACT_LIMIT).trim();
+}
+
+function fallbackBody(tab, extraction) {
+  const url = String((extraction && extraction.url) || (tab && tab.url) || "");
+  const title = String(
+    (extraction && extraction.title) || (tab && tab.title) || hostOf(url) || "Captured page"
+  );
+  const description = extraction && extraction.description ? truncate(extraction.description, 300) : "";
+  const parts = [`# ${truncate(title, 140) || "Captured page"}`];
+  if (url) parts.push(`> Source: ${url}`);
+  if (description) parts.push(`> ${description}`);
+  parts.push("");
+  parts.push("_Page text could not be read automatically. Add your notes here._");
+  return parts.join("\n");
+}
+
+function modeLabel(mode) {
+  if (mode === "chat") return "chat transcript";
+  if (mode === "article") return "article text";
+  if (mode === "page") return "page text";
+  if (mode === "selection") return "selection";
+  return "page";
+}
+
+function suggestDomainTag(url, mode) {
+  if (state.tags.length) return;
+  const tag = domainTagFor(url, mode);
+  if (tag) addTag(tag);
+}
+
+function domainTagFor(url, mode) {
+  const host = hostOf(url).toLowerCase();
+  for (const [pattern, tag] of DOMAIN_TAGS) {
+    if (pattern.test(host)) return tag;
+  }
+  return mode === "chat" ? "ai-chat" : "web-clip";
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
   } catch (_) {
-    /* chrome://, Web Store and PDF viewer pages are not scriptable */
+    return "";
   }
 }
 
@@ -215,8 +493,7 @@ function commitPort() {
     return;
   }
   state.port = port;
-  state.project = "";
-  storageSet({ aikdPort: port, aikdProject: "" });
+  storageSet({ aikdPort: port });
   refreshConnection();
 }
 
@@ -692,6 +969,22 @@ function truncate(value, max) {
 function basename(path) {
   const parts = String(path || "").split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : "project";
+}
+
+function pickOption(select, value, fallback) {
+  const wanted = typeof value === "string" ? value : "";
+  const options = Array.from(select.options || []);
+  return options.some((option) => option.value === wanted) ? wanted : fallback;
+}
+
+function persistCapturePrefs() {
+  state.project = el.project.value;
+  storageSet({
+    aikdKind: el.kind.value,
+    aikdScope: el.scope.value,
+    aikdFolder: el.folder.value,
+    aikdProject: el.project.value,
+  });
 }
 
 function storageGet(defaults) {
