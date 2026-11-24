@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use aikd_core::{Config, ResourceProfile, SearchFilters};
 
+mod hooks;
 mod top;
 use aikd_embedder as embedder;
 use aikd_indexer::TantivyEngine;
@@ -351,6 +352,17 @@ enum Commands {
         workstream: String,
         #[arg(long, default_value = "30")]
         recent_events: usize,
+        #[arg(
+            long,
+            help = "Emit a compact one-screen context package (used by SessionStart/PreCompact hooks)"
+        )]
+        compact: bool,
+    },
+
+    #[command(about = "[HOOKS] Install or inspect Git and AI-agent auto-sync hooks")]
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
     },
 
     #[command(about = "[ATLAS] Project intelligence: analyze, show, write artifacts")]
@@ -461,6 +473,43 @@ enum EventAction {
         since: i64,
         #[arg(long, default_value = "50")]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum HooksAction {
+    #[command(
+        about = "Install Git hooks and/or Claude Code hooks (defaults to both when neither flag is given)"
+    )]
+    Install {
+        #[arg(
+            long,
+            help = "Project/repository path (defaults to the current directory)"
+        )]
+        project: Option<String>,
+        #[arg(long, help = "Install .git/hooks/post-commit and post-merge")]
+        git: bool,
+        #[arg(
+            long,
+            help = "Install Claude Code SessionStart/PreCompact hooks (preserves existing settings)"
+        )]
+        agents: bool,
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Custom Claude settings.json path (useful for tests / isolated profiles)"
+        )]
+        claude_settings: Option<String>,
+    },
+    #[command(about = "Report whether Git and agent hooks are installed")]
+    Status {
+        #[arg(
+            long,
+            help = "Project/repository path (defaults to the current directory)"
+        )]
+        project: Option<String>,
+        #[arg(long, help = "Machine-readable JSON output")]
+        json: bool,
     },
 }
 
@@ -725,7 +774,25 @@ async fn main() -> Result<()> {
         Commands::Handoff {
             workstream,
             recent_events,
-        } => cmd_handoff(&cli.config, &workstream, recent_events, json_mode),
+            compact,
+        } => cmd_handoff(&cli.config, &workstream, recent_events, compact, json_mode),
+        Commands::Hooks { action } => match action {
+            HooksAction::Install {
+                project,
+                git,
+                agents,
+                claude_settings,
+            } => hooks::run_install(
+                project.as_deref(),
+                git,
+                agents,
+                claude_settings.as_deref(),
+                json_mode,
+            ),
+            HooksAction::Status { project, json } => {
+                hooks::run_status(project.as_deref(), json || json_mode)
+            }
+        },
         Commands::Project { action } => cmd_project(&cli.config, action, json_mode),
         Commands::Context {
             query,
@@ -3197,6 +3264,7 @@ fn cmd_handoff(
     config_path: &str,
     workstream: &str,
     recent_events: usize,
+    compact: bool,
     json: bool,
 ) -> Result<()> {
     let cfg = load_validated(config_path);
@@ -3205,10 +3273,76 @@ fn cmd_handoff(
     let pkg = aikd_context::assemble_handoff(database.conn(), &project, workstream, recent_events)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&pkg).unwrap_or_default());
+    } else if compact {
+        println!("{}", render_handoff_compact(&pkg));
     } else {
         println!("{}", pkg.render_text());
     }
     Ok(())
+}
+
+/// One-screen handoff for SessionStart / PreCompact hooks: titles and first
+/// lines only, capped so it never bloats the agent's context window.
+fn render_handoff_compact(pkg: &aikd_context::HandoffPackage) -> String {
+    let mut out = format!(
+        "=== AIKD HANDOFF (compact): {} / {} ===\n",
+        pkg.project, pkg.workstream
+    );
+
+    if let Some(checkpoint) = &pkg.checkpoint {
+        out.push_str(&format!(
+            "CHECKPOINT: {}\n",
+            compact_line(&checkpoint.body, 240)
+        ));
+    }
+
+    render_compact_items(&mut out, "TASKS", &pkg.tasks, 5);
+    render_compact_items(&mut out, "DECISIONS", &pkg.decisions, 5);
+    render_compact_items(&mut out, "CONSTRAINTS", &pkg.constraints, 5);
+    render_compact_items(&mut out, "DISCOVERIES", &pkg.discoveries, 3);
+
+    if !pkg.conflicts.is_empty() {
+        out.push_str(&format!("CONFLICTS ({}):\n", pkg.conflicts.len()));
+        for item in pkg.conflicts.iter().take(3) {
+            out.push_str(&format!("  - {}\n", compact_line(&item.title, 120)));
+        }
+    }
+    if !pkg.next_actions.is_empty() {
+        out.push_str("NEXT:\n");
+        for action in pkg.next_actions.iter().take(5) {
+            out.push_str(&format!("  - {}\n", compact_line(action, 160)));
+        }
+    }
+
+    out.push_str(&format!(
+        "\nFull context: aikd handoff --workstream {}\n",
+        pkg.workstream
+    ));
+    out
+}
+
+fn render_compact_items(
+    out: &mut String,
+    label: &str,
+    items: &[aikd_core::MemoryItem],
+    limit: usize,
+) {
+    if items.is_empty() {
+        return;
+    }
+    out.push_str(&format!("{label} ({}):\n", items.len()));
+    for item in items.iter().take(limit) {
+        out.push_str(&format!("  - {}\n", compact_line(&item.title, 140)));
+    }
+}
+
+fn compact_line(text: &str, max_chars: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    let mut out: String = line.chars().take(max_chars).collect();
+    if line.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }
 
 fn cmd_project(config_path: &str, action: ProjectAction, json: bool) -> Result<()> {

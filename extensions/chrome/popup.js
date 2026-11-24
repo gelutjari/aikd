@@ -978,12 +978,11 @@ function pickOption(select, value, fallback) {
 }
 
 function persistCapturePrefs() {
-  state.project = el.project.value;
   storageSet({
     aikdKind: el.kind.value,
     aikdScope: el.scope.value,
     aikdFolder: el.folder.value,
-    aikdProject: el.project.value,
+    aikdProject: state.project,
   });
 }
 

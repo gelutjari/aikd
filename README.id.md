@@ -14,12 +14,15 @@
 
 </div>
 
+> **Build default = 100% Zero-ONNX.** Binary **~11.9 MB**, daemon **~39–48 MB RAM**, retrieval murni **SQLite FTS5 BM25 + Live Disk Snippets** — tanpa runtime ONNX dan **tanpa download model**. `fastembed`/ONNX hanya ada di fitur opt-in `semantic` / `semantic-ext` dan **OFF secara default** sesuai [ADR-0001](docs/adr/0001-core-principles.md).
+
 ---
 
 ## Daftar Isi
 
 - [Tentang](#tentang)
 - [Mengapa AIKD?](#mengapa-aikd)
+- [Arsitektur 2 Lapis](#arsitektur-2-lapis)
 - [Fitur Utama](#fitur-utama)
 - [Demo](#demo)
 - [Prasyarat](#prasyarat)
@@ -40,45 +43,47 @@
 
 ## Tentang
 
-**AIKD** (AI Knowledge Daemon) adalah **MCP tool provider** yang ditulis dalam Rust, memberikan akses instan ke codebase Anda untuk AI agent. AIKD meng-index file project ke knowledge base dan mengekspos **7 tools** via [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) yang bisa dipanggil oleh AI agent manapun.
+**AIKD** (AI Knowledge Daemon) adalah **MCP tool provider** yang ditulis dalam Rust, memberikan akses instan ke codebase Anda untuk AI agent. AIKD meng-index file project ke knowledge base dan mengekspos **15 tools** via [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) yang bisa dipanggil oleh AI agent manapun.
+
+Build default **100% Zero-ONNX**: pencarian memakai SQLite FTS5 BM25 + Live Disk Snippets. Fitur `semantic` (fastembed/ONNX) adalah opt-in dan tidak ikut di binary default.
 
 ### Apa itu AIKD?
 
 | Kategori | Jawaban |
 |----------|---------|
-| **MCP Tool Provider** | Ya — mengekspos tools `scan`, `query`, `embed`, `stats`, `remember`, `recall`, `status` |
+| **MCP Tool Provider** | Ya — `scan`, `query`, `symbol`, `handoff`, `memory_*`, `event_append`, `remember`/`recall`, `stats`/`status`, `embed` (opt-in) |
 | **CLI Tool** | Ya — `aikd query "login" --json` bisa langsung dari terminal |
 | **REST API** | Ya — HTTP endpoint di `http://localhost:9090` |
-| **VS Code Extension** | Tidak — binary standalone, bukan plugin IDE |
+| **Ekstensi Editor/Browser** | Opsional — binary tetap standalone; tersedia extension Chrome & VS Code |
 | **Library/SDK** | Tidak — tool end-user, bukan dependency |
 
 ### Cara kerja
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    AI Agent                              │
-│  (MiMoCode, Claude Code, Cursor, Cline, Windsurf, dll)  │
+│              AI Agent / Developer                        │
+│  (Claude Code, Cursor, Cline, Windsurf, Pi, OMP, dll)   │
 └────────────────────────┬────────────────────────────────┘
-                         │ MCP Protocol (stdio)
+                         │ MCP (stdio) atau CLI
                          ▼
 ┌─────────────────────────────────────────────────────────┐
-│                    AIKD Server                           │
+│                  AIKD Core Engine                        │
 │                                                         │
-│  Tools:                                                 │
-│    scan    → Index file ke knowledge base                │
-│    query   → BM25 + vector semantic search               │
-│    embed   → Generate vector embeddings                  │
-│    stats   → Statistik knowledge base                    │
-│    remember → Simpan percakapan ke memory                │
-│    recall  → Cari history percakapan                     │
-│    status  → Status resource sistem                      │
+│  scan      → Index incremental (Blake3)                  │
+│  query     → BM25 SQLite FTS5 + Live Disk Snippets       │
+│  symbol    → Lookup fungsi/struct/class + line range     │
+│  handoff   → Resume pack anti-context-rot                │
+│  memory_*  → fact/decision/constraint/task/checkpoint    │
+│  event_*   → Journal event multi-agent                   │
+│  hooks     → Git + Agent auto-sync (install/status)      │
 └────────────────────────┬────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────┐
-│              Knowledge Base                              │
-│  SQLite + Tantivy (BM25) + ONNX embeddings (384d)       │
-│  84 file · 412 chunk · pencarian <1ms                    │
+│           SQLite WAL — ~/.aikd/aikd.db                  │
+│  FTS5 contentless BM25 + metadata + memory + events     │
+│  Zero-ONNX: tanpa model, tanpa runtime ONNX             │
+│  (hybrid vector = opt-in `semantic` / provider eksternal)│
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -95,40 +100,67 @@ AIKD meng-index project Anda. AI agent memanggil `aikd query` via MCP dan mendap
 
 ---
 
+## Arsitektur 2 Lapis
+
+AIKD sengaja dipisah agar agent tidak pernah bergantung pada UI.
+
+### Lapis 1 — Core Engine (untuk AI Agent)
+
+- **CLI + MCP:** `query`, `symbol`, `handoff`, `memory_save` / `memory_task` / `memory_lifecycle`, `event_append`, `scan`, `stats`, `status`.
+- **Auto-sync tanpa manual:** `aikd hooks install` memasang hook Git `post-commit` / `post-merge` dan hook agent `SessionStart` / `PreCompact`.
+- **SQLite WAL multi-process:** CLI, MCP client, dan daemon boleh menulis ke `~/.aikd/aikd.db` yang sama secara bersamaan.
+- **Zero-ONNX:** BM25 SQLite FTS5 + Live Disk Snippets. Tidak ada model, tidak ada ONNX runtime, tidak ada Python.
+- **Live Disk Snippets:** Lean Mode menyimpan token, bukan salinan teks; snippet dibaca dari file asli dan file hilang dilewati dengan aman.
+
+### Lapis 2 — AIKD Studio + Tray + Chrome Extension (Control Plane Manusia, Opsional)
+
+- **AIKD Studio** (`/ui`): SPA 100% offline di dalam binary — Mission Control, pencarian, memory lifecycle, dan **Knowledge Graph 10 mode**.
+- **Tray app:** start/stop daemon, buka Studio, cek health tanpa terminal.
+- **Chrome extension:** clip seleksi, transkrip chat AI (ChatGPT/Claude/Gemini), dan teks halaman ke memory.
+- **PARA Vault & Notes:** catatan markdown, tag, dan wikilink yang menjadi node graph untuk agent.
+
+Semua fitur Lapis 2 bersifat opsional. Menjalankan `aikd serve` / `aikd query` tidak membutuhkan Studio, tray, browser, maupun ONNX.
+
+---
+
 ## Mengapa AIKD?
 
 | Fitur | grep/find | AIKD |
 |-------|-----------|------|
 | Kecepatan | Scan setiap kali | Pre-index, <1ms |
-| Ranking | Tidak ada | BM25 + semantic |
+| Ranking | Tidak ada | BM25 (+ hybrid opt-in) |
 | Konteks | Baris teks mentah | File, heading, rentang baris, skor |
 | Output | Teks tidak terstruktur | JSON (bisa diparse mesin) |
-| Pencarian semantic | Tidak | Ya (vector embeddings) |
-| Auto-sync | Tidak | Ya (file watcher) |
+| Pencarian semantic | Tidak | Opt-in (`--features semantic` atau provider eksternal) |
+| Auto-sync | Tidak | Ya (`aikd hooks install` + `scan --changed`) |
 
 ---
 
 ## Fitur Utama
 
-- **BM25 Full-Text Search** — Pencarian keyword cepat via Tantivy engine
-- **Hybrid Search** — BM25 + vector semantic search dengan Reciprocal Rank Fusion
-- **Vector Embeddings** — Embedding berbasis ONNX (all-MiniLM-L6-v2, 384 dimensi)
+- **Zero-ONNX Default** — Binary ~11.9 MB, daemon ~39–48 MB RAM; tanpa runtime ONNX dan tanpa download model
+- **BM25 Full-Text Search** — SQLite FTS5 contentless, cepat dan tanpa engine eksternal
+- **Hybrid Search (Opt-in)** — BM25 + vector semantic via `--features semantic` atau provider embeddings eksternal
+- **Vector Embeddings (Opt-in)** — fastembed/ONNX hanya jika fitur `semantic` dibangun
 - **Smart Chunking** — Heading markdown, fungsi source code, file terstruktur
 - **Source Code Aware** — Chunk Rust, Python, TypeScript, JavaScript, Go berdasarkan batas fungsi
-- **File Watcher** — Auto-reindex saat file berubah dengan blake3 incremental hashing
-- **Session Memory** — Simpan dan recall konteks percakapan
-- **MCP Server** — Model Context Protocol untuk AI assistant (Claude, MiMo, Cursor, dll.)
-- **REST API** — HTTP endpoint untuk integrasi eksternal
-- **CLI Tools** — Penggunaan command-line langsung, tanpa server
-- **Auto-Agent Registration** — Deteksi dan registrasi ke 6 AI agent saat `aikd init`
-- **Resource Adaptive** — Auto-tuning untuk tier hardware Low/Medium/High/Max/GPU
+- **Live Disk Snippets** — Snippet dibaca dari file asli; file hilang/stale dilewati
+- **File Watcher & Auto-Hooks** — `aikd watch`, Git `post-commit`/`post-merge`, agent `SessionStart`/`PreCompact`
+- **Git-Aware Incremental Scan** — `aikd scan --changed` meng-index hanya file yang berubah
+- **Structured Memory** — `fact`, `decision`, `constraint`, `discovery`, `task`, `checkpoint` + lifecycle
+- **Anti-Context-Rot Handoff** — Resume pack untuk Claude Code, Codex, Gemini, OpenCode, Pi, OMP
+- **MCP Server** — Model Context Protocol untuk AI assistant (Claude, Cursor, Cline, dll.)
+- **REST API + AIKD Studio** — Dashboard offline, Knowledge Graph 10 mode, PARA Vault, Mission Control
+- **Chrome Extension** — Clip seleksi, chat AI, dan teks halaman ke memory
+- **Auto-Agent Registration** — Deteksi dan registrasi ke 16+ AI agent
+- **Resource Adaptive** — Auto-tuning scan/parallelism untuk tier hardware Low/Medium/High/Max/GPU
 - **Cross-Platform** — Windows, Linux, macOS
 
 ---
 
 ## Demo
 
-<!-- Tambahkan screenshot atau GIF di sini -->
+**Demo visual:** [10-Mode Knowledge Graph (GIF)](docs/media/aikd-graph-motion-qa.gif) · [MP4](docs/media/aikd-graph-motion-qa.mp4)
 
 ```
 $ aikd query "fungsi login" --json --limit 3
@@ -156,9 +188,9 @@ $ aikd query "fungsi login" --json --limit 3
 | OS | Windows 10+, Linux, macOS | 64-bit apapun |
 | RAM | 2 GB | 8 GB+ |
 | CPU | 2 core | 4+ core |
-| Disk | 200 MB | 1 GB+ (untuk model) |
+| Disk | 200 MB | 1 GB+ (data index; bukan model ONNX) |
 | Rust | 1.75+ (untuk build dari source) | Stable terbaru |
-| GPU | Tidak wajib | NVIDIA GPU untuk embedding lebih cepat |
+| GPU | Tidak wajib | Hanya relevan untuk build `semantic` |
 
 ---
 
@@ -183,7 +215,7 @@ chmod +x ~/.local/bin/aikd
 
 ```bash
 # Clone repository
-git clone https://github.com/your-org/aikd.git
+git clone https://github.com/gelutjari/aikd.git
 cd aikd
 
 # Build release
@@ -202,7 +234,7 @@ chmod +x ~/.local/bin/aikd
 
 **Linux / macOS:**
 ```bash
-curl -sSfL https://raw.githubusercontent.com/your-org/aikd/main/install.sh | bash
+curl -sSfL https://raw.githubusercontent.com/gelutjari/aikd/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
@@ -213,7 +245,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 ### Setelah Instalasi
 
 ```bash
-aikd init    # Buat config, download model, registrasi AI agent
+aikd init    # Buat config & registrasi AI agent (tanpa download model)
 ```
 
 ---
@@ -221,24 +253,29 @@ aikd init    # Buat config, download model, registrasi AI agent
 ## Mulai Cepat
 
 ```bash
-# 1. Inisialisasi (setup sekali saja)
+# 1. Inisialisasi (setup sekali saja, tanpa download model)
 aikd init
 
 # 2. Index project Anda
 aikd scan
 
-# 3. Generate embeddings (untuk pencarian semantic)
-aikd embed
+# 3. Pasang auto-sync (Git + agent hooks) — opsional tapi disarankan
+aikd hooks install
 
 # 4. Cari
 aikd query "kata kunci Anda" --json
+
+# 5. Index hanya file yang berubah (Git-aware)
+aikd scan --changed
 ```
+
+> `aikd embed` **tidak diperlukan** di build default. Embedding hanya untuk build opt-in `semantic` atau provider embeddings eksternal.
 
 ---
 
 ## Mode Penggunaan
 
-AIKD mendukung 3 mode. Pilih yang sesuai dengan alur kerja Anda.
+AIKD mendukung 4 mode. Pilih yang sesuai dengan alur kerja Anda.
 
 ### Mode 1: CLI Tools (Langsung)
 
@@ -260,7 +297,7 @@ Untuk AI assistant yang mendukung Model Context Protocol.
 aikd serve
 ```
 
-AIKD otomatis registrasi ke agent-agent ini saat `aikd init`:
+AIKD mendeteksi dan meregistrasi 16+ agent populer saat `aikd init` / `aikd register`:
 
 | Agent | File Config |
 |-------|-------------|
@@ -270,6 +307,7 @@ AIKD otomatis registrasi ke agent-agent ini saat `aikd init`:
 | Continue | `~/.continue/config.json` |
 | Windsurf | `~/.windsurf/mcp.json` |
 | MiMoCode | `~/.mcp.json` |
+| …dan agent CLI/IDE lain | Claude Desktop, Antigravity, Codex CLI, Gemini CLI, OpenCode, Pi, OMP, Qoder |
 
 **Cocok untuk:** AI assistant dengan dukungan MCP bawaan.
 
@@ -283,6 +321,20 @@ aikd watch                  # Auto-reindex saat file berubah
 ```
 
 **Cocok untuk:** Web dashboard, setup multi-user, integrasi tool eksternal.
+
+### Mode 4: Auto-Hooks (Git + Agent)
+
+Pasang sekali agar index dan handoff selalu segar tanpa mengingat perintah manual.
+
+```bash
+aikd hooks install                 # default: Git hooks + agent hooks
+aikd hooks install --git           # hanya Git (post-commit, post-merge)
+aikd hooks install --agents        # hanya agent (Claude SessionStart/PreCompact)
+aikd hooks status                  # cek status
+aikd hooks status --json           # output mesin
+```
+
+**Cocok untuk:** Semua project Git dan semua pengguna Claude Code / agent CLI.
 
 ---
 
@@ -301,15 +353,27 @@ aikd watch                  # Auto-reindex saat file berubah
 ### Init & Config
 
 ```bash
-aikd init [--path <DIR>]     # Inisialisasi project (config + model + registrasi agent)
+aikd init [--path <DIR>]     # Inisialisasi project (config + registrasi agent, tanpa model)
 ```
 
 ### Indexing
 
 ```bash
 aikd scan [--path <DIR>]     # Scan dan index file
+aikd scan --changed          # Hanya file yang dilaporkan `git status --porcelain`
+aikd scan --force            # Paksa re-chunk (abaikan hash)
 aikd watch [--debounce <MS>] # Watch perubahan, auto-reindex (default: 500ms)
 ```
+
+### Hooks
+
+```bash
+aikd hooks install [--project <DIR>] [--git] [--agents]  # Default: Git + Agent
+aikd hooks status  [--project <DIR>] [--json]            # Audit hook terpasang
+```
+
+- Hook Git idempoten: menambahkan blok AIKD bertanda ke `post-commit` / `post-merge` tanpa menghapus hook pengguna, lalu menjalankan `aikd scan --changed --quiet`.
+- Hook agent menambahkan `SessionStart` / `PreCompact` yang memanggil `aikd handoff --compact` tanpa menghapus setting yang sudah ada.
 
 ### Pencarian
 
@@ -319,14 +383,14 @@ aikd query <KATA> --json             # Output JSON
 aikd query <KATA> --limit 20         # Maksimal 20 hasil
 aikd query <KATA> --path src/        # Filter berdasarkan path
 aikd query <KATA> -H "Error"         # Filter berdasarkan heading
-aikd query <KATA> --hybrid           # BM25 + vector semantic search
+aikd query <KATA> --hybrid           # BM25 + vector (butuh build semantic / provider)
 ```
 
 ### Embedding
 
 ```bash
-aikd embed                           # Generate vector embeddings
-aikd embed --batch 64                # Custom batch size
+aikd embed                           # Opt-in: butuh build --features semantic
+aikd embed --batch 64                # Custom batch size (opt-in)
 aikd export [-o chunks.json]         # Export chunks ke JSON
 aikd import --file <FILE>            # Import embeddings dari JSON
 ```
@@ -376,14 +440,16 @@ chunk:
   min_tokens: 100
 
 embedding:
-  enabled: true
+  enabled: false          # Zero-ONNX default
+  provider: "none"        # none | external
   model: "all-MiniLM-L6-v2"
   batch_size: "auto"
+  endpoint: ""            # OpenAI-compatible URL jika provider=external
+  api_key_env: "AIKD_EMBEDDING_KEY"
 
 index:
   db_path: "~/.aikd/aikd.db"
-  tantivy_path: "~/.aikd/tantivy_index"
-  model_path: "~/.local/share/aikd/model"
+  model_path: "~/.local/share/aikd/model"   # hanya dipakai build semantic
 
 server:
   rest_port: 9090
@@ -397,19 +463,21 @@ resource:
 
 | Variable | Deskripsi |
 |----------|-----------|
-| `AIKD_MODEL_PATH` | Override direktori model |
+| `AIKD_MODEL_PATH` | Override direktori model (hanya build `semantic`) |
 | `AIKD_DATA_DIR` | Override direktori data (`~/.aikd/`) |
 | `AIKD_TOKEN` | Auth token (sama dengan `config.server.auth_token`) |
 | `RUST_LOG` | Level log (contoh: `RUST_LOG=aikd=debug`) |
 
 ### Mode Resource
 
+Semua tier tetap **Zero-ONNX** selama fitur `semantic` tidak dibangun/diaktifkan. Tier hanya mengatur parallelism scan dan (jika semantic aktif) batch embedding.
+
 | Mode | RAM | CPU | Embedding | Batch Size | Parallelism |
 |------|-----|-----|-----------|------------|-------------|
 | Low | <2 GB | ≤2 | OFF | 1 | 1 |
-| Medium | 2–8 GB | ≤4 | ON | 8 | 2 |
-| High | 8–16 GB | ≤8 | ON | 32 | 4 |
-| Max | ≥16 GB | >8 | ON | 64 | 8 |
+| Medium | 2–8 GB | ≤4 | Opt-in | 8 | 2 |
+| High | 8–16 GB | ≤8 | Opt-in | 32 | 4 |
+| Max | ≥16 GB | >8 | Opt-in | 64 | 8 |
 | Auto | deteksi | deteksi | deteksi | deteksi | deteksi |
 
 ---
@@ -422,7 +490,7 @@ Base URL: `http://localhost:9090`
 
 | Method | Endpoint | Deskripsi |
 |--------|----------|-----------|
-| GET | `/api/query?q=<kata>&limit=10&hybrid=true` | Cari di knowledge base |
+| GET | `/api/query?q=<kata>&limit=10&hybrid=true` | Cari di knowledge base (hybrid butuh build `semantic` / provider) |
 | GET | `/api/stats` | Dapatkan statistik index |
 | POST | `/api/scan` | Trigger scan file |
 | POST | `/api/remember` | Simpan pesan percakapan |
@@ -436,13 +504,19 @@ Saat berjalan sebagai MCP server (`aikd serve`), tools ini tersedia:
 
 | Tool | Deskripsi |
 |------|-----------|
-| `scan` | Scan dan index file |
-| `query` | Cari di knowledge base |
-| `stats` | Dapatkan statistik |
-| `embed` | Generate embeddings |
-| `remember` | Simpan percakapan |
-| `recall` | Cari percakapan |
-| `status` | Dapatkan status sistem |
+| `scan` | Incremental Blake3 scan, chunking, symbol extraction & sinkronisasi rules `.md` |
+| `query` | BM25 SQLite FTS5 (+ hybrid opsional) dengan Live Disk Snippets |
+| `symbol` | Lookup exact/prefix fungsi, struct, class, interface + line range |
+| `handoff` | Resume pack anti-context-rot (tasks, checkpoint, decisions, rules, events) |
+| `memory_save` | Simpan memory bertipe (`fact`, `decision`, `constraint`, `discovery`, `task`, `checkpoint`) |
+| `memory_list` | Lihat memory aktif/superseded per kind & workstream |
+| `memory_task` | Ambil task aktif & checkpoint terbaru setelah `/compact` |
+| `memory_lifecycle` | Tandai memory `stale` / `archive` tanpa menghapus provenance |
+| `memory_conflict` | Tandai dua item sebagai konflik (keduanya dipertahankan) |
+| `event_append` | Append event lifecycle agent yang idempoten |
+| `remember` / `recall` | Simpan dan cari riwayat percakapan mentah |
+| `embed` | Generate embedding (opt-in `--features semantic` atau provider eksternal) |
+| `stats` / `status` | Statistik index, schema, profil resource, dan health |
 
 ---
 
@@ -451,24 +525,27 @@ Saat berjalan sebagai MCP server (`aikd serve`), tools ini tersedia:
 ```
 aikd/
 ├── Cargo.toml                  # Workspace root (v2.0.0)
-├── README.md                   # File ini
+├── README.md                   # README English
+├── README.id.md                # File ini
 ├── install.sh                  # Installer Linux/macOS
 ├── install.ps1                 # Installer Windows
 ├── crates/
 │   ├── core/                   # Tipe data, error, config, security, fusion, platform
-│   ├── storage/                # SQLite database + migrasi (v4)
-│   ├── indexer/                # Tantivy BM25 + HNSW vector index
-│   ├── embedder/               # ONNX embedding engine + LRU cache
+│   ├── storage/                # SQLite WAL + FTS5 contentless + memory/event/Atlas
+│   ├── indexer/                # Orchestrasi index & retrieval
+│   ├── embedder/               # Stub zero-ONNX; fastembed opsional (feature semantic)
 │   ├── chunker/                # Chunking markdown, teks, source code
 │   ├── scanner/                # Shared scan logic (single source of truth)
+│   ├── context/                # Handoff & context assembly
 │   ├── session/                # Session & memory percakapan
-│   ├── server/                 # MCP server + REST API (axum)
+│   ├── server/                 # MCP server + REST API + AIKD Studio (axum)
 │   ├── watcher/                # File system watcher (notify)
-│   ├── plugin/                 # Konstanta SDK untuk integrasi eksternal
+│   ├── shim/                   # Self-update shim versioned binaries
 │   ├── benchmark/              # Benchmark & stress test suite
-│   └── cli/                    # Binary CLI (aikd)
+│   └── cli/                    # Binary CLI (aikd) + hooks
 └── extensions/
-    └── vscode/                 # Ekstensi VSCode
+    ├── chrome/                 # Chrome extension (clip chat/page)
+    └── vscode/                 # Ekstensi VSCode (opsional)
 ```
 
 ---
@@ -488,6 +565,8 @@ Diuji pada: AMD EPYC 7B13 (6 core), 7.8 GB RAM, Linux x86_64
 
 **Penggunaan resource puncak:** CPU 22.9%, RAM 27.4%
 
+> Baris **Hybrid Search** hanya berlaku pada build opt-in `semantic` (atau provider embeddings eksternal). Build default tetap 100% Zero-ONNX dan hanya menjalankan BM25.
+
 ---
 
 ## Pemecahan Masalah
@@ -496,12 +575,12 @@ Diuji pada: AMD EPYC 7B13 (6 core), 7.8 GB RAM, Linux x86_64
 |---------|--------|
 | `aikd: command not found` | Tambahkan `~/.local/bin` ke PATH Anda |
 | `Config not found` | Jalankan `aikd init` |
-| `Model not downloaded` | Jalankan `aikd init` atau `aikd model download all-MiniLM-L6-v2` |
+| `Model not downloaded` | Build default tidak butuh model. Hanya build `semantic` yang menjalankan `aikd model download all-MiniLM-L6-v2` |
 | `No results` | Jalankan `aikd scan` terlebih dahulu |
-| `Hybrid search not working` | Jalankan `aikd embed` terlebih dahulu (butuh embeddings) |
+| `Hybrid search not working` | Build dengan `--features semantic`, atau set `embedding.provider: external` + endpoint; default = LexicalFallback (BM25) |
 | `Permission denied` (Linux/macOS) | `chmod +x ~/.local/bin/aikd` |
 | `Port already in use` | Ganti `server.rest_port` di config |
-| `GPU not used` | fastembed menggunakan CPU secara default; GPU butuh build kustom |
+| `GPU not used` | GPU hanya relevan untuk build `semantic`; fastembed default CPU |
 
 ---
 
@@ -518,7 +597,7 @@ Kontribusi dipersilakan! Ikuti langkah-langkah berikut:
 ### Setup Pengembangan
 
 ```bash
-git clone https://github.com/your-org/aikd.git
+git clone https://github.com/gelutjari/aikd.git
 cd aikd
 cargo build
 cargo test
@@ -544,10 +623,9 @@ Dibangun dengan project open-source luar biasa berikut:
 
 | Pustaka | Kegunaan |
 |---------|----------|
-| [Tantivy](https://github.com/quickwit-oss/tantivy) | Mesin BM25 full-text search |
-| [fastembed-rs](https://github.com/Anush008/fastembed-rs) | ONNX embedding inference |
-| [hnsw_rs](https://github.com/jeremiedecock/hnsw-rs) | HNSW vector index |
-| [rusqlite](https://github.com/rusqlite/rusqlite) | Binding SQLite |
+| [rusqlite](https://github.com/rusqlite/rusqlite) | Binding SQLite + FTS5 BM25 |
+| [fastembed-rs](https://github.com/Anush008/fastembed-rs) | ONNX embedding inference (opsional, feature `semantic`) |
+| [hnsw_rs](https://github.com/jeremiedecock/hnsw-rs) | HNSW vector index (opsional) |
 | [axum](https://github.com/tokio-rs/axum) | Framework HTTP |
 | [rmcp](https://github.com/modelcontextprotocol/rust-sdk) | Protokol MCP |
 | [notify](https://github.com/notify-rs/notify) | File system watcher |

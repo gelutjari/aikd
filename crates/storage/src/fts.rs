@@ -166,6 +166,47 @@ pub fn read_snippet_or_fallback(
     }
 }
 
+/// Resolve a snippet for a search hit, auto-healing Lean Mode rows whose file vanished.
+///
+/// `chunks.content` is empty in Lean Mode, so snippets normally come from disk.
+/// When the backing file is gone, there is nothing useful to show: mark its
+/// `files` row `stale` (best effort, so later queries stop scanning it) and
+/// return `None` so the caller can skip the hit instead of emitting an empty or
+/// broken snippet. Stored content still wins when present (tests/unpruned rows).
+pub fn read_search_snippet(
+    conn: &Connection,
+    file_path: &str,
+    line_start: usize,
+    line_end: usize,
+    fallback_content: &str,
+) -> Option<String> {
+    if !fallback_content.is_empty() {
+        return Some(fallback_content.to_string());
+    }
+    if file_path.is_empty() || !Path::new(file_path).exists() {
+        mark_file_stale(conn, file_path);
+        return None;
+    }
+    Some(read_snippet_or_fallback(
+        file_path,
+        line_start,
+        line_end,
+        fallback_content,
+    ))
+}
+
+/// Mark a missing file's row `stale` so future lexical queries stop touching it.
+/// Existing non-active rows are left untouched; `aikd gc` still deletes stale rows.
+fn mark_file_stale(conn: &Connection, file_path: &str) {
+    if file_path.is_empty() {
+        return;
+    }
+    let _ = conn.execute(
+        "UPDATE files SET status = 'stale' WHERE path = ?1 AND status = 'active'",
+        rusqlite::params![file_path],
+    );
+}
+
 pub fn read_snippet_from_disk(
     file_path: &str,
     line_start: usize,
@@ -278,8 +319,8 @@ pub fn search_lexical(
                         ))
                     })
                 {
-                    for row in rows.flatten() {
-                        let (cid, fp, hj, ht, co, ls, le, score) = row;
+                    let rows: Vec<_> = rows.flatten().collect();
+                    for (cid, fp, hj, ht, co, ls, le, score) in rows {
                         let hier: Vec<String> = serde_json::from_str(&hj).unwrap_or_default();
                         let hier_str = if hier.is_empty() {
                             ht.clone()
@@ -292,7 +333,9 @@ pub fn search_lexical(
                         {
                             continue;
                         }
-                        let snippet = read_snippet_or_fallback(&fp, ls, le, &co);
+                        let Some(snippet) = read_search_snippet(conn, &fp, ls, le, &co) else {
+                            continue;
+                        };
                         results.push(aikd_core::SearchResult {
                             chunk_id: cid,
                             file_path: fp,
@@ -332,8 +375,8 @@ pub fn search_lexical(
                     r.get::<_, i64>(6)? as usize,
                 ))
             }) {
-                for row in rows.flatten() {
-                    let (cid, fp, hj, ht, co, ls, le) = row;
+                let rows: Vec<_> = rows.flatten().collect();
+                for (cid, fp, hj, ht, co, ls, le) in rows {
                     let hier: Vec<String> = serde_json::from_str(&hj).unwrap_or_default();
                     let hier_str = if hier.is_empty() {
                         ht.clone()
@@ -345,7 +388,9 @@ pub fn search_lexical(
                     {
                         continue;
                     }
-                    let snippet = read_snippet_or_fallback(&fp, ls, le, &co);
+                    let Some(snippet) = read_search_snippet(conn, &fp, ls, le, &co) else {
+                        continue;
+                    };
                     results.push(aikd_core::SearchResult {
                         chunk_id: cid,
                         file_path: fp,
@@ -365,4 +410,112 @@ pub fn search_lexical(
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema;
+    use aikd_core::SearchFilters;
+
+    fn setup() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::run_migrations(&conn).unwrap();
+        conn
+    }
+
+    /// Insert an active file plus one Lean Mode chunk (`content` usually empty)
+    /// and index the chunk's tokens in FTS so `search_lexical` can find it.
+    fn seed_chunk(
+        conn: &Connection,
+        path: &str,
+        content: &str,
+        tokens: &str,
+        line_start: i64,
+        line_end: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO files (path, size, modified_at, last_scanned, status, blake3_hash) \
+             VALUES (?1, 1, 't', 't', 'active', 'h')",
+            rusqlite::params![path],
+        )
+        .unwrap();
+        let file_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (id, file_id, chunk_index, heading_hierarchy, heading_level, \
+             heading_text, line_start, line_end, content, created_at, updated_at) \
+             VALUES ('chunk-1', ?1, 0, '[]', 1, 'Heading', ?2, ?3, ?4, 't', 't')",
+            rusqlite::params![file_id, line_start, line_end, content],
+        )
+        .unwrap();
+        let rowid = conn.last_insert_rowid();
+        index_chunk_fts(conn, rowid, path, "Heading", tokens).unwrap();
+    }
+
+    fn file_status(conn: &Connection, path: &str) -> String {
+        conn.query_row(
+            "SELECT status FROM files WHERE path = ?1",
+            rusqlite::params![path],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn lean_mode_skips_missing_file_and_marks_it_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().join("deleted.md");
+        assert!(!missing_path.exists());
+        let path = missing_path.to_string_lossy().to_string();
+
+        let conn = setup();
+        seed_chunk(&conn, &path, "", "Heading needle", 1, 2);
+
+        let results = search_lexical(&conn, "needle", 10, &SearchFilters::default()).unwrap();
+
+        assert!(
+            results.is_empty(),
+            "missing Lean Mode file must be skipped, got {results:?}"
+        );
+        assert_eq!(file_status(&conn, &path), "stale");
+    }
+
+    #[test]
+    fn lean_mode_returns_live_disk_snippet_for_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let live_path = dir.path().join("live.md");
+        std::fs::write(&live_path, "alpha\nbeta\ngamma\n").unwrap();
+        let path = live_path.to_string_lossy().to_string();
+
+        let conn = setup();
+        seed_chunk(&conn, &path, "", "Heading beta", 2, 3);
+
+        let results = search_lexical(&conn, "beta", 10, &SearchFilters::default()).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "beta\ngamma");
+        assert_eq!(results[0].line_start, 2);
+        assert_eq!(results[0].line_end, 3);
+        assert_eq!(file_status(&conn, &path), "active");
+    }
+
+    #[test]
+    fn stored_content_still_wins_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().join("gone.md");
+        let path = missing_path.to_string_lossy().to_string();
+
+        let conn = setup();
+        seed_chunk(&conn, &path, "stored snippet", "Heading stored", 1, 1);
+
+        let results = search_lexical(&conn, "stored", 10, &SearchFilters::default()).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "stored snippet");
+        assert_eq!(
+            file_status(&conn, &path),
+            "active",
+            "stored content rows must not be marked stale"
+        );
+    }
 }

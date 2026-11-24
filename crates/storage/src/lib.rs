@@ -223,7 +223,9 @@ impl Database {
                 }
 
                 let hier: Vec<String> = serde_json::from_str(&hj).unwrap_or_default();
-                let snippet = fts::read_snippet_or_fallback(&fp, ls, le, &co);
+                let Some(snippet) = fts::read_search_snippet(&self.conn, &fp, ls, le, &co) else {
+                    continue;
+                };
                 results.push(aikd_core::SearchResult {
                     chunk_id: cid,
                     file_path: fp,
@@ -288,4 +290,75 @@ pub fn compute_blake3(path: &Path) -> Result<String> {
     let content = std::fs::read(path)?;
     let hash = blake3::hash(&content);
     Ok(hash.to_hex().to_string())
+}
+
+#[cfg(test)]
+mod load_chunks_tests {
+    use super::*;
+    use aikd_core::SearchFilters;
+
+    fn seed_chunk(db: &Database, path: &str, content: &str, line_start: i64, line_end: i64) {
+        db.conn()
+            .execute(
+                "INSERT INTO files (path, size, modified_at, last_scanned, status, blake3_hash) \
+                 VALUES (?1, 1, 't', 't', 'active', 'h')",
+                rusqlite::params![path],
+            )
+            .unwrap();
+        let file_id = db.conn().last_insert_rowid();
+        db.conn()
+            .execute(
+                "INSERT INTO chunks (id, file_id, chunk_index, heading_hierarchy, heading_level, \
+                 heading_text, line_start, line_end, content, created_at, updated_at) \
+                 VALUES ('c1', ?1, 0, '[]', 1, 'Heading', ?2, ?3, ?4, 't', 't')",
+                rusqlite::params![file_id, line_start, line_end, content],
+            )
+            .unwrap();
+    }
+
+    fn file_status(db: &Database, path: &str) -> String {
+        db.conn()
+            .query_row(
+                "SELECT status FROM files WHERE path = ?1",
+                rusqlite::params![path],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn load_chunks_skips_missing_lean_file_and_marks_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("missing.db")).unwrap();
+        let path = dir.path().join("deleted.md").to_string_lossy().to_string();
+        seed_chunk(&db, &path, "", 1, 2);
+
+        let results = db
+            .load_chunks(&["c1".to_string()], &SearchFilters::default())
+            .unwrap();
+
+        assert!(
+            results.is_empty(),
+            "missing file must not yield a broken snippet"
+        );
+        assert_eq!(file_status(&db, &path), "stale");
+    }
+
+    #[test]
+    fn load_chunks_returns_live_disk_snippet_for_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("live.db")).unwrap();
+        let live_path = dir.path().join("live.md");
+        std::fs::write(&live_path, "alpha\nbeta\ngamma\n").unwrap();
+        let path = live_path.to_string_lossy().to_string();
+        seed_chunk(&db, &path, "", 2, 3);
+
+        let results = db
+            .load_chunks(&["c1".to_string()], &SearchFilters::default())
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "beta\ngamma");
+        assert_eq!(file_status(&db, &path), "active");
+    }
 }
