@@ -1349,10 +1349,10 @@ fn passes_scan_filters(cfg: &Config, path: &Path) -> bool {
     }
     let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let ext = path.extension().and_then(|s| s.to_str());
-    !(cfg.should_exclude_file(fname)
-        || !cfg.matches_filename_filter(fname)
-        || cfg.should_exclude_extension(fname, ext)
-        || !cfg.should_include_extension(ext))
+    !cfg.should_exclude_file(fname)
+        && cfg.matches_filename_filter(fname)
+        && !cfg.should_exclude_extension(fname, ext)
+        && cfg.should_include_extension(ext)
 }
 
 /// `aikd scan --changed`: index exactly what git reports as dirty.

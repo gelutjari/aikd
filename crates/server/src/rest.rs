@@ -1141,7 +1141,7 @@ fn detect_local_agents(sys: &sysinfo::System) -> Vec<serde_json::Value> {
             "name": stem,
             "exe": name,
             "pid": p.pid().as_u32(),
-            "cwd": p.cwd().map(|c| aikd_core::platform::canonical_path(c)).unwrap_or_default(),
+            "cwd": p.cwd().map(aikd_core::platform::canonical_path).unwrap_or_default(),
             "connected_to_aikd": false,
         }));
     }

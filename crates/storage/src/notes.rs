@@ -201,11 +201,12 @@ fn slugify(input: &str) -> String {
         if c.is_ascii_alphanumeric() {
             out.push(c.to_ascii_lowercase());
             dash = false;
-        } else if (c.is_whitespace() || c == '-' || c == '_' || c == '/' || c == '.') && !dash {
-            if !out.is_empty() {
-                out.push('-');
-                dash = true;
-            }
+        } else if (c.is_whitespace() || c == '-' || c == '_' || c == '/' || c == '.')
+            && !dash
+            && !out.is_empty()
+        {
+            out.push('-');
+            dash = true;
         }
         if out.len() >= 60 {
             break;

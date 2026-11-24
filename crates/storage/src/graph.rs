@@ -657,7 +657,7 @@ pub fn knowledge_graph(conn: &Connection, opts: &GraphOptions) -> Result<FileGra
 
     // ---- file nodes ----
     let parse_cap = if project.is_empty() {
-        limit.saturating_mul(4).max(200).min(600)
+        limit.saturating_mul(4).clamp(200, 600)
     } else {
         800
     };
@@ -1653,8 +1653,10 @@ mod tests {
             },
         )
         .unwrap();
-        let mut cfg = GraphOptions::default();
-        cfg.limit = 50;
+        let cfg = GraphOptions {
+            limit: 50,
+            ..Default::default()
+        };
         let g = knowledge_graph(&conn, &cfg).unwrap();
         assert!(!g.nodes.is_empty(), "global graph must not be empty");
         assert!(g.nodes.iter().any(|n| n.id == format!("note:{}", note.id)));

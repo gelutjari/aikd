@@ -166,10 +166,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn decode_chunked(mut data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    loop {
-        let Some(pos) = find_subslice(data, b"\r\n") else {
-            break;
-        };
+    while let Some(pos) = find_subslice(data, b"\r\n") {
         let size_line = String::from_utf8_lossy(&data[..pos]);
         let size_hex = size_line.split(';').next().unwrap_or("").trim();
         let Ok(size) = usize::from_str_radix(size_hex, 16) else {
@@ -307,9 +304,10 @@ fn status_icon_rgba(rgb: [u8; 3]) -> Vec<u8> {
             let alpha = (covered * 255 / 9) as u8;
             let fx = x as f32 + 0.5;
             let fy = y as f32 + 0.5;
-            let in_bolt =
-                (fy >= 6.0 && fy <= 17.0 && fx >= (18.0 - (fy - 6.0) * 0.6) && fx <= 18.5)
-                    || (fy >= 15.0 && fy <= 26.0 && fx >= 13.5 && fx <= (14.0 + (26.0 - fy) * 0.6));
+            let in_bolt = ((6.0..=17.0).contains(&fy)
+                && fx >= (18.0 - (fy - 6.0) * 0.6)
+                && fx <= 18.5)
+                || ((15.0..=26.0).contains(&fy) && fx >= 13.5 && fx <= (14.0 + (26.0 - fy) * 0.6));
             if in_bolt {
                 rgba.extend_from_slice(&[BOLT_RGB[0], BOLT_RGB[1], BOLT_RGB[2], alpha]);
             } else {
@@ -555,14 +553,6 @@ fn acquire_single_instance() -> bool {
 fn acquire_single_instance() -> bool {
     true
 }
-
-// ---------------------------------------------------------------------------
-// Global hotkey Ctrl+Alt+N (Windows): dedicated message-loop thread
-// ---------------------------------------------------------------------------
-
-#[cfg(not(windows))]
-fn spawn_hotkey_thread(_port: u16) {}
-fn spawn_hotkey_thread(_port: u16) {}
 
 // ---------------------------------------------------------------------------
 // Clipboard
@@ -888,7 +878,10 @@ mod win32_tray {
     }
 
     fn wide(s: &str) -> Vec<u16> {
-        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     unsafe fn make_hicon(rgb: [u8; 3]) -> *mut c_void {
@@ -941,9 +934,8 @@ mod win32_tray {
         nid.u_callback_message = WM_TRAYICON;
         nid.h_icon = st.hicon;
         let tip = wide(&st.tooltip);
-        for i in 0..tip.len().min(127) {
-            nid.sz_tip[i] = tip[i];
-        }
+        let n = tip.len().min(127);
+        nid.sz_tip[..n].copy_from_slice(&tip[..n]);
         let _ = GetLastError();
         Shell_NotifyIconW(cmd, &mut nid)
     }
@@ -1000,12 +992,7 @@ mod win32_tray {
         DestroyMenu(hmenu);
     }
 
-    unsafe extern "system" fn wnd_proc(
-        hwnd: *mut c_void,
-        msg: u32,
-        wp: usize,
-        lp: isize,
-    ) -> isize {
+    unsafe extern "system" fn wnd_proc(hwnd: *mut c_void, msg: u32, wp: usize, lp: isize) -> isize {
         let st_ptr = STATE_PTR;
         if !st_ptr.is_null() {
             let st = &mut *st_ptr;
@@ -1024,12 +1011,7 @@ mod win32_tray {
                     return 0;
                 }
                 WM_STATUS_UPDATE => {
-                    let snap = {
-                        st.latest_snap
-                            .lock()
-                            .ok()
-                            .and_then(|mut g| g.take())
-                    };
+                    let snap = { st.latest_snap.lock().ok().and_then(|mut g| g.take()) };
                     if let Some(snap) = snap {
                         let color = status_color(&snap);
                         if st.applied_color != Some(color) {
@@ -1350,14 +1332,24 @@ mod unix_tray {
         let clip_item = MenuItem::with_id("clipboard", "Send Clipboard to AIKD", true, None);
         let watch_item = MenuItem::with_id("watch", "Toggle Auto-Watch (off)", true, None);
         let daemon_item = MenuItem::with_id("daemon", "Start / Restart Daemon", true, None);
-        let sendto_item = MenuItem::with_id("sendto", "Install Windows SendTo Shortcut", false, None);
+        let sendto_item =
+            MenuItem::with_id("sendto", "Install Windows SendTo Shortcut", false, None);
         let quit_item = MenuItem::with_id("quit", "Quit Tray (daemon keeps running)", true, None);
         let sep1 = PredefinedMenuItem::separator();
         let sep2 = PredefinedMenuItem::separator();
         let sep3 = PredefinedMenuItem::separator();
         let _ = menu.append_items(&[
-            &status_item, &sep1, &open_item, &quick_item, &clip_item, &sep2, &watch_item,
-            &daemon_item, &sendto_item, &sep3, &quit_item,
+            &status_item,
+            &sep1,
+            &open_item,
+            &quick_item,
+            &clip_item,
+            &sep2,
+            &watch_item,
+            &daemon_item,
+            &sendto_item,
+            &sep3,
+            &quit_item,
         ]);
 
         let mut builder = TrayIconBuilder::new()
