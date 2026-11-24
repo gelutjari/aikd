@@ -5,8 +5,10 @@ pub mod fts;
 pub mod graph;
 pub mod maintenance;
 pub mod memory;
+pub mod notes;
 pub mod schema;
 pub mod symbols;
+pub mod telemetry;
 
 use anyhow::Result;
 use rusqlite::Connection;

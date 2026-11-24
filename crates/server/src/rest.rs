@@ -1,13 +1,14 @@
 use axum::{
-    extract::{Json, Query, State},
+    extract::{Json, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use prometheus::{Encoder, Gauge, IntCounter, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
@@ -216,6 +217,28 @@ struct QueryParams {
     file_type: Option<String>,
     heading: Option<String>,
     hybrid: Option<bool>,
+    project: Option<String>,
+}
+
+/// `GET /api/query` / `GET /api/symbols` payload: the historical array stays
+/// in `data`, and `attached_constraints` is added as a sibling field so old
+/// clients keep working while agents get their guardrails automatically.
+#[derive(Serialize)]
+struct QueryApiResponse {
+    success: bool,
+    data: Option<Vec<aikd_core::SearchResult>>,
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attached_constraints: Vec<aikd_storage::memory::ConstraintRef>,
+}
+
+#[derive(Serialize)]
+struct SymbolApiResponse {
+    success: bool,
+    data: Option<Vec<aikd_core::CodeSymbol>>,
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attached_constraints: Vec<aikd_storage::memory::ConstraintRef>,
 }
 
 #[derive(Deserialize)]
@@ -327,13 +350,53 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
+/// Estimated token savings for a REST query/symbol call.
+fn record_query_metric(
+    conn: &rusqlite::Connection,
+    tool: &str,
+    query: &str,
+    result_paths: &[String],
+    returned_bytes: usize,
+    elapsed: std::time::Duration,
+) {
+    let seen: HashSet<&str> = result_paths.iter().map(|s| s.as_str()).collect();
+    let mut full_bytes: i64 = 0;
+    for path in seen {
+        if let Ok(size) = conn.query_row(
+            "SELECT size FROM files WHERE path=?1",
+            rusqlite::params![path],
+            |r| r.get::<_, i64>(0),
+        ) {
+            full_bytes += size;
+        }
+    }
+    if full_bytes == 0 {
+        full_bytes = returned_bytes as i64 * 4;
+    }
+    let _ = aikd_storage::telemetry::record_query_metric(
+        conn,
+        tool,
+        query,
+        full_bytes,
+        returned_bytes as i64,
+        elapsed.as_millis() as i64,
+    );
+}
+
+fn constraints_for(
+    conn: &rusqlite::Connection,
+    project: &str,
+) -> Vec<aikd_storage::memory::ConstraintRef> {
+    aikd_storage::memory::attach_constraints(conn, project, 5).unwrap_or_default()
+}
+
 /// Handle search query with caching and metrics support.
 /// Cache key includes all query parameters to ensure correct cache hits.
 async fn handle_query(
     State(state): State<RestState>,
     headers: HeaderMap,
     Query(params): Query<QueryParams>,
-) -> Result<Json<ApiResponse<Vec<aikd_core::SearchResult>>>, ApiError> {
+) -> Result<Json<QueryApiResponse>, ApiError> {
     let start = std::time::Instant::now();
     state.metrics.query_total.inc();
 
@@ -344,6 +407,11 @@ async fn handle_query(
 
     let limit = params.limit.unwrap_or(10);
     let hybrid = params.hybrid.unwrap_or(false);
+    let project = params
+        .project
+        .clone()
+        .map(|p| aikd_core::platform::normalize_project_key(&p))
+        .unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
 
     // Build cache key
     let cache_key = QueryCacheKey {
@@ -364,10 +432,13 @@ async fn handle_query(
             .query_duration_seconds
             .observe(start.elapsed().as_secs_f64());
         log::debug!("Cache hit for query: {}", params.q);
-        return Ok(Json(ApiResponse {
+        let database = state.database.lock().await;
+        let attached_constraints = constraints_for(database.conn(), &project);
+        return Ok(Json(QueryApiResponse {
             success: true,
             data: Some(cached),
             error: None,
+            attached_constraints,
         }));
     }
 
@@ -401,6 +472,18 @@ async fn handle_query(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let results = outcome.results;
 
+    let returned_bytes: usize = results.iter().map(|r| r.content.len()).sum();
+    let paths: Vec<String> = results.iter().map(|r| r.file_path.clone()).collect();
+    record_query_metric(
+        database.conn(),
+        "query",
+        &params.q,
+        &paths,
+        returned_bytes,
+        start.elapsed(),
+    );
+    let attached_constraints = constraints_for(database.conn(), &project);
+
     // Store in cache
     state.query_cache.insert(cache_key, results.clone()).await;
     state
@@ -409,16 +492,23 @@ async fn handle_query(
         .observe(start.elapsed().as_secs_f64());
     log::debug!("Cached query result: {}", params.q);
 
-    Ok(Json(ApiResponse {
+    Ok(Json(QueryApiResponse {
         success: true,
         data: Some(results),
         error: None,
+        attached_constraints,
     }))
 }
 
 #[derive(Deserialize)]
 struct GraphParams {
     path: Option<String>,
+    project: Option<String>,
+    mode: Option<String>,
+    focus: Option<String>,
+    depth: Option<usize>,
+    types: Option<String>,
+    hide_orphans: Option<bool>,
     limit: Option<usize>,
 }
 
@@ -431,16 +521,66 @@ async fn handle_graph(
     if !check_auth(&headers, &cfg.server.auth_token) {
         return Err(unauthorized());
     }
-    let project = params
-        .path
-        .map(|p| aikd_core::platform::normalize_project_key(&p))
-        .unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
+    // Empty project/path → rich GLOBAL graph (never zero nodes).
+    let project = params.project.or(params.path).unwrap_or_default();
+    let types = params.types.map(|t| {
+        t.split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<String>>()
+    });
+    let opts = aikd_storage::graph::GraphOptions {
+        project,
+        mode: params
+            .mode
+            .unwrap_or_else(|| "global".to_string())
+            .to_lowercase(),
+        focus: params.focus,
+        depth: params.depth.unwrap_or(1),
+        types,
+        hide_orphans: params.hide_orphans.unwrap_or(false),
+        limit: params.limit.unwrap_or(120),
+    };
     let database = state.database.lock().await;
-    match aikd_storage::graph::file_graph(database.conn(), &project, params.limit.unwrap_or(100)) {
+    match aikd_storage::graph::knowledge_graph(database.conn(), &opts) {
         Ok(g) => Ok(Json(ApiResponse {
             success: true,
             data: Some(g),
             error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+#[derive(Deserialize)]
+struct GraphNodeParams {
+    id: String,
+}
+
+async fn handle_graph_node(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<GraphNodeParams>,
+) -> Result<Json<ApiResponse<aikd_storage::graph::NodeDetail>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    match aikd_storage::graph::node_detail(database.conn(), &params.id) {
+        Ok(Some(detail)) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(detail),
+            error: None,
+        })),
+        Ok(None) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!("Node '{}' not found in the graph", params.id)),
         })),
         Err(e) => Ok(Json(ApiResponse {
             success: false,
@@ -896,6 +1036,8 @@ struct CreateMemoryBody {
     title: String,
     body: String,
     workstream: Option<String>,
+    scope: Option<String>,
+    project: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -912,6 +1054,169 @@ struct MaintenanceBody {
 #[derive(Deserialize)]
 struct AddPathBody {
     path: String,
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard helpers (git, projects, processes)
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn git_command() -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = std::process::Command::new("git");
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn git_command() -> std::process::Command {
+    std::process::Command::new("git")
+}
+
+fn run_git(path: &str, args: &[&str]) -> Option<String> {
+    let out = git_command().args(["-C", path]).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn git_branch_and_dirty(path: &str) -> (String, i64) {
+    let branch = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let dirty = run_git(path, &["status", "--porcelain"])
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as i64)
+        .unwrap_or(0);
+    (branch, dirty)
+}
+
+fn process_snapshot() -> sysinfo::System {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys
+}
+
+/// Is a background `aikd watch` process running?
+fn watcher_running(sys: &sysinfo::System) -> bool {
+    sys.processes().values().any(|p| {
+        let name = p.name().to_string_lossy().to_lowercase();
+        if !name.contains("aikd") {
+            return false;
+        }
+        p.cmd()
+            .iter()
+            .any(|a| a.to_string_lossy().eq_ignore_ascii_case("watch"))
+    })
+}
+
+const AGENT_EXES: [&str; 12] = [
+    "opencode",
+    "claude",
+    "codex",
+    "gemini",
+    "gemini-cli",
+    "antigravity",
+    "cursor",
+    "windsurf",
+    "qwen",
+    "code",
+    "hermes",
+    "pi",
+];
+
+/// Detect local coding agents running on this machine (read-only).
+fn detect_local_agents(sys: &sysinfo::System) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for p in sys.processes().values() {
+        let name = p.name().to_string_lossy().to_string();
+        let lower = name.to_lowercase();
+        let stem = lower.trim_end_matches(".exe");
+        if !AGENT_EXES
+            .iter()
+            .any(|a| stem == *a || stem.starts_with(&format!("{a}-")))
+        {
+            continue;
+        }
+        out.push(serde_json::json!({
+            "name": stem,
+            "exe": name,
+            "pid": p.pid().as_u32(),
+            "cwd": p.cwd().map(|c| aikd_core::platform::canonical_path(c)).unwrap_or_default(),
+            "connected_to_aikd": false,
+        }));
+    }
+    out.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_string());
+    out.dedup_by_key(|v| {
+        (
+            v["name"].as_str().unwrap_or("").to_string(),
+            v["pid"].as_i64().unwrap_or(0),
+        )
+    });
+    out
+}
+
+/// (files, symbols, notes, atlas_status) for one project root.
+fn project_stats(conn: &rusqlite::Connection, path: &str) -> (i64, i64, i64, String) {
+    let norm = aikd_core::platform::normalize_project_key(path);
+    let escaped = norm.replace('%', "\\%").replace('_', "\\_");
+    let like = format!("{escaped}/%");
+    let files: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE status='active' AND (replace(path,'\\','/') = ?1 OR replace(path,'\\','/') LIKE ?2 ESCAPE '\\')",
+            rusqlite::params![norm, like],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let symbols: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM code_symbols s JOIN chunks c ON c.id=s.chunk_id JOIN files fl ON fl.id=c.file_id WHERE fl.status='active' AND (replace(fl.path,'\\','/') = ?1 OR replace(fl.path,'\\','/') LIKE ?2 ESCAPE '\\')",
+            rusqlite::params![norm, like],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let notes: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM notes WHERE project=?1",
+            rusqlite::params![norm],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM atlas WHERE project_path=?1",
+            rusqlite::params![norm],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "stale".to_string());
+    (files, symbols, notes, status)
+}
+
+fn project_roots(conn: &rusqlite::Connection, cfg: &Config) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |p: String| {
+        let p = aikd_core::platform::normalize_project_key(&p);
+        if !p.is_empty() && !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    for p in &cfg.scan.include_paths {
+        push(p.clone());
+    }
+    for sql in [
+        "SELECT project_path FROM atlas LIMIT 20",
+        "SELECT DISTINCT project_path FROM memory WHERE project_path != '' LIMIT 20",
+        "SELECT DISTINCT project FROM notes WHERE project != '' LIMIT 20",
+    ] {
+        if let Ok(mut stmt) = conn.prepare(sql) {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                for p in rows.flatten() {
+                    push(p);
+                }
+            }
+        }
+    }
+    out.truncate(12);
+    out
 }
 
 async fn handle_overview(
@@ -934,11 +1239,15 @@ async fn handle_overview(
     let mem_conf = qi("SELECT COUNT(*) FROM memory WHERE status='conflicted'");
     let events = qi("SELECT COUNT(*) FROM events");
     let sessions = qi("SELECT COUNT(*) FROM sessions");
+    let notes_count = aikd_storage::notes::notes_count(conn).unwrap_or(0);
+    let active_clients_count = aikd_storage::telemetry::active_client_count(conn).unwrap_or(0);
+    let (tokens_saved_est, _, avg_query_ms) =
+        aikd_storage::telemetry::token_savings(conn).unwrap_or((0, 0, 0.0));
     let schema_v: i64 = conn
         .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
             r.get(0)
         })
-        .unwrap_or(14);
+        .unwrap_or(15);
     let db_mb = std::fs::metadata(cfg.db_path())
         .map(|m| m.len() as f64 / (1024.0 * 1024.0))
         .unwrap_or(0.0);
@@ -951,6 +1260,25 @@ async fn handle_overview(
             serde_json::json!({ "agent": agent, "event_type": event_type, "count": count })
         })
         .collect();
+
+    let mut projects: Vec<serde_json::Value> = Vec::new();
+    for root in project_roots(conn, &cfg) {
+        let (files_n, symbols_n, notes_n, atlas_status) = project_stats(conn, &root);
+        let (branch, dirty) = git_branch_and_dirty(&root);
+        projects.push(serde_json::json!({
+            "path": root,
+            "name": root.rsplit('/').next().unwrap_or(&root),
+            "files": files_n,
+            "symbols": symbols_n,
+            "notes": notes_n,
+            "git_branch": branch,
+            "git_dirty": dirty,
+            "stale": atlas_status != "fresh",
+        }));
+    }
+
+    let sys = process_snapshot();
+    let watcher = watcher_running(&sys);
 
     Ok(Json(ApiResponse {
         success: true,
@@ -970,6 +1298,12 @@ async fn handle_overview(
             "cpu_cores": profile.cpu_cores,
             "ram_gb": profile.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
             "coverage": cover,
+            "notes_count": notes_count,
+            "active_clients_count": active_clients_count,
+            "tokens_saved_est": tokens_saved_est,
+            "avg_query_ms": avg_query_ms,
+            "watcher_running": watcher,
+            "projects": projects,
         })),
         error: None,
     }))
@@ -979,26 +1313,43 @@ async fn handle_symbols_api(
     State(state): State<RestState>,
     headers: HeaderMap,
     Query(params): Query<SymbolQueryParams>,
-) -> Result<Json<ApiResponse<Vec<aikd_core::CodeSymbol>>>, ApiError> {
+) -> Result<Json<SymbolApiResponse>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
         return Err(unauthorized());
     }
+    let start = std::time::Instant::now();
     let database = state.database.lock().await;
+    let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
     match aikd_storage::symbols::find_symbols(
         database.conn(),
         &params.name,
         params.limit.unwrap_or(25),
     ) {
-        Ok(list) => Ok(Json(ApiResponse {
-            success: true,
-            data: Some(list),
-            error: None,
-        })),
-        Err(e) => Ok(Json(ApiResponse {
+        Ok(list) => {
+            let returned_bytes: usize = list.iter().map(|s| s.signature.len() + s.name.len()).sum();
+            let paths: Vec<String> = list.iter().map(|s| s.file_path.clone()).collect();
+            record_query_metric(
+                database.conn(),
+                "symbol",
+                &params.name,
+                &paths,
+                returned_bytes,
+                start.elapsed(),
+            );
+            let attached_constraints = constraints_for(database.conn(), &project);
+            Ok(Json(SymbolApiResponse {
+                success: true,
+                data: Some(list),
+                error: None,
+                attached_constraints,
+            }))
+        }
+        Err(e) => Ok(Json(SymbolApiResponse {
             success: false,
             data: None,
             error: Some(e.to_string()),
+            attached_constraints: Vec::new(),
         })),
     }
 }
@@ -1066,29 +1417,58 @@ async fn handle_memory_create_api(
     State(state): State<RestState>,
     headers: HeaderMap,
     Json(body): Json<CreateMemoryBody>,
-) -> Result<Json<ApiResponse<aikd_core::MemoryItem>>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let cfg = state.config.lock().await.clone();
     if !check_auth(&headers, &cfg.server.auth_token) {
         return Err(unauthorized());
     }
     let database = state.database.lock().await;
-    let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+    // Secret Redaction Shield also applies to memory writes.
+    let title_red = aikd_core::security::redact_secrets(&body.title);
+    let body_red = aikd_core::security::redact_secrets(&body.body);
+    let redacted_count = title_red.redacted_count + body_red.redacted_count;
+    let global = body.scope.as_deref() == Some("global");
+    let project = match body.project {
+        Some(p) if !p.trim().is_empty() => aikd_core::platform::normalize_project_key(&p),
+        _ => {
+            if global {
+                String::new()
+            } else {
+                aikd_core::platform::canonical_project(&cfg.scan.include_paths)
+            }
+        }
+    };
     let ws = body.workstream.unwrap_or_else(|| "default".to_string());
     match aikd_storage::memory::save_memory(
         database.conn(),
         &project,
         &ws,
         &body.kind,
-        &body.title,
-        &body.body,
+        &title_red.text,
+        &body_red.text,
         "explicit",
         1.0,
     ) {
-        Ok(item) => Ok(Json(ApiResponse {
-            success: true,
-            data: Some(item),
-            error: None,
-        })),
+        Ok(item) => {
+            let mut value = serde_json::to_value(&item).unwrap_or_default();
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("redacted_count".into(), serde_json::json!(redacted_count));
+                obj.insert(
+                    "redacted_kinds".into(),
+                    serde_json::json!(title_red
+                        .kinds
+                        .iter()
+                        .chain(body_red.kinds.iter())
+                        .cloned()
+                        .collect::<Vec<_>>()),
+                );
+            }
+            Ok(Json(ApiResponse {
+                success: true,
+                data: Some(value),
+                error: None,
+            }))
+        }
         Err(e) => Ok(Json(ApiResponse {
             success: false,
             data: None,
@@ -1336,6 +1716,713 @@ async fn handle_agents_register_api(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Human notes, "Send to AIKD", brief, export
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct NoteBody {
+    title: Option<String>,
+    #[serde(default)]
+    body: String,
+    kind: Option<String>,
+    scope: Option<String>,
+    folder: Option<String>,
+    project: Option<String>,
+    tags: Option<Vec<String>>,
+    source: Option<String>,
+    source_url: Option<String>,
+    pinned: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct NoteUpdateBody {
+    title: Option<String>,
+    body: Option<String>,
+    kind: Option<String>,
+    scope: Option<String>,
+    folder: Option<String>,
+    project: Option<String>,
+    tags: Option<Vec<String>>,
+    source: Option<String>,
+    source_url: Option<String>,
+    pinned: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct NotesQuery {
+    q: Option<String>,
+    project: Option<String>,
+    scope: Option<String>,
+    folder: Option<String>,
+    kind: Option<String>,
+    tag: Option<String>,
+    pinned: Option<bool>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct BriefParams {
+    days: Option<i64>,
+    project: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExportParams {
+    #[serde(rename = "format")]
+    format: Option<String>,
+}
+
+fn notes_dir(state: &RestState, cfg: &Config) -> std::path::PathBuf {
+    cfg.runtime_dir(&state.config_path).join("notes")
+}
+
+async fn create_note(
+    state: &RestState,
+    headers: &HeaderMap,
+    body: NoteBody,
+    default_source: &str,
+) -> Result<Json<ApiResponse<aikd_storage::notes::NoteRecord>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let global = body.scope.as_deref() == Some("global");
+    let project = match body.project.as_deref() {
+        Some(p) if !p.trim().is_empty() => p.to_string(),
+        _ => {
+            if global {
+                String::new()
+            } else {
+                aikd_core::platform::canonical_project(&cfg.scan.include_paths)
+            }
+        }
+    };
+    let input = aikd_storage::notes::NewNote {
+        title: body.title,
+        body: body.body,
+        kind: body.kind,
+        scope: body.scope,
+        folder: body.folder,
+        project: Some(project),
+        tags: body.tags,
+        source: Some(body.source.unwrap_or_else(|| default_source.to_string())),
+        source_url: body.source_url,
+        pinned: body.pinned,
+    };
+    let dir = notes_dir(state, &cfg);
+    let database = state.database.lock().await;
+    match aikd_storage::notes::create_note(database.conn(), &dir, input) {
+        Ok(note) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(note),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+/// `POST /api/send` — quick capture (tray, clipboard, Chrome extension).
+async fn handle_send(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Json(body): Json<NoteBody>,
+) -> Result<Json<ApiResponse<aikd_storage::notes::NoteRecord>>, ApiError> {
+    create_note(&state, &headers, body, "ui").await
+}
+
+/// `POST /api/notes` — human vault create.
+async fn handle_notes_create(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Json(body): Json<NoteBody>,
+) -> Result<Json<ApiResponse<aikd_storage::notes::NoteRecord>>, ApiError> {
+    create_note(&state, &headers, body, "human").await
+}
+
+/// `GET /api/notes` — notes + tag/folder facets.
+async fn handle_notes_list(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<NotesQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let filter = aikd_storage::notes::NoteFilter {
+        q: params.q,
+        project: params.project,
+        scope: params.scope,
+        folder: params.folder,
+        kind: params.kind,
+        tag: params.tag,
+        pinned: params.pinned,
+        limit: params.limit,
+    };
+    let database = state.database.lock().await;
+    match aikd_storage::notes::list_notes(database.conn(), &filter) {
+        Ok((notes, tags, folders)) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(serde_json::json!({
+                "notes": notes,
+                "tags": tags,
+                "folders": folders,
+            })),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+/// `PUT /api/notes/{id}` — update + re-redact + rewrite Markdown.
+async fn handle_note_update(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<NoteUpdateBody>,
+) -> Result<Json<ApiResponse<aikd_storage::notes::NoteRecord>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let patch = aikd_storage::notes::NotePatch {
+        title: body.title,
+        body: body.body,
+        kind: body.kind,
+        scope: body.scope,
+        folder: body.folder,
+        project: body.project,
+        tags: body.tags,
+        source: body.source,
+        source_url: body.source_url,
+        pinned: body.pinned,
+    };
+    let dir = notes_dir(&state, &cfg);
+    let database = state.database.lock().await;
+    match aikd_storage::notes::update_note(database.conn(), &dir, &id, patch) {
+        Ok(Some(note)) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(note),
+            error: None,
+        })),
+        Ok(None) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!("Note '{id}' not found")),
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+/// `DELETE /api/notes/{id}` — remove row, edges and Markdown file.
+async fn handle_note_delete(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<String>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    match aikd_storage::notes::delete_note(database.conn(), &id) {
+        Ok(true) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(format!("Deleted note {id}")),
+            error: None,
+        })),
+        Ok(false) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!("Note '{id}' not found")),
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+/// `GET /api/brief?days=3&project=...` — Morning Brief / check-before-start.
+async fn handle_brief(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<BriefParams>,
+) -> Result<Json<ApiResponse<aikd_storage::notes::MorningBrief>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let project = params
+        .project
+        .unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
+    let database = state.database.lock().await;
+    match aikd_storage::notes::morning_brief(database.conn(), params.days.unwrap_or(3), &project) {
+        Ok(brief) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(brief),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+/// `GET /api/export` — 1-click backup (JSON bundle or Markdown archive).
+async fn handle_export(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<ExportParams>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    let want_markdown = params
+        .format
+        .as_deref()
+        .map(|f| f.eq_ignore_ascii_case("md") || f.eq_ignore_ascii_case("markdown"))
+        .unwrap_or(false);
+    if want_markdown {
+        match aikd_storage::notes::export_markdown(database.conn()) {
+            Ok(md) => Ok(Json(ApiResponse {
+                success: true,
+                data: Some(serde_json::json!({
+                    "format": "markdown",
+                    "filename": format!("aikd-backup-{}.md", chrono::Utc::now().format("%Y%m%d")),
+                    "content": md,
+                })),
+                error: None,
+            })),
+            Err(e) => Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(e.to_string()),
+            })),
+        }
+    } else {
+        match aikd_storage::notes::export_bundle(database.conn()) {
+            Ok(bundle) => Ok(Json(ApiResponse {
+                success: true,
+                data: Some(bundle),
+                error: None,
+            })),
+            Err(e) => Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(e.to_string()),
+            })),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live Mission Control
+// ---------------------------------------------------------------------------
+
+static DAEMON_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// `GET /api/live` — who is connected, where, and doing what.
+async fn handle_live(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let started = DAEMON_START.get_or_init(std::time::Instant::now);
+    let database = state.database.lock().await;
+    let conn = database.conn();
+
+    let sys = process_snapshot();
+
+    // Reconcile rows whose process died without a clean EOF.
+    if let Ok(clients) = aikd_storage::telemetry::list_active_clients(conn) {
+        for c in &clients {
+            if c.pid > 0 {
+                let alive = sys.process(sysinfo::Pid::from_u32(c.pid as u32)).is_some();
+                if !alive {
+                    let _ = aikd_storage::telemetry::disconnect_client(conn, &c.client_id);
+                }
+            }
+        }
+    }
+    let clients = aikd_storage::telemetry::list_active_clients(conn).unwrap_or_default();
+
+    let mut agents = detect_local_agents(&sys);
+    let client_pids: HashSet<i64> = clients.iter().map(|c| c.pid).collect();
+    let parent_pids: HashSet<i64> = clients.iter().map(|c| c.parent_pid).collect();
+    for a in agents.iter_mut() {
+        let pid = a["pid"].as_i64().unwrap_or(0);
+        let connected = client_pids.contains(&pid) || parent_pids.contains(&pid);
+        a["connected_to_aikd"] = serde_json::json!(connected);
+    }
+
+    let events = aikd_storage::events::recent_events(conn, 20)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| {
+            let summary = serde_json::from_str::<serde_json::Value>(&e.payload)
+                .ok()
+                .and_then(|v| {
+                    v.get("summary")
+                        .or_else(|| v.get("query"))
+                        .or_else(|| v.get("tool"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| e.event_type.clone());
+            serde_json::json!({
+                "id": e.event_id,
+                "agent": e.agent_id,
+                "event_type": e.event_type,
+                "summary": format!("{}: {}", e.event_type, summary),
+                "project": e.project_id,
+                "created_at": e.timestamp,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(serde_json::json!({
+            "daemon": {
+                "pid": std::process::id(),
+                "port": cfg.server.rest_port,
+                "uptime_secs": started.elapsed().as_secs(),
+                "db_path": aikd_core::platform::canonical_path(&cfg.db_path()),
+                "status": "healthy",
+            },
+            "active_clients": clients,
+            "detected_agents": agents,
+            "herdr_terminals": aikd_storage::telemetry::herdr_terminals(),
+            "recent_events": events,
+        })),
+        error: None,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Analytics
+// ---------------------------------------------------------------------------
+
+/// `GET /api/analytics` — languages, memory mix, activity timeline, tokens.
+async fn handle_analytics(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let database = state.database.lock().await;
+    let conn = database.conn();
+
+    // Language distribution.
+    let mut lang: HashMap<String, (i64, i64)> = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT f.path, (SELECT COUNT(*) FROM chunks c WHERE c.file_id=f.id) FROM files f WHERE f.status='active'",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        }) {
+            for (path, chunks) in rows.flatten() {
+                let name = path.rsplit('/').next().unwrap_or(&path);
+                let ext = match name.rfind('.') {
+                    Some(i) => name[i..].to_lowercase(),
+                    None => "(none)".to_string(),
+                };
+                let entry = lang.entry(ext).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += chunks;
+            }
+        }
+    }
+    let mut languages: Vec<serde_json::Value> = lang
+        .into_iter()
+        .map(|(ext, (files, chunks))| {
+            serde_json::json!({ "ext": ext, "files": files, "chunks": chunks })
+        })
+        .collect();
+    languages.sort_by(|a, b| {
+        b["files"]
+            .as_i64()
+            .cmp(&a["files"].as_i64())
+            .then_with(|| a["ext"].as_str().cmp(&b["ext"].as_str()))
+    });
+    languages.truncate(20);
+
+    // Memory breakdown (kinds + lifecycle).
+    let mut breakdown = serde_json::Map::new();
+    for kind in [
+        "note",
+        "decision",
+        "constraint",
+        "fact",
+        "discovery",
+        "task",
+        "prompt",
+    ] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory WHERE kind=?1 AND status='active'",
+                rusqlite::params![kind],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        breakdown.insert(kind.to_string(), serde_json::json!(n));
+    }
+    let note_kind: i64 = conn
+        .query_row("SELECT COUNT(*) FROM notes WHERE kind='note'", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
+    breakdown.insert("note".to_string(), serde_json::json!(note_kind));
+    for status in ["active", "stale", "conflicted", "archived"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory WHERE status=?1",
+                rusqlite::params![status],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        breakdown.insert(status.to_string(), serde_json::json!(n));
+    }
+
+    // Activity timeline: last 24 hours bucketed by hour + agent.
+    let mut buckets: Vec<serde_json::Value> = Vec::new();
+    let mut hour_agents: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT substr(timestamp,12,2), agent_id, COUNT(*) FROM events WHERE datetime(timestamp) >= datetime('now','-24 hours') GROUP BY 1,2 ORDER BY 1",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        }) {
+            for (hh, agent, count) in rows.flatten() {
+                hour_agents
+                    .entry(hh)
+                    .or_default()
+                    .insert(agent, count);
+            }
+        }
+    }
+    for h in 0..24 {
+        let key = format!("{h:02}");
+        let agents = hour_agents.remove(&key).unwrap_or_default();
+        let count: i64 = agents.values().sum();
+        buckets.push(serde_json::json!({
+            "bucket": format!("{key}:00"),
+            "count": count,
+            "agents": agents,
+        }));
+    }
+
+    let (saved, total, avg) = aikd_storage::telemetry::token_savings(conn).unwrap_or((0, 0, 0.0));
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(serde_json::json!({
+            "languages": languages,
+            "memory_breakdown": breakdown,
+            "activity_timeline": buckets,
+            "tokens": {
+                "saved_est": saved,
+                "queries_total": total,
+                "avg_elapsed_ms": avg,
+            },
+        })),
+        error: None,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Impact analysis + context pack
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ImpactParams {
+    target: String,
+    project: Option<String>,
+}
+
+/// `GET /api/impact?target=<symbol_or_file>` — blast radius before refactor.
+async fn handle_impact(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<ImpactParams>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let project = params
+        .project
+        .unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
+    let database = state.database.lock().await;
+    match aikd_storage::graph::impact(database.conn(), &params.target, &project) {
+        Ok(value) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(value),
+            error: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        })),
+    }
+}
+
+#[derive(Deserialize)]
+struct ContextPackParams {
+    project: Option<String>,
+    node_id: Option<String>,
+}
+
+/// `GET /api/context-pack` — dense Markdown ready to paste into a web chat.
+async fn handle_context_pack(
+    State(state): State<RestState>,
+    headers: HeaderMap,
+    Query(params): Query<ContextPackParams>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let cfg = state.config.lock().await.clone();
+    if !check_auth(&headers, &cfg.server.auth_token) {
+        return Err(unauthorized());
+    }
+    let project = params
+        .project
+        .clone()
+        .map(|p| aikd_core::platform::normalize_project_key(&p))
+        .unwrap_or_else(|| aikd_core::platform::canonical_project(&cfg.scan.include_paths));
+    let database = state.database.lock().await;
+    let conn = database.conn();
+
+    let mut items = 0usize;
+    let mut md = String::new();
+    md.push_str("# AIKD Context Pack\n\n");
+    md.push_str(&format!(
+        "Project: `{}`\nGenerated: {}\n\n",
+        if project.is_empty() {
+            "(global)"
+        } else {
+            &project
+        },
+        chrono::Utc::now().to_rfc3339()
+    ));
+
+    if let Some(node_id) = params.node_id.as_deref().filter(|s| !s.is_empty()) {
+        if let Ok(Some(detail)) = aikd_storage::graph::node_detail(conn, node_id) {
+            md.push_str(&format!("## Focus: {}\n\n", detail.label));
+            md.push_str(&format!(
+                "_kind: {} · scope: {}_\n\n",
+                detail.kind, detail.scope
+            ));
+            if !detail.preview.trim().is_empty() {
+                md.push_str(&detail.preview);
+                md.push_str("\n\n");
+            }
+            if !detail.outgoing.is_empty() {
+                md.push_str("### Links\n");
+                for l in detail.outgoing.iter().take(15) {
+                    md.push_str(&format!("- {} ({})\n", l.label, l.edge_kind));
+                }
+                md.push('\n');
+            }
+            items += 1;
+        }
+    }
+
+    let symbols = aikd_storage::symbols::find_symbols(conn, "", 15).unwrap_or_default();
+    if !symbols.is_empty() {
+        md.push_str("## Symbols\n");
+        for s in symbols.iter().take(15) {
+            md.push_str(&format!(
+                "- `{}` ({}) — {}:{}\n",
+                s.name, s.kind, s.file_path, s.line_start
+            ));
+        }
+        md.push('\n');
+        items += symbols.len();
+    }
+
+    let constraints = constraints_for(conn, &project);
+    if !constraints.is_empty() {
+        md.push_str("## Active Constraints\n");
+        for c in &constraints {
+            md.push_str(&format!(
+                "- [{}] **{}** — {}\n",
+                c.scope,
+                c.title,
+                c.body.lines().next().unwrap_or("")
+            ));
+        }
+        md.push('\n');
+        items += constraints.len();
+    }
+
+    if let Ok((notes, _, _)) = aikd_storage::notes::list_notes(
+        conn,
+        &aikd_storage::notes::NoteFilter {
+            project: Some(project.clone()).filter(|p| !p.is_empty()),
+            limit: Some(8),
+            ..Default::default()
+        },
+    ) {
+        if !notes.is_empty() {
+            md.push_str("## Human Notes\n");
+            for n in &notes {
+                md.push_str(&format!(
+                    "- **{}** ({}) — {}\n",
+                    n.title,
+                    n.kind,
+                    n.body
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .trim()
+                ));
+            }
+            md.push('\n');
+            items += notes.len();
+        }
+    }
+
+    let tokens_est = aikd_core::estimate_tokens(&md);
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(serde_json::json!({
+            "markdown": md,
+            "tokens_est": tokens_est,
+            "items_count": items,
+        })),
+        error: None,
+    }))
+}
+
 pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()> {
     let cfg = Config::load_validated(config_path);
     let cors_origins = cfg.server.cors_origins.clone();
@@ -1368,50 +2455,69 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         metrics,
     };
 
-    // Configure CORS with explicit origin whitelist
-    // Default: allow only localhost origins for security
+    // Configure CORS. Default (empty `cors_origins`) is localhost + browser
+    // extension origins only: the Chrome/Edge MV3 extension talks to both
+    // :9090 and sandbox :9091 without opening CORS to arbitrary websites.
+    let allow_methods = [
+        axum::http::Method::GET,
+        axum::http::Method::POST,
+        axum::http::Method::PUT,
+        axum::http::Method::DELETE,
+        axum::http::Method::OPTIONS,
+    ];
+    let localhost_predicate = tower_http::cors::AllowOrigin::predicate(
+        |origin: &axum::http::HeaderValue, _parts: &axum::http::request::Parts| {
+            let Ok(o) = origin.to_str() else {
+                return false;
+            };
+            let o = o.trim_end_matches('/').to_ascii_lowercase();
+            o == "http://localhost"
+                || o == "http://127.0.0.1"
+                || o.starts_with("http://localhost:")
+                || o.starts_with("http://127.0.0.1:")
+                || o.starts_with("https://localhost:")
+                || o.starts_with("https://127.0.0.1:")
+                || o.starts_with("chrome-extension://")
+                || o.starts_with("extension://")
+                || o.starts_with("moz-extension://")
+                || o.starts_with("safari-web-extension://")
+        },
+    );
     let cors = if cors_origins.contains(&"*".to_string()) {
         log::warn!("CORS: Allowing all origins ('*'). Set specific origins in server.cors_origins for production.");
         CorsLayer::new()
             .allow_origin(Any)
-            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+            .allow_methods(allow_methods.clone())
             .allow_headers(tower_http::cors::Any)
     } else if cors_origins.is_empty() {
-        // No origins configured — allow localhost only
-        let localhost_origins: Vec<axum::http::HeaderValue> = vec![
-            format!("http://localhost:{port}").parse().unwrap(),
-            format!("http://127.0.0.1:{port}").parse().unwrap(),
-            "http://localhost:9090".parse().unwrap(),
-            "http://127.0.0.1:9090".parse().unwrap(),
-            "http://localhost:3000".parse().unwrap(),
-            "http://127.0.0.1:3000".parse().unwrap(),
-        ];
         CorsLayer::new()
-            .allow_origin(localhost_origins)
-            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+            .allow_origin(localhost_predicate)
+            .allow_methods(allow_methods.clone())
             .allow_headers(tower_http::cors::Any)
     } else {
-        // Use configured origins
+        // Use configured origins (plus the always-safe local/extension set).
         let origins: Vec<axum::http::HeaderValue> =
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
         if origins.is_empty() {
-            log::warn!("CORS: No valid origins in config, falling back to localhost only");
+            log::warn!("CORS: No valid origins in config, falling back to localhost + extensions");
             CorsLayer::new()
-                .allow_origin(["http://localhost:9090".parse().unwrap()])
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_origin(localhost_predicate)
+                .allow_methods(allow_methods.clone())
                 .allow_headers(tower_http::cors::Any)
         } else {
             CorsLayer::new()
                 .allow_origin(origins)
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_methods(allow_methods.clone())
                 .allow_headers(tower_http::cors::Any)
         }
     };
 
-    // Configure rate limiting: 30 requests per second per IP, burst 100
+    // Configure rate limiting: ~30 requests per second per IP, burst 100
     // so the interactive `/ui` dashboard can fetch multiple panels concurrently.
+    // NOTE: tower_governor's `per_second(n)` means ONE token every n SECONDS,
+    // not n tokens per second — use `per_millisecond(33)` for ~30 rps.
     let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()
-        .per_second(30)
+        .per_millisecond(33)
         .burst_size(100)
         .key_extractor(tower_governor::key_extractor::PeerIpKeyExtractor)
         .finish()
@@ -1467,6 +2573,22 @@ pub async fn run_rest_server(config_path: &str, port: u16) -> anyhow::Result<()>
         .route("/api/recall", post(handle_recall))
         .route("/api/sessions", get(handle_sessions))
         .route("/api/graph", get(handle_graph))
+        .route("/api/graph/node", get(handle_graph_node))
+        .route("/api/send", post(handle_send))
+        .route(
+            "/api/notes",
+            get(handle_notes_list).post(handle_notes_create),
+        )
+        .route(
+            "/api/notes/{id}",
+            put(handle_note_update).delete(handle_note_delete),
+        )
+        .route("/api/brief", get(handle_brief))
+        .route("/api/export", get(handle_export))
+        .route("/api/live", get(handle_live))
+        .route("/api/analytics", get(handle_analytics))
+        .route("/api/impact", get(handle_impact))
+        .route("/api/context-pack", get(handle_context_pack))
         .layer(rate_limiter)
         .layer(cors)
         .with_state(state);

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i32 = 14;
+const SCHEMA_VERSION: i32 = 15;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -71,6 +71,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if current < 14 {
         migrate_v14(conn)?;
+    }
+
+    if current < 15 {
+        migrate_v15(conn)?;
     }
 
     if current < SCHEMA_VERSION {
@@ -553,6 +557,90 @@ fn migrate_v14(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v15(conn: &Connection) -> Result<()> {
+    // v15 — AIKD Studio v2.1 additive layer:
+    //   notes          human vault (PARA + Journal), "Send to AIKD"
+    //   knowledge_links unified edges (wikilink/tag/mentions/relates)
+    //   active_clients  live mission-control auto-telemetry
+    //   query_metrics   token-savings & latency tracking
+    // Every statement is idempotent so upgrading a production v14 DB never
+    // loses data and re-running the migration is a no-op.
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS notes (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'note',
+          scope TEXT NOT NULL DEFAULT 'project',
+          folder TEXT NOT NULL DEFAULT 'Inbox',
+          project TEXT NOT NULL DEFAULT '',
+          tags_json TEXT NOT NULL DEFAULT '[]',
+          links_json TEXT NOT NULL DEFAULT '[]',
+          source TEXT NOT NULL DEFAULT 'human',
+          source_url TEXT NOT NULL DEFAULT '',
+          file_path TEXT NOT NULL DEFAULT '',
+          pinned INTEGER NOT NULL DEFAULT 0,
+          redacted_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(folder, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_notes_kind ON notes(kind, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_notes_project ON notes(project, scope);
+        CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(pinned);
+
+        CREATE TABLE IF NOT EXISTS knowledge_links (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          from_id TEXT NOT NULL,
+          from_kind TEXT NOT NULL,
+          to_id TEXT NOT NULL,
+          to_kind TEXT NOT NULL,
+          relation TEXT NOT NULL,
+          provenance TEXT NOT NULL DEFAULT 'EXTRACTED',
+          created_at TEXT NOT NULL,
+          UNIQUE(from_id, to_id, relation)
+        );
+        CREATE INDEX IF NOT EXISTS idx_klinks_from ON knowledge_links(from_id);
+        CREATE INDEX IF NOT EXISTS idx_klinks_to ON knowledge_links(to_id);
+        CREATE INDEX IF NOT EXISTS idx_klinks_relation ON knowledge_links(relation);
+
+        CREATE TABLE IF NOT EXISTS active_clients (
+          client_id TEXT PRIMARY KEY,
+          pid INTEGER NOT NULL DEFAULT 0,
+          parent_pid INTEGER NOT NULL DEFAULT 0,
+          parent_name TEXT NOT NULL DEFAULT '',
+          mcp_client_name TEXT NOT NULL DEFAULT '',
+          transport TEXT NOT NULL DEFAULT 'mcp-stdio',
+          cwd TEXT NOT NULL DEFAULT '',
+          project TEXT NOT NULL DEFAULT '',
+          last_tool TEXT NOT NULL DEFAULT '',
+          last_target TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'active',
+          started_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_clients_seen ON active_clients(last_seen_at, status);
+
+        CREATE TABLE IF NOT EXISTS query_metrics (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tool TEXT NOT NULL,
+          query_text TEXT NOT NULL DEFAULT '',
+          full_bytes INTEGER NOT NULL DEFAULT 0,
+          returned_bytes INTEGER NOT NULL DEFAULT 0,
+          saved_tokens_est INTEGER NOT NULL DEFAULT 0,
+          elapsed_ms INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_qmetrics_created ON query_metrics(created_at);
+        CREATE INDEX IF NOT EXISTS idx_qmetrics_tool ON query_metrics(tool, created_at);
+        ",
+    )?;
+
+    log::info!("Migration v15 applied — notes, knowledge_links, active_clients, query_metrics");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +743,53 @@ mod tests {
         assert!(tables.contains(&"memory".to_string()));
         assert!(tables.contains(&"events".to_string()));
         assert!(tables.contains(&"atlas".to_string()));
+        assert!(tables.contains(&"notes".to_string()));
+        assert!(tables.contains(&"knowledge_links".to_string()));
+        assert!(tables.contains(&"active_clients".to_string()));
+        assert!(tables.contains(&"query_metrics".to_string()));
+    }
+
+    #[test]
+    fn test_v15_upgrade_from_v14_preserves_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Simulate a production v14 DB holding real knowledge.
+        conn.execute(
+            "INSERT INTO memory (id, project_path, workstream, kind, title, body, source, status, confidence, supersedes, conflict_note, created_at, updated_at) VALUES ('keep-me','/p','ws','fact','T','body','explicit','active',1.0,NULL,NULL,'t','t')",
+            [],
+        ).unwrap();
+        conn.execute_batch(
+            "DROP TABLE notes; DROP TABLE knowledge_links; DROP TABLE active_clients; DROP TABLE query_metrics;",
+        ).unwrap();
+        conn.execute("UPDATE schema_version SET version = 14", [])
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        let row: String = conn
+            .query_row("SELECT title FROM memory WHERE id='keep-me'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(row, "T");
+        let v: i32 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 15);
+        // And the new tables accept a row each.
+        conn.execute(
+            "INSERT INTO notes (id,title,body,created_at,updated_at) VALUES ('n1','t','b','t','t')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO active_clients (client_id, started_at, last_seen_at) VALUES ('c1','t','t')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO query_metrics (tool, created_at) VALUES ('query','t')",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

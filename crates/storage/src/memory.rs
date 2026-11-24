@@ -224,6 +224,90 @@ pub fn all_conflicts(conn: &Connection) -> Result<Vec<MemoryItem>> {
         .map_err(Into::into)
 }
 
+/// Active constraints for auto-attach on query/symbol/context-pack.
+///
+/// "Global" constraints mean `memory.project_path = ''` and notes with
+/// `scope='global'`; project constraints must match the queried project key.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ConstraintRef {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub kind: String,
+    pub scope: String,
+    pub project: String,
+}
+
+/// Top active constraints relevant to `project` (project-specific first,
+/// then global), capped at `limit` (default 5 when 0).
+pub fn attach_constraints(
+    conn: &Connection,
+    project: &str,
+    limit: usize,
+) -> Result<Vec<ConstraintRef>> {
+    let project = aikd_core::platform::normalize_project_key(project);
+    let limit = if limit == 0 { 5 } else { limit };
+    let mut out: Vec<ConstraintRef> = Vec::new();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, title, body, project_path FROM memory WHERE kind='constraint' AND status='active' AND (project_path='' OR project_path=?1) ORDER BY CASE WHEN project_path=?1 THEN 0 ELSE 1 END, datetime(updated_at) DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![project, limit as i64], |r| {
+        let project_path: String = r.get(3)?;
+        Ok(ConstraintRef {
+            id: r.get(0)?,
+            title: r.get(1)?,
+            body: r.get(2)?,
+            kind: "constraint".to_string(),
+            scope: if project_path.is_empty() {
+                "global".to_string()
+            } else {
+                "project".to_string()
+            },
+            project: project_path,
+        })
+    })?;
+    for row in rows.flatten() {
+        out.push(row);
+    }
+
+    if out.len() < limit {
+        let mut stmt = conn.prepare(
+            "SELECT id, title, body, scope, project FROM notes WHERE kind='constraint' AND (scope='global' OR project=?1) ORDER BY CASE WHEN scope='global' THEN 1 ELSE 0 END, datetime(updated_at) DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![project, (limit - out.len()) as i64],
+            |r| {
+                Ok(ConstraintRef {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    body: r.get(2)?,
+                    kind: "constraint".to_string(),
+                    scope: r.get(3)?,
+                    project: r.get(4)?,
+                })
+            },
+        )?;
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    out.truncate(limit);
+    Ok(out)
+}
+
+/// All active (and conflicted) memory across every project — used by backup
+/// export and global dashboards, not by per-project handoff.
+pub fn all_active(conn: &Connection) -> Result<Vec<MemoryItem>> {
+    let sql = format!(
+        "SELECT {COLS} FROM memory WHERE status IN ('active','conflicted') ORDER BY datetime(updated_at) DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 /// Remove synthetic unit-test / dummy rows so production dashboards only show real knowledge.
 pub fn purge_dummy_memories(conn: &Connection) -> Result<usize> {
     let n = conn.execute(
@@ -549,5 +633,47 @@ mod tests {
             .unwrap()
             .iter()
             .all(|m| m.id != a.id));
+    }
+
+    #[test]
+    fn attach_constraints_prefers_project_then_global() {
+        let conn = setup();
+        save_memory(
+            &conn,
+            "",
+            "rules",
+            "constraint",
+            "Global: never commit secrets",
+            "g",
+            "explicit",
+            1.0,
+        )
+        .unwrap();
+        save_memory(
+            &conn,
+            "/p",
+            "rules",
+            "constraint",
+            "Project: zero downtime",
+            "p",
+            "explicit",
+            1.0,
+        )
+        .unwrap();
+        save_memory(
+            &conn,
+            "/other",
+            "rules",
+            "constraint",
+            "Other project only",
+            "o",
+            "explicit",
+            1.0,
+        )
+        .unwrap();
+        let got = attach_constraints(&conn, "/p", 5).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].scope, "project");
+        assert!(got.iter().all(|c| c.title != "Other project only"));
     }
 }

@@ -162,6 +162,16 @@ pub fn adapter_coverage(
         .map_err(Into::into)
 }
 
+/// Newest events across every project/workstream (Live Mission Control feed).
+pub fn recent_events(conn: &Connection, limit: usize) -> Result<Vec<AgentEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_id, project_id, workstream, agent_id, agent_session_id, event_type, timestamp, source_ref, payload, sequence FROM events ORDER BY sequence DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![limit.max(1) as i64], map_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 /// Global adapter coverage across all projects and workstreams (for `/ui`).
 pub fn all_adapter_coverage(conn: &Connection) -> Result<Vec<(String, String, i64)>> {
     let mut stmt = conn.prepare(

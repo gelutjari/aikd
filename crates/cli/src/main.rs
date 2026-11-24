@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aikd_core::{Config, ResourceProfile, SearchFilters};
+
+mod top;
 use aikd_embedder as embedder;
 use aikd_indexer::TantivyEngine;
 use aikd_session as session;
@@ -17,6 +19,22 @@ struct QueryParams<'a> {
     heading_filter: Option<&'a str>,
     json: bool,
     hybrid: bool,
+}
+
+/// Inputs for `aikd send` (kept out of the clap arm so the command body reads
+/// like the rest of the CLI helpers).
+struct SendParams<'a> {
+    text: Option<&'a str>,
+    title: Option<&'a str>,
+    kind: &'a str,
+    scope: &'a str,
+    folder: Option<&'a str>,
+    project: Option<&'a str>,
+    tags: &'a [String],
+    source: &'a str,
+    url: Option<&'a str>,
+    pin: bool,
+    json: bool,
 }
 
 static QUIET: AtomicBool = AtomicBool::new(false);
@@ -112,6 +130,11 @@ enum Commands {
             help = "Re-chunk all files regardless of hash (for rebuilding FTS after prune)"
         )]
         force: bool,
+        #[arg(
+            long,
+            help = "Index only files reported by `git status --porcelain` (fast, no full rescan)"
+        )]
+        changed: bool,
     },
     #[command(about = "[CLI] Search the knowledge base")]
     Query {
@@ -255,6 +278,63 @@ enum Commands {
         name_flag: Option<String>,
         #[arg(short, long, default_value = "20")]
         limit: usize,
+    },
+
+    #[command(
+        about = "[CLI] Send text/notes to AIKD (human vault + memory mirror)",
+        long_about = "[CLI] Send text/notes to AIKD\n\n\
+            Reads TEXT, or stdin when piped. Secrets are redacted, #tags and \
+            [[wikilinks]] extracted, and a Markdown file is written under \
+            <runtime>/notes/<folder>/ (+ note row, links, and a memory mirror \
+            for decision/constraint/fact/task kinds)."
+    )]
+    Send {
+        #[arg(value_name = "TEXT")]
+        text: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value = "note", value_name = "KIND")]
+        kind: String,
+        #[arg(long, default_value = "project")]
+        scope: String,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        pin: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(about = "[CLI] Impact analysis: blast radius for a symbol or file")]
+    Impact {
+        #[arg(value_name = "TARGET")]
+        target: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
+        about = "[CLI] Live terminal dashboard (Mission Control)",
+        long_about = "[CLI] Live terminal dashboard\n\n\
+            Polls /api/live, /api/overview and /api/brief every interval and \
+            falls back to a read-only SQLite snapshot when the daemon is down. \
+            Exit with `q` or Ctrl+C."
+    )]
+    Top {
+        #[arg(long, default_value = "2000", help = "Refresh interval (ms)")]
+        interval: u64,
+        #[arg(long, help = "Render one frame and exit (scripts / CI)")]
+        once: bool,
     },
 
     #[command(about = "[ADAPTER] Append or list canonical agent events (event journal)")]
@@ -507,7 +587,11 @@ async fn main() -> Result<()> {
         }
         Commands::DaemonStop => cmd_daemon_stop(&cli.config),
         Commands::DaemonPid => cmd_daemon_pid(&cli.config),
-        Commands::Scan { path, force } => cmd_scan(&cli.config, path.as_deref(), force, json_mode),
+        Commands::Scan {
+            path,
+            force,
+            changed,
+        } => cmd_scan(&cli.config, path.as_deref(), force, changed, json_mode),
         Commands::Query {
             query,
             limit,
@@ -596,6 +680,46 @@ async fn main() -> Result<()> {
             })?;
             cmd_symbol(&cli.config, &sym, limit, json_mode)
         }
+        Commands::Send {
+            text,
+            title,
+            kind,
+            scope,
+            folder,
+            project,
+            tags,
+            source,
+            url,
+            pin,
+            json,
+        } => cmd_send(
+            &cli.config,
+            &SendParams {
+                text: text.as_deref(),
+                title: title.as_deref(),
+                kind: &kind,
+                scope: &scope,
+                folder: folder.as_deref(),
+                project: project.as_deref(),
+                tags: &tags,
+                source: &source,
+                url: url.as_deref(),
+                pin,
+                json: json || json_mode,
+            },
+        ),
+        Commands::Impact {
+            target,
+            project,
+            json,
+        } => cmd_impact(&cli.config, &target, project.as_deref(), json || json_mode),
+        Commands::Top { interval, once } => top::run(
+            &cli.config,
+            &top::TopOptions {
+                interval_ms: interval.max(250),
+                once,
+            },
+        ),
         Commands::Memory { action } => cmd_memory(&cli.config, action, json_mode),
         Commands::Event { action } => cmd_event(&cli.config, action, json_mode),
         Commands::Handoff {
@@ -1074,7 +1198,13 @@ fn cmd_daemon_pid(config_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_scan(config_path: &str, override_path: Option<&str>, force: bool, json: bool) -> Result<()> {
+fn cmd_scan(
+    config_path: &str,
+    override_path: Option<&str>,
+    force: bool,
+    changed: bool,
+    json: bool,
+) -> Result<()> {
     let cfg = load_validated(config_path);
     // Enforce worker cap: bound the global rayon pool to the resource profile.
     // (One-shot CLI process; `build_global` no-ops if already initialized.)
@@ -1084,6 +1214,10 @@ fn cmd_scan(config_path: &str, override_path: Option<&str>, force: bool, json: b
         .build_global();
     let database = Database::open(&cfg.db_path())?;
     let tantivy = TantivyEngine::open(&cfg.tantivy_path())?;
+
+    if changed {
+        return scan_changed(&cfg, &database, &tantivy, override_path, json);
+    }
 
     let opts = aikd_scanner::ScanOptions {
         override_path: override_path.map(std::path::PathBuf::from),
@@ -1106,10 +1240,281 @@ fn cmd_scan(config_path: &str, override_path: Option<&str>, force: bool, json: b
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "status": "ok",
+                "mode": if force { "full_force" } else { "full" },
                 "files_indexed": progress.files_indexed,
                 "files_skipped": progress.files_skipped,
                 "chunks_created": progress.chunks_created,
                 "elapsed_ms": progress.elapsed.as_millis(),
+            }))
+            .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum GitChange {
+    /// Existing file that must be (re)indexed — canonical absolute path.
+    Upsert(String),
+    /// File removed from the working tree — canonical absolute path.
+    Delete(String),
+}
+
+/// Read `git status --porcelain -z` for the scan root.
+///
+/// Returns `Ok(None)` when the root is not inside a git work tree, so callers
+/// can fall back to a normal incremental scan instead of failing.
+fn git_changes(root: &Path) -> Result<Option<Vec<GitChange>>> {
+    use std::process::{Command, Stdio};
+
+    let toplevel = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let top = match toplevel {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => return Ok(None),
+    };
+    if top.is_empty() {
+        return Ok(None);
+    }
+
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&top)
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+        .stdin(Stdio::null())
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git status failed in {top}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<&str> = text.split('\0').filter(|f| !f.is_empty()).collect();
+    let base = Path::new(&top);
+    let mut changes = Vec::new();
+    let mut idx = 0usize;
+    while idx < fields.len() {
+        let entry = fields[idx];
+        idx += 1;
+        if entry.len() < 4 {
+            continue;
+        }
+        let status = &entry[..2];
+        let rel = &entry[3..];
+        let renamed = status.contains('R') || status.contains('C');
+        if renamed {
+            // `-z` reverses the porcelain rename pair: new path, then original.
+            if let Some(original) = fields.get(idx) {
+                changes.push(GitChange::Delete(canonical_join(base, original)));
+            }
+            idx += 1;
+        }
+        let path = canonical_join(base, rel);
+        if status.contains('D') && !status.starts_with("??") {
+            changes.push(GitChange::Delete(path));
+        } else {
+            changes.push(GitChange::Upsert(path));
+        }
+    }
+    Ok(Some(changes))
+}
+
+fn canonical_join(base: &Path, rel: &str) -> String {
+    aikd_core::platform::canonical_path(&base.join(rel.replace('\\', "/")))
+}
+
+/// Shared with the scanner's discovery rules: a git-tracked file is only
+/// indexed when the configured extension/filter/size policy accepts it.
+fn passes_scan_filters(cfg: &Config, path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || !cfg.check_file_size(meta.len()) {
+        return false;
+    }
+    if path.ancestors().any(|a| {
+        a.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| cfg.should_exclude_dir(n))
+            .unwrap_or(false)
+    }) {
+        return false;
+    }
+    let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let ext = path.extension().and_then(|s| s.to_str());
+    !(cfg.should_exclude_file(fname)
+        || !cfg.matches_filename_filter(fname)
+        || cfg.should_exclude_extension(fname, ext)
+        || !cfg.should_include_extension(ext))
+}
+
+/// `aikd scan --changed`: index exactly what git reports as dirty.
+///
+/// Git is only the *discovery* source; chunking, symbol extraction, FTS and
+/// Tantivy updates all go through the same scanner primitives as a full scan,
+/// so the index stays consistent and unchanged files are never re-chunked.
+fn scan_changed(
+    cfg: &Config,
+    database: &Database,
+    tantivy: &TantivyEngine,
+    override_path: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+    let roots: Vec<String> = match override_path {
+        Some(p) => vec![aikd_core::platform::canonical_path(Path::new(p))],
+        None => cfg
+            .scan
+            .include_paths
+            .iter()
+            .map(|p| aikd_core::platform::canonical_path(Path::new(p)))
+            .collect(),
+    };
+    let roots = if roots.is_empty() {
+        vec![".".to_string()]
+    } else {
+        roots
+    };
+
+    // Every configured root is probed independently: one non-git folder must
+    // not disable `--changed` for the git-backed ones beside it.
+    let mut all_changes: Vec<GitChange> = Vec::new();
+    let mut git_roots = 0usize;
+    for root in &roots {
+        match git_changes(Path::new(root))? {
+            Some(c) => {
+                git_roots += 1;
+                all_changes.extend(c);
+            }
+            None => einfo!("[aikd] {root} is not a git work tree — skipped by --changed"),
+        }
+    }
+
+    let changes = if git_roots == 0 {
+        einfo!(
+            "[aikd] no git work tree among {} root(s) — falling back to incremental scan",
+            roots.len()
+        );
+        let progress = aikd_scanner::run_scan(
+            cfg,
+            database,
+            tantivy,
+            &aikd_scanner::ScanOptions {
+                override_path: override_path.map(std::path::PathBuf::from),
+                force: false,
+            },
+        )?;
+        einfo!(
+            "[aikd] Indexed {} files, {} chunks in {:?}",
+            progress.files_indexed,
+            progress.chunks_created,
+            progress.elapsed
+        );
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "ok",
+                    "mode": "full_fallback",
+                    "reason": "not a git work tree",
+                    "roots": roots,
+                    "files_indexed": progress.files_indexed,
+                    "files_skipped": progress.files_skipped,
+                    "chunks_created": progress.chunks_created,
+                    "elapsed_ms": progress.elapsed.as_millis(),
+                }))
+                .unwrap_or_default()
+            );
+        }
+        return Ok(());
+    } else {
+        all_changes
+    };
+
+    let mut deletes: Vec<String> = Vec::new();
+    let mut upserts: Vec<std::path::PathBuf> = Vec::new();
+    let mut filtered_out = 0usize;
+    for change in changes {
+        match change {
+            GitChange::Delete(path) => {
+                if !deletes.contains(&path) {
+                    deletes.push(path);
+                }
+            }
+            GitChange::Upsert(path) => {
+                let p = std::path::PathBuf::from(&path);
+                if !passes_scan_filters(cfg, &p) {
+                    filtered_out += 1;
+                } else if !upserts.contains(&p) {
+                    upserts.push(p);
+                }
+            }
+        }
+    }
+
+    einfo!(
+        "[aikd] git: {} changed path(s) — {} to index, {} deleted, {} filtered out",
+        upserts.len() + deletes.len() + filtered_out,
+        upserts.len(),
+        deletes.len(),
+        filtered_out
+    );
+
+    // Drop removed files from SQLite + Tantivy before adding replacements.
+    let mut chunks_deleted = 0usize;
+    for path in &deletes {
+        let stale = aikd_scanner::replaced_chunk_ids(database, std::slice::from_ref(path));
+        if !stale.is_empty() {
+            tantivy.delete_chunks(&stale)?;
+        }
+        chunks_deleted += aikd_storage::cascade::delete_file_cascade(database.conn(), path)?;
+    }
+
+    let candidates = upserts.len();
+    let to_index = aikd_scanner::filter_changed(upserts, database);
+    let files_skipped = filtered_out + candidates.saturating_sub(to_index.len());
+    let mut chunks_created = 0usize;
+    let mut files_indexed = 0usize;
+    if !to_index.is_empty() {
+        let indexed = aikd_scanner::chunk_files(&to_index, cfg);
+        chunks_created = indexed.iter().map(|(_, chunks)| chunks.len()).sum();
+        let paths: Vec<String> = indexed.iter().map(|(p, _)| p.clone()).collect();
+        let stale_ids = aikd_scanner::replaced_chunk_ids(database, &paths);
+        aikd_scanner::store_chunks(&indexed, database)?;
+        aikd_scanner::update_tantivy_incremental(&indexed, &stale_ids, tantivy)?;
+        let _ = aikd_storage::atlas::mark_all_stale_if_changed(database.conn());
+        let project_key = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+        let _ =
+            aikd_storage::memory::sync_rules_and_skills_from_files(database.conn(), &project_key);
+        files_indexed = indexed.len();
+    }
+    let elapsed = start.elapsed();
+    einfo!(
+        "[aikd] Indexed {files_indexed} changed file(s), {chunks_created} chunks, removed {} file(s) in {:?}",
+        deletes.len(),
+        elapsed
+    );
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "ok",
+                "mode": "changed",
+                "roots": roots,
+                "files_indexed": files_indexed,
+                "files_skipped": files_skipped,
+                "files_deleted": deletes.len(),
+                "chunks_created": chunks_created,
+                "chunks_deleted": chunks_deleted,
+                "elapsed_ms": elapsed.as_millis(),
             }))
             .unwrap_or_default()
         );
@@ -2264,6 +2669,208 @@ fn cmd_symbol(config_path: &str, name: &str, limit: usize, json: bool) -> Result
     Ok(())
 }
 
+/// `aikd send` — quick capture into the human vault (+ memory mirror when the
+/// kind is `decision|constraint|fact|task`). Storage owns redaction, link
+/// extraction and Markdown writing; this command owns input plumbing.
+fn cmd_send(config_path: &str, params: &SendParams) -> Result<()> {
+    use aikd_storage::notes::{create_note, NewNote};
+    use std::io::{IsTerminal, Read};
+
+    const KINDS: [&str; 7] = [
+        "note",
+        "decision",
+        "constraint",
+        "fact",
+        "task",
+        "prompt",
+        "daily_log",
+    ];
+    const SCOPES: [&str; 2] = ["global", "project"];
+
+    let kind = params.kind.trim().to_lowercase();
+    if !KINDS.contains(&kind.as_str()) {
+        anyhow::bail!(
+            "invalid --kind '{}'; use one of: {}",
+            params.kind,
+            KINDS.join(", ")
+        );
+    }
+    let scope = params.scope.trim().to_lowercase();
+    if !SCOPES.contains(&scope.as_str()) {
+        anyhow::bail!("invalid --scope '{}'; use global or project", params.scope);
+    }
+
+    let mut body = params
+        .text
+        .map(str::to_string)
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_default();
+    if body.trim().is_empty() {
+        let stdin = std::io::stdin();
+        if !stdin.is_terminal() {
+            let mut piped = String::new();
+            stdin.lock().read_to_string(&mut piped)?;
+            body = piped;
+        }
+    }
+    if body.trim().is_empty() {
+        anyhow::bail!("nothing to send: pass TEXT or pipe content through stdin");
+    }
+
+    let cfg = load_validated(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let notes_dir = cfg.runtime_dir(config_path).join("notes");
+    let project = match params.project {
+        Some(p) if !p.trim().is_empty() => aikd_core::platform::normalize_project_key(p),
+        _ => aikd_core::platform::canonical_project(&cfg.scan.include_paths),
+    };
+
+    // Deterministic preview of the Shield. `create_note` runs the same
+    // redaction, persists the redacted text, and stores its own count.
+    let shield = aikd_core::security::redact_secrets(&body);
+
+    let note = create_note(
+        database.conn(),
+        &notes_dir,
+        NewNote {
+            title: params.title.map(str::to_string),
+            body: body.clone(),
+            kind: Some(kind),
+            scope: Some(scope),
+            folder: params.folder.map(str::to_string),
+            project: Some(project),
+            tags: Some(params.tags.to_vec()),
+            source: Some(params.source.to_string()),
+            source_url: params.url.map(str::to_string),
+            pinned: Some(params.pin),
+        },
+    )?;
+    let redacted_count = note.redacted_count.max(shield.redacted_count);
+
+    if params.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "success": true,
+                "id": note.id,
+                "title": note.title,
+                "kind": note.kind,
+                "scope": note.scope,
+                "folder": note.folder,
+                "project": note.project,
+                "file_path": note.file_path,
+                "tags": note.tags,
+                "links": note.links,
+                "source": note.source,
+                "pinned": note.pinned,
+                "redacted_count": redacted_count,
+                "created_at": note.created_at,
+            }))
+            .unwrap_or_default()
+        );
+        return Ok(());
+    }
+
+    println!("Saved {} '{}' — {}", note.kind, note.title, note.id);
+    println!(
+        "  folder: {} · scope: {} · project: {}",
+        note.folder, note.scope, note.project
+    );
+    println!("  file: {}", note.file_path);
+    if !note.tags.is_empty() {
+        println!("  tags: {}", note.tags.join(", "));
+    }
+    if !note.links.is_empty() {
+        println!("  links: {}", note.links.join(", "));
+    }
+    if redacted_count > 0 {
+        println!("  shield: {redacted_count} secret(s) redacted");
+    }
+    println!("  Saved to the AIKD vault (Studio → Notes, or open the file above).");
+    Ok(())
+}
+
+/// `aikd impact` — blast radius (matched files, importers, call sites,
+/// constraints, notes) using the same analysis as `GET /api/impact`.
+fn cmd_impact(config_path: &str, target: &str, project: Option<&str>, json: bool) -> Result<()> {
+    let cfg = load_validated(config_path);
+    let database = Database::open(&cfg.db_path())?;
+    let project = match project {
+        Some(p) if !p.trim().is_empty() => aikd_core::platform::normalize_project_key(p),
+        _ => aikd_core::platform::canonical_project(&cfg.scan.include_paths),
+    };
+    let report = aikd_storage::graph::impact(database.conn(), target, &project)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+        return Ok(());
+    }
+
+    let list = |key: &str| -> Vec<serde_json::Value> {
+        report
+            .get(key)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    println!("IMPACT — target: {target}");
+    println!("Project: {project}");
+
+    let matched = list("matched_files");
+    println!("\nMatched files ({}):", matched.len());
+    for f in matched.iter().filter_map(|v| v.as_str()) {
+        println!("  - {f}");
+    }
+
+    let importers = list("direct_importers");
+    println!("\nDirect importers ({}):", importers.len());
+    for f in importers.iter().filter_map(|v| v.as_str()) {
+        println!("  - {f}");
+    }
+
+    let callers = list("symbol_callers");
+    println!("\nSymbol call sites ({}):", callers.len());
+    for c in callers.iter().take(25) {
+        println!(
+            "  - {}:{}  {}",
+            c.get("file").and_then(|v| v.as_str()).unwrap_or("?"),
+            c.get("line").and_then(|v| v.as_i64()).unwrap_or(0),
+            c.get("snippet").and_then(|v| v.as_str()).unwrap_or("")
+        );
+    }
+
+    let constraints = list("related_constraints");
+    println!("\nRelated constraints ({}):", constraints.len());
+    for c in constraints.iter() {
+        println!(
+            "  - [{}] {}",
+            c.get("scope").and_then(|v| v.as_str()).unwrap_or("?"),
+            c.get("title").and_then(|v| v.as_str()).unwrap_or("")
+        );
+        if let Some(body) = c.get("body").and_then(|v| v.as_str()) {
+            let first = body.lines().next().unwrap_or("");
+            if !first.is_empty() {
+                println!("      {first}");
+            }
+        }
+    }
+
+    let notes = list("related_notes");
+    println!("\nRelated notes ({}):", notes.len());
+    for n in notes.iter() {
+        println!(
+            "  - [{}] {} ({})",
+            n.get("kind").and_then(|v| v.as_str()).unwrap_or("note"),
+            n.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+            n.get("id").and_then(|v| v.as_str()).unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
 fn cmd_memory(config_path: &str, action: MemoryAction, json: bool) -> Result<()> {
     use aikd_storage::memory::{
         active_tasks, latest_checkpoint, list_memory, save_memory, supersede,
@@ -3098,4 +3705,200 @@ async fn cmd_benchmark(config_path: &str) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn long_flags(sub: &str) -> Vec<String> {
+        Cli::command()
+            .find_subcommand(sub)
+            .unwrap_or_else(|| panic!("subcommand `{sub}` is missing"))
+            .get_arguments()
+            .filter_map(|a| a.get_long().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn new_subcommands_are_registered() {
+        for name in ["send", "impact", "scan", "top"] {
+            assert!(
+                Cli::command().find_subcommand(name).is_some(),
+                "`aikd {name}` must be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn send_exposes_contract_flags() {
+        let flags = long_flags("send");
+        for expected in [
+            "title", "kind", "scope", "folder", "project", "tag", "source", "url", "pin", "json",
+        ] {
+            assert!(
+                flags.iter().any(|f| f == expected),
+                "send is missing --{expected} (has {flags:?})"
+            );
+        }
+        assert_eq!(
+            Cli::command()
+                .find_subcommand("send")
+                .unwrap()
+                .get_positionals()
+                .count(),
+            1,
+            "send takes one optional positional TEXT"
+        );
+    }
+
+    #[test]
+    fn send_parses_positional_and_tags() {
+        let cli = Cli::try_parse_from([
+            "aikd",
+            "send",
+            "hello world",
+            "--kind",
+            "daily_log",
+            "--tag",
+            "arch",
+            "--tag",
+            "tray",
+            "--pin",
+        ])
+        .expect("send args must parse");
+        match cli.command {
+            Some(Commands::Send {
+                text,
+                kind,
+                tags,
+                pin,
+                ..
+            }) => {
+                assert_eq!(text.as_deref(), Some("hello world"));
+                assert_eq!(kind, "daily_log");
+                assert_eq!(tags, vec!["arch".to_string(), "tray".to_string()]);
+                assert!(pin);
+            }
+            other => panic!("expected Send, got some={}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn impact_and_scan_and_top_flags() {
+        let impact = long_flags("impact");
+        assert!(impact.iter().any(|f| f == "project"));
+        assert!(impact.iter().any(|f| f == "json"));
+
+        let scan = long_flags("scan");
+        assert!(scan.iter().any(|f| f == "changed"));
+        assert!(scan.iter().any(|f| f == "force"));
+        assert!(scan.iter().any(|f| f == "path"));
+
+        let top = long_flags("top");
+        assert!(top.iter().any(|f| f == "interval"));
+        assert!(top.iter().any(|f| f == "once"));
+    }
+
+    // --- git-backed `scan --changed` discovery -----------------------------
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "aikd-test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "aikd-test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn temp_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("aikd-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn git_changes_reports_modified_renamed_deleted_and_untracked() {
+        if !git_available() {
+            return;
+        }
+        let dir = temp_repo("changed-scan");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
+        std::fs::write(dir.join("e.rs"), "fn e() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "init"]);
+
+        std::fs::write(dir.join("a.rs"), "fn main() { println!(\"x\"); }\n").unwrap();
+        git(&dir, &["mv", "b.rs", "d.rs"]);
+        std::fs::remove_file(dir.join("e.rs")).unwrap();
+        std::fs::write(dir.join("c.rs"), "fn c() {}\n").unwrap();
+
+        let changes = git_changes(&dir).unwrap().expect("is a git work tree");
+        let upserts: Vec<&str> = changes
+            .iter()
+            .filter_map(|c| match c {
+                GitChange::Upsert(p) => Some(p.as_str()),
+                _ => None,
+            })
+            .collect();
+        let deletes: Vec<&str> = changes
+            .iter()
+            .filter_map(|c| match c {
+                GitChange::Delete(p) => Some(p.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(upserts.iter().any(|p| p.ends_with("/a.rs")), "{upserts:?}");
+        assert!(
+            upserts.iter().any(|p| p.ends_with("/d.rs")),
+            "rename target must be indexed: {upserts:?}"
+        );
+        assert!(upserts.iter().any(|p| p.ends_with("/c.rs")), "{upserts:?}");
+        assert!(
+            deletes.iter().any(|p| p.ends_with("/b.rs")),
+            "rename source must be evicted: {deletes:?}"
+        );
+        assert!(deletes.iter().any(|p| p.ends_with("/e.rs")), "{deletes:?}");
+        assert!(
+            !upserts
+                .iter()
+                .any(|p| p.ends_with("/b.rs") || p.ends_with("/e.rs")),
+            "removed paths must not be re-indexed: {upserts:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_changes_returns_none_outside_a_repo() {
+        let dir = temp_repo("non-repo");
+        let changes = git_changes(&dir).expect("no error outside git");
+        assert!(
+            changes.is_none(),
+            "expected clean fallback, got {changes:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

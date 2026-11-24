@@ -34,6 +34,7 @@ jsonwebtoken = { workspace = true }
 chrono = { workspace = true }
 fs2 = "0.4"
 shellexpand = { workspace = true }
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -4,6 +4,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
+use std::collections::HashSet;
 
 use aikd_core::SearchFilters;
 use aikd_embedder as embedder;
@@ -12,6 +13,98 @@ use aikd_session as session;
 use aikd_storage::Database;
 
 use crate::AppState;
+
+/// Stable client identity for this MCP process (one `aikd serve` per session).
+fn client_id() -> String {
+    format!("mcp-{}", std::process::id())
+}
+
+/// Parent process of this MCP server (the agent CLI/IDE that spawned it).
+fn parent_process() -> (i64, String) {
+    use sysinfo::{Pid, System};
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let me = Pid::from_u32(std::process::id());
+    if let Some(proc_) = sys.process(me) {
+        if let Some(parent) = proc_.parent() {
+            let name = sys
+                .process(parent)
+                .map(|p| p.name().to_string_lossy().to_string())
+                .unwrap_or_default();
+            return (parent.as_u32() as i64, name);
+        }
+    }
+    (0, String::new())
+}
+
+fn current_cwd() -> String {
+    std::env::current_dir()
+        .map(|p| aikd_core::platform::canonical_path(&p))
+        .unwrap_or_default()
+}
+
+/// Best-effort heartbeat: never let telemetry break a tool call.
+fn touch(db: &Database, tool: &str, target: &str) {
+    let _ = aikd_storage::telemetry::touch_client(db.conn(), &client_id(), tool, target);
+}
+
+fn params_path_hint(opts: &aikd_scanner::ScanOptions) -> &str {
+    opts.override_path
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .unwrap_or("")
+}
+
+/// Record token savings for a query/symbol call.
+fn record_query_metrics(
+    db: &Database,
+    tool: &str,
+    query: &str,
+    result_paths: &[String],
+    returned_bytes: usize,
+    elapsed: std::time::Duration,
+) {
+    let mut full_bytes: i64 = 0;
+    let seen: HashSet<&str> = result_paths.iter().map(|s| s.as_str()).collect();
+    for path in seen {
+        if let Ok(size) = db.conn().query_row(
+            "SELECT size FROM files WHERE path=?1",
+            rusqlite::params![path],
+            |r| r.get::<_, i64>(0),
+        ) {
+            full_bytes += size;
+        }
+    }
+    if full_bytes == 0 {
+        full_bytes = returned_bytes as i64 * 4;
+    }
+    let _ = aikd_storage::telemetry::record_query_metric(
+        db.conn(),
+        tool,
+        query,
+        full_bytes,
+        returned_bytes as i64,
+        elapsed.as_millis() as i64,
+    );
+}
+
+/// Render the auto-attached active constraints block.
+fn constraints_block(conn: &rusqlite::Connection, project: &str) -> String {
+    let items = aikd_storage::memory::attach_constraints(conn, project, 5).unwrap_or_default();
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nActive constraints (respect these):\n");
+    for c in items {
+        out.push_str(&format!(
+            "- [{}] {}: {}\n",
+            c.scope,
+            c.title,
+            c.body.lines().next().unwrap_or("")
+        ));
+    }
+    out
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ScanParams {
@@ -173,6 +266,45 @@ impl ServerHandler for AikdServer {
             ..Default::default()
         }
     }
+
+    /// Capture the MCP `clientInfo` at handshake time and register this
+    /// session in `active_clients` (Live Mission Control).
+    fn initialize(
+        &self,
+        request: rmcp::model::InitializeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<rmcp::model::InitializeResult, rmcp::ErrorData>,
+    > + Send
+           + '_ {
+        let client_name = request.client_info.name.clone();
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        async move {
+            let cfg = self.state.config.lock().await.clone();
+            if let Ok(db) = Database::open(&cfg.db_path()) {
+                let (parent_pid, parent_name) = parent_process();
+                let cwd = current_cwd();
+                let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+                let id = client_id();
+                let _ = aikd_storage::telemetry::start_client(
+                    db.conn(),
+                    &aikd_storage::telemetry::ClientStart {
+                        client_id: &id,
+                        pid: std::process::id() as i64,
+                        parent_pid,
+                        parent_name: &parent_name,
+                        mcp_client_name: &client_name,
+                        transport: "mcp-stdio",
+                        cwd: &cwd,
+                        project: &project,
+                    },
+                );
+            }
+            Ok(self.get_info())
+        }
+    }
 }
 
 #[tool_router(router = tool_router)]
@@ -209,6 +341,7 @@ impl AikdServer {
             force: false,
         };
 
+        touch(&database, "scan", params_path_hint(&opts));
         match aikd_scanner::run_scan(&cfg, &database, &tantivy, &opts) {
             Ok(progress) => format!(
                 "Indexed {} files, {} chunks in {:?}",
@@ -225,6 +358,7 @@ impl AikdServer {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
+        touch(&database, "query", &params.query);
         let tantivy = match TantivyEngine::open(&cfg.tantivy_path()) {
             Ok(t) => t,
             Err(e) => return format!("Error: {e}"),
@@ -249,6 +383,7 @@ impl AikdServer {
         };
         let model_dir = cfg.model_path();
         let (source, enabled) = aikd_context::SemanticSource::from_config(&cfg, &model_dir);
+        let started = std::time::Instant::now();
         let outcome = match aikd_context::run_query_with_source(
             &database,
             std::sync::Arc::new(tantivy),
@@ -259,6 +394,20 @@ impl AikdServer {
             Ok(o) => o,
             Err(e) => return format!("Error: {e}"),
         };
+        let returned_bytes: usize = outcome.results.iter().map(|r| r.content.len()).sum();
+        let paths: Vec<String> = outcome
+            .results
+            .iter()
+            .map(|r| r.file_path.clone())
+            .collect();
+        record_query_metrics(
+            &database,
+            "query",
+            &params.query,
+            &paths,
+            returned_bytes,
+            started.elapsed(),
+        );
         let mut head = String::new();
         if let aikd_context::RetrievalKind::LexicalFallback { reason } = &outcome.retrieval {
             head.push_str(&format!(
@@ -271,7 +420,9 @@ impl AikdServer {
                 outcome.truncated_chars
             ));
         }
-        format!("{head}{}", format_results(&outcome.results))
+        let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+        let constraints = constraints_block(database.conn(), &project);
+        format!("{head}{}{constraints}", format_results(&outcome.results))
     }
 
     #[tool(description = "Get statistics about the knowledge base")]
@@ -281,6 +432,7 @@ impl AikdServer {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
+        touch(&database, "stats", "");
         let conn = database.conn();
         let fc: i64 = conn
             .query_row(
@@ -320,6 +472,7 @@ impl AikdServer {
             Ok(db) => db,
             Err(e) => return format!("Error: {e}"),
         };
+        touch(&database, "embed", "");
         let count: i64 = database
             .conn()
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
@@ -384,6 +537,7 @@ impl AikdServer {
             },
         };
 
+        touch(&database, "remember", &params.role);
         match session::remember(
             database.conn(),
             &session_id,
@@ -421,6 +575,7 @@ impl AikdServer {
         };
 
         let limit = params.limit.unwrap_or(10);
+        touch(&database, "recall", &params.query);
         match session::recall(database.conn(), &session_id, &params.query, limit) {
             Ok(convs) => {
                 if convs.is_empty() {
@@ -470,11 +625,28 @@ impl AikdServer {
             Err(e) => return format!("Error: {e}"),
         };
         let limit = params.limit.unwrap_or(20);
+        touch(&database, "symbol", &params.name);
+        let started = std::time::Instant::now();
         match aikd_storage::symbols::find_symbols(database.conn(), &params.name, limit) {
             Ok(symbols) if symbols.is_empty() => {
                 format!("No symbols matching '{}'. Run scan first.", params.name)
             }
             Ok(symbols) => {
+                let returned_bytes: usize = symbols
+                    .iter()
+                    .map(|s| s.signature.len() + s.name.len())
+                    .sum();
+                let paths: Vec<String> = symbols.iter().map(|s| s.file_path.clone()).collect();
+                record_query_metrics(
+                    &database,
+                    "symbol",
+                    &params.name,
+                    &paths,
+                    returned_bytes,
+                    started.elapsed(),
+                );
+                let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
+                let constraints = constraints_block(database.conn(), &project);
                 let mut out = format!(
                     "{} symbol(s) for '{}' (EXTRACTED, heuristic):\n",
                     symbols.len(),
@@ -492,6 +664,7 @@ impl AikdServer {
                         s.signature
                     ));
                 }
+                out.push_str(&constraints);
                 out
             }
             Err(e) => format!("Error: {e}"),
@@ -528,6 +701,7 @@ impl AikdServer {
                 "Error: invalid source '{source}' (use explicit|agent-asserted|inferred)"
             );
         }
+        touch(&database, "memory_save", &params.title);
         match aikd_storage::memory::save_memory(
             database.conn(),
             &project,
@@ -555,6 +729,7 @@ impl AikdServer {
         };
         let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
+        touch(&database, "memory_list", &ws);
         match aikd_storage::memory::list_memory(
             database.conn(),
             &project,
@@ -593,6 +768,7 @@ impl AikdServer {
         };
         let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
+        touch(&database, "memory_task", &ws);
         let tasks = match aikd_storage::memory::active_tasks(database.conn(), &project, &ws) {
             Ok(t) => t,
             Err(e) => return format!("Error: {e}"),
@@ -635,6 +811,7 @@ impl AikdServer {
             "archive" => aikd_storage::memory::archive(database.conn(), &params.id),
             other => return format!("Error: unknown action '{other}' (use stale|archive)"),
         };
+        touch(&database, "memory_lifecycle", &params.id);
         match n {
             Ok(1) => format!("{}: {}", params.action, params.id),
             Ok(_) => format!(
@@ -685,6 +862,7 @@ impl AikdServer {
         if serde_json::from_str::<serde_json::Value>(&payload).is_err() {
             return "Error: payload must be JSON".to_string();
         }
+        touch(&database, "event_append", &params.event_type);
         match aikd_storage::events::append_event(
             database.conn(),
             &project,
@@ -715,6 +893,7 @@ impl AikdServer {
         let project = aikd_core::platform::canonical_project(&cfg.scan.include_paths);
         let ws = params.workstream.unwrap_or_else(|| "default".to_string());
         let recent = params.recent_events.unwrap_or(30);
+        touch(&database, "handoff", &ws);
         match aikd_context::assemble_handoff(database.conn(), &project, &ws, recent) {
             Ok(pkg) => pkg.render_text(),
             Err(e) => format!("Error: {e}"),
@@ -815,13 +994,34 @@ pub async fn run_server(config_path: &str) -> Result<()> {
             let _ = client_write.flush().await;
             line.clear();
         }
+        // Signal EOF to the rmcp service and stop the stdout pump. Waiting on
+        // `out_task` here would deadlock: it only ends when the service
+        // closes, and the service only closes when this side shuts down.
+        let _ = client_write.shutdown().await;
         drop(client_write);
-        let _ = out_task.await;
+        out_task.abort();
     });
 
     let service = server.serve(server_io).await?;
-    service.waiting().await?;
+    // Exit when EITHER the rmcp service stops OR stdin reaches EOF. Without
+    // the select a client closing its pipe left the process (and its live
+    // row) hanging forever.
+    let mut proxy_task = proxy_task;
+    tokio::select! {
+        res = service.waiting() => {
+            if let Err(e) = res {
+                log::warn!("mcp: service stopped: {e}");
+            }
+        }
+        _ = &mut proxy_task => {}
+    }
     proxy_task.abort();
+    // EOF / clean exit: mark this session disconnected so Live Mission
+    // Control never shows a dead agent as active.
+    let cfg = aikd_core::Config::load_validated(config_path);
+    if let Ok(db) = Database::open(&cfg.db_path()) {
+        let _ = aikd_storage::telemetry::disconnect_by_pid(db.conn(), std::process::id() as i64);
+    }
     Ok(())
 }
 

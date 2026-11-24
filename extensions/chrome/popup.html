@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Send to AIKD</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <img class="logo" src="icons/icon48.png" width="28" height="28" alt="" />
+          <div class="brand-text">
+            <h1>Send to AIKD</h1>
+            <p class="tagline">Local memory · zero cloud</p>
+          </div>
+        </div>
+        <div class="conn" id="connPill" title="Daemon status">
+          <span class="dot" id="dot" aria-hidden="true"></span>
+          <span id="connText">checking…</span>
+        </div>
+      </header>
+
+      <div class="portbar">
+        <label class="port-label" for="port">Port</label>
+        <input
+          id="port"
+          class="port-input"
+          type="number"
+          inputmode="numeric"
+          min="1"
+          max="65535"
+          step="1"
+          value="9090"
+          aria-label="AIKD daemon port"
+        />
+        <button id="recheck" class="ghost mini" type="button">Ping</button>
+        <span class="daemon-meta" id="daemonMeta">—</span>
+      </div>
+
+      <main class="sheet">
+        <div class="source-line">
+          <span class="source-dot" aria-hidden="true"></span>
+          <span class="source-host" id="sourceHost" title="Active tab">no active tab</span>
+          <span class="sel-hint" id="selectionHint" hidden>selection captured</span>
+        </div>
+
+        <label class="field">
+          <span class="lbl">Title</span>
+          <input
+            id="title"
+            type="text"
+            placeholder="Auto-derived from the first line if left empty"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+
+        <label class="field">
+          <span class="lbl">
+            Body
+            <span class="counter" id="charCount">0 chars</span>
+          </span>
+          <textarea
+            id="body"
+            rows="6"
+            placeholder="Markdown, [[wikilinks]] and #tags welcome…"
+            spellcheck="false"
+          ></textarea>
+        </label>
+
+        <div class="grid3">
+          <label class="field">
+            <span class="lbl">Kind</span>
+            <select id="kind">
+              <option value="note" selected>note</option>
+              <option value="decision">decision</option>
+              <option value="constraint">constraint</option>
+              <option value="fact">fact</option>
+              <option value="task">task</option>
+              <option value="prompt">prompt</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="lbl">Scope</span>
+            <select id="scope">
+              <option value="project" selected>project</option>
+              <option value="global">global</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="lbl">Folder</span>
+            <select id="folder">
+              <option value="Inbox" selected>Inbox</option>
+              <option value="Projects">Projects</option>
+              <option value="Areas">Areas</option>
+              <option value="Resources">Resources</option>
+              <option value="Memories">Memories</option>
+              <option value="Journal">Journal</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="field">
+          <div class="lbl-row">
+            <span class="lbl">Project</span>
+            <button
+              id="refreshProjects"
+              class="mini icon"
+              type="button"
+              title="Reload projects from the daemon"
+              aria-label="Reload projects"
+            >
+              ↻
+            </button>
+          </div>
+          <select id="project">
+            <option value="">Global — no project</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <span class="lbl">Tags</span>
+          <div class="tagbox" id="tagBox">
+            <div class="chips" id="tagChips"></div>
+            <input
+              id="tagInput"
+              type="text"
+              placeholder="#tag then Enter"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+        </div>
+
+        <div class="shield" id="shield" hidden></div>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+      </main>
+
+      <footer class="dock">
+        <button id="send" class="primary" type="button">Send to AIKD</button>
+        <div class="secondary">
+          <button id="copyPack" class="ghost" type="button">Copy Context Pack</button>
+          <button id="openStudio" class="ghost" type="button">Open Studio</button>
+        </div>
+        <label class="notify">
+          <input id="notify" type="checkbox" checked />
+          <span>Notify on capture</span>
+          <span class="kbd" id="kbdHint">Ctrl+Shift+Y</span>
+        </label>
+      </footer>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
