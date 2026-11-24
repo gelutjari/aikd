@@ -835,6 +835,11 @@ kbd {
       </div>
       <div class="panel" style="margin-bottom:10px;">
         <div class="panel-body" style="padding:10px 12px; display:flex; align-items:center; gap:9px; flex-wrap:wrap;">
+          <div class="segmented" id="graph-preset-seg" title="Human-first focus preset">
+            <button data-preset="knowledge" class="active">Knowledge Brain</button>
+            <button data-preset="code">Code Map</button>
+            <button data-preset="all">All</button>
+          </div>
           <button class="btn btn-sm btn-primary" id="graph-view-toggle" title="Toggle renderer">◉ Force-Directed Galaxy</button>
           <div class="segmented" id="graph-mode-seg" title="Graph scope">
             <button data-mode="global" class="active">Global</button>
@@ -1354,7 +1359,7 @@ const state = {
   graph: {
     rawNodes: [], rawEdges: [], nodes: [], edges: [], adj: new Map(),
     selected: null, hover: null, view: { x: 0, y: 0, z: 1 },
-    mode: 'global', depth: 1, types: new Set(TYPE_ORDER.slice()),
+    preset: 'knowledge', mode: 'global', depth: 1, types: new Set(['project', 'note', 'memory', 'tag', 'agent']),
     hideOrphans: false, tree: false, search: '',
     canvasW: 0, canvasH: 0, dpr: 1,
     dragging: null, panning: false, panStart: null, pointerDown: null,
@@ -2536,9 +2541,9 @@ function bfsKeep(nodes, edges, focus, depth) {
   return keep;
 }
 function nodeRadius(node) {
-  const base = 5 + Math.min(13, Math.sqrt(Math.max(0, toNum(node.degree))) * 2.6);
-  if (node.kind === 'project') return base + 3;
-  if (node.kind === 'tag') return base + 1;
+  const base = 3.4 + Math.min(7.5, Math.sqrt(Math.max(0, toNum(node.degree))) * 1.35);
+  if (node.kind === 'project') return base + 3.2;
+  if (node.kind === 'tag' || node.kind === 'agent') return base + 1.2;
   return base;
 }
 function initGalaxyPositions(list) {
@@ -2634,10 +2639,10 @@ function recomputeGraph(resetView) {
     if (g.tree) assignTreePositions();
     if (!g.tree) {
       if (g.loading) {
-        for (let i = 0; i < 180; i += 1) {
+        for (let i = 0; i < 55; i += 1) {
           if (!graphTick()) break;
         }
-        g.alpha = 0.02;
+        g.alpha = 0.58;
       }
       compactGraphBounds();
     }
@@ -2754,7 +2759,7 @@ function graphTick() {
   const nodes = g.nodes;
   const edges = g.edges;
   const alpha = Math.max(0.02, g.alpha);
-  const repulsion = 820;
+  const repulsion = 1650;
   for (let i = 0; i < nodes.length; i += 1) {
     const a = nodes[i];
     for (let j = i + 1; j < nodes.length; j += 1) {
@@ -2762,7 +2767,7 @@ function graphTick() {
       let dx = b.x - a.x;
       let dy = b.y - a.y;
       let d2 = dx * dx + dy * dy;
-      if (d2 > 482000) continue;
+      if (d2 > 640000) continue;
       if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
       const force = repulsion / d2;
       const fx = dx * force;
@@ -2778,8 +2783,8 @@ function graphTick() {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    const ideal = 104;
-    const force = (dist - ideal) * 0.012;
+    const ideal = 135;
+    const force = (dist - ideal) * 0.014;
     const fx = (dx / dist) * force;
     const fy = (dy / dist) * force;
     a.vx += fx; a.vy += fy;
@@ -2878,7 +2883,7 @@ function drawGraph() {
   ctx.save();
   ctx.translate(g.view.x, g.view.y);
   ctx.scale(g.view.z, g.view.z);
-  const focusId = g.hover || g.selected;
+  const focusId = (g.hover && g.hover.id) || g.selected;
   let focusSet = null;
   if (focusId && g.adj && g.adj.has(focusId)) {
     focusSet = new Set([focusId]);
@@ -2917,16 +2922,18 @@ function drawGraph() {
     });
   }
   ctx.globalAlpha = 1;
+  const placedBoxes = [];
+  const labelCandidates = [];
   g.nodes.forEach((node) => {
     const inFocus = !focusSet || focusSet.has(node.id);
     const color = kindColor(node.kind);
-    const alpha = inFocus ? 0.95 : 0.15;
-    const drawR = Math.max(node.r, 4.4 / Math.max(0.08, g.view.z));
+    const alpha = inFocus ? 0.94 : 0.14;
+    const drawR = Math.max(node.r, 2.2 / Math.max(0.15, g.view.z));
     if (node.degree >= 8 && inFocus) {
       ctx.beginPath();
-      ctx.arc(node.x, node.y, drawR * 2.1, 0, Math.PI * 2);
+      ctx.arc(node.x, node.y, drawR * 2.0, 0, Math.PI * 2);
       ctx.fillStyle = color;
-      ctx.globalAlpha = 0.07;
+      ctx.globalAlpha = 0.08;
       ctx.fill();
     }
     ctx.beginPath();
@@ -2934,34 +2941,52 @@ function drawGraph() {
     ctx.fillStyle = color;
     ctx.globalAlpha = alpha;
     ctx.fill();
-    if (node.id === g.selected) {
+    const isSel = node.id === g.selected;
+    const isHov = g.hover && node.id === g.hover.id;
+    if (isSel) {
       ctx.beginPath();
-      ctx.arc(node.x, node.y, drawR + 3.5 / g.view.z, 0, Math.PI * 2);
+      ctx.arc(node.x, node.y, drawR + 3.2 / g.view.z, 0, Math.PI * 2);
       ctx.strokeStyle = '#e8eff8';
       ctx.globalAlpha = 0.95;
       ctx.lineWidth = 1.6 / g.view.z;
       ctx.stroke();
-    } else if (node.id === g.hover) {
+    } else if (isHov) {
       ctx.beginPath();
       ctx.arc(node.x, node.y, drawR + 2.8 / g.view.z, 0, Math.PI * 2);
       ctx.strokeStyle = '#a7f3d0';
-      ctx.globalAlpha = 0.9;
-      ctx.lineWidth = 1.3 / g.view.z;
+      ctx.globalAlpha = 0.95;
+      ctx.lineWidth = 1.4 / g.view.z;
       ctx.stroke();
     }
-    const showLabel = inFocus && (g.tree || node.r >= 9 || node.id === g.selected || node.id === g.hover || g.view.z >= 0.92 || g.nodes.length <= 50);
-    if (showLabel) {
-      const fontSize = Math.max(8, Math.min(40, 10.5 / g.view.z));
-      ctx.font = '600 ' + fontSize + 'px "Segoe UI", ui-sans-serif, sans-serif';
-      ctx.fillStyle = node.id === g.selected ? '#e8eff8' : '#a9bcd2';
-      ctx.globalAlpha = inFocus ? 0.92 : 0.16;
-      if (g.tree) {
-        ctx.textAlign = 'left';
-        ctx.fillText(graphLabel(node), node.x + node.r + 7 / g.view.z, node.y + fontSize * 0.35);
-      } else {
-        ctx.textAlign = 'center';
-        ctx.fillText(graphLabel(node), node.x, node.y + drawR + 12 / g.view.z);
-      }
+    const isHub = node.kind === 'project' || node.degree >= 6;
+    const showLabel = inFocus && (isSel || isHov || g.tree || (g.view.z >= 0.78 && (g.nodes.length <= 80 || node.degree >= 1)) || isHub || g.nodes.length <= 32);
+    if (showLabel) labelCandidates.push({ node, drawR, isSel, isHov, isHub });
+  });
+  labelCandidates.sort((a, b) => (b.isSel ? 1 : 0) - (a.isSel ? 1 : 0) || (b.isHov ? 1 : 0) - (a.isHov ? 1 : 0) || (b.isHub ? 1 : 0) - (a.isHub ? 1 : 0) || b.node.degree - a.node.degree);
+  labelCandidates.forEach(({ node, drawR, isSel, isHov }) => {
+    const label = graphLabel(node);
+    const fontPx = isSel || isHov ? 11.5 : 10.5;
+    const fontSize = fontPx / g.view.z;
+    const sx = node.x * g.view.z + g.view.x;
+    const sy = node.y * g.view.z + g.view.y + (g.tree ? 0 : drawR * g.view.z + 12);
+    const estW = Math.min(220, label.length * 6.4 + 10);
+    const box = g.tree
+      ? { x1: sx + drawR * g.view.z + 4, y1: sy - 7, x2: sx + drawR * g.view.z + 4 + estW, y2: sy + 7 }
+      : { x1: sx - estW / 2, y1: sy - 7, x2: sx + estW / 2, y2: sy + 7 };
+    if (!isSel && !isHov && !g.tree) {
+      const collides = placedBoxes.some((b) => !(box.x2 < b.x1 || box.x1 > b.x2 || box.y2 < b.y1 || box.y1 > b.y2));
+      if (collides) return;
+    }
+    placedBoxes.push(box);
+    ctx.font = '600 ' + fontSize + 'px "Segoe UI", ui-sans-serif, sans-serif';
+    ctx.fillStyle = isSel || isHov ? '#f8fafc' : '#b4c6dc';
+    ctx.globalAlpha = isSel || isHov ? 0.98 : 0.88;
+    if (g.tree) {
+      ctx.textAlign = 'left';
+      ctx.fillText(label, node.x + drawR + 7 / g.view.z, node.y + fontSize * 0.35);
+    } else {
+      ctx.textAlign = 'center';
+      ctx.fillText(label, node.x, node.y + drawR + 12 / g.view.z);
     }
   });
   if (g.tree && g.treeGroups) {
@@ -3306,6 +3331,16 @@ function bindGraph() {
     if (node) focusLocal(node.id);
   });
   $('graph-view-toggle').addEventListener('click', toggleGraphView);
+  $$('#graph-preset-seg button').forEach((btn) => btn.addEventListener('click', () => {
+    const preset = btn.dataset.preset || 'knowledge';
+    state.graph.preset = preset;
+    $$('#graph-preset-seg button').forEach((b) => b.classList.toggle('active', b === btn));
+    if (preset === 'knowledge') state.graph.types = new Set(['project', 'note', 'memory', 'tag', 'agent']);
+    else if (preset === 'code') state.graph.types = new Set(['project', 'file', 'symbol']);
+    else state.graph.types = new Set(TYPE_ORDER.slice());
+    recomputeGraph(true);
+    startGraphLoop();
+  }));
   $$('#graph-mode-seg button').forEach((btn) => btn.addEventListener('click', () => setGraphMode(btn.dataset.mode)));
   $('graph-depth').addEventListener('change', () => {
     state.graph.depth = parseInt($('graph-depth').value, 10) === 2 ? 2 : 1;

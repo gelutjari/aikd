@@ -1050,10 +1050,22 @@ pub fn knowledge_graph(conn: &Connection, opts: &GraphOptions) -> Result<FileGra
         edges.retain(|e| nodes.contains_key(&e.from) && nodes.contains_key(&e.to));
     }
     let mut ordered: Vec<GraphNode> = nodes.into_values().collect();
+    let kind_tier = |n: &GraphNode, deg: usize| -> u8 {
+        match n.kind.as_str() {
+            "project" | "agent" => 0,
+            "note" | "memory" | "tag" => 1,
+            "file" if deg >= 2 => 2,
+            "symbol" => 3,
+            _ => 4,
+        }
+    };
     ordered.sort_by(|a, b| {
         let da = degree.get(&a.id).copied().unwrap_or(0);
         let db = degree.get(&b.id).copied().unwrap_or(0);
-        db.cmp(&da).then_with(|| a.id.cmp(&b.id))
+        kind_tier(a, da)
+            .cmp(&kind_tier(b, db))
+            .then_with(|| db.cmp(&da))
+            .then_with(|| a.id.cmp(&b.id))
     });
     ordered.truncate(limit);
     let kept: HashSet<String> = ordered.iter().map(|n| n.id.clone()).collect();
