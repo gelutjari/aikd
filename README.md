@@ -33,7 +33,7 @@
 
 <div align="center">
   <img src="docs/media/aikd-graph-motion-qa.gif" alt="AIKD v2.1 Studio 10-Mode Knowledge Graph — 2D Galaxy, Hierarchy Tree, 3D Force Galaxy, 3D Fibonacci Sphere, 3D Orbital Rings, 3D Semantic Layers, Treemap / 3D City, Circle Packing, Sunburst, Semantic Islands, Miller Columns & Swimlane Timeline" width="100%" />
-  <p><sub>🎞️ <a href="docs/media/aikd-graph-motion-qa.mp4"><code>docs/media/aikd-graph-motion-qa.mp4</code></a> · ✅ <a href="docs/GRAPH_MOTION_QA.md">Graph Motion QA report</a> — 10 new modes, camera motion, HiDPI rendering, Inspector sync & clean teardown verified</sub></p>
+  <p><sub>🎞️ <a href="docs/media/aikd-graph-motion-qa.mp4"><code>docs/media/aikd-graph-motion-qa.mp4</code></a> · 10-Mode Knowledge Graph, camera motion, HiDPI rendering, Inspector sync &amp; clean teardown</sub></p>
 </div>
 
 ---
