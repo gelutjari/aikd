@@ -2562,25 +2562,33 @@ function assignTreePositions() {
   const g = state.graph;
   const groups = TYPE_ORDER.map((kind) => ({ kind: kind, nodes: g.nodes.filter((n) => n.kind === kind) }))
     .filter((group) => group.nodes.length);
-  const rowH = 24;
-  const gap = 26;
+  const rowH = 22;
+  const colW = 240;
+  const maxRows = 16;
+  const gap = 34;
   let total = 0;
-  groups.forEach((group) => { total += Math.max(52, group.nodes.length * rowH) + gap; });
+  groups.forEach((group) => {
+    const rows = Math.min(maxRows, group.nodes.length);
+    total += Math.max(52, rows * rowH) + gap;
+  });
   let y = -total / 2;
   g.treeGroups = [];
   groups.forEach((group) => {
-    const height = Math.max(52, group.nodes.length * rowH);
+    const rows = Math.min(maxRows, group.nodes.length);
+    const height = Math.max(52, rows * rowH);
     g.treeGroups.push({
       id: '__tree:' + group.kind, kind: group.kind, label: group.kind,
-      x: 210, y: y + height / 2, count: group.nodes.length, r: 11
+      x: 150, y: y + height / 2, count: group.nodes.length, r: 11
     });
     group.nodes.sort((a, b) => toNum(b.degree) - toNum(a.degree) || String(a.label).localeCompare(String(b.label)));
     group.nodes.forEach((node, i) => {
-      node.x = 500;
-      node.y = y + 14 + i * rowH;
+      const col = Math.floor(i / maxRows);
+      const row = i % maxRows;
+      node.x = 340 + col * colW;
+      node.y = y + 12 + row * rowH;
       node.vx = 0;
       node.vy = 0;
-      node.r = 5 + Math.min(8, Math.sqrt(Math.max(0, toNum(node.degree))) * 1.8);
+      node.r = 4.2 + Math.min(5, Math.sqrt(Math.max(0, toNum(node.degree))) * 1.1);
     });
     y += height + gap;
   });
@@ -2857,8 +2865,27 @@ function compactGraphBounds() {
     });
   }
 }
+const GENERIC_FILENAMES = new Set([
+  'skill.md', 'readme.md', 'agents.md', 'memory.md', 'index.ts', 'index.js', 'index.tsx',
+  'lib.rs', 'main.rs', 'mod.rs', 'cargo.toml', 'package.json', '__init__.py', 'license.txt'
+]);
 function graphLabel(node) {
-  if (node.kind === 'file') return basename(node.label);
+  if (node.kind === 'file') {
+    const raw = String(node.id || '').startsWith('file:') ? String(node.id).slice(5) : String(node.label || '');
+    const parts = raw.replace(/\\/g, '/').split('/').filter(Boolean);
+    const base = parts.length ? parts[parts.length - 1] : String(node.label || '');
+    if (parts.length >= 2 && GENERIC_FILENAMES.has(base.toLowerCase())) {
+      const parent = parts[parts.length - 2];
+      return clampText(parent + '/' + base, 34);
+    }
+    return clampText(base, 34);
+  }
+  if (node.kind === 'memory') {
+    let lbl = String(node.label || '');
+    lbl = lbl.replace(/\s*\([A-Za-z]:[\\/][^)]+\)\s*$/g, '').trim();
+    lbl = lbl.replace(/^\[Skill:\s*([^\]]+)\]/i, '⚡ $1').replace(/^\[Doc:\s*([^\]]+)\]/i, '📄 $1').replace(/^\[Rule:\s*([^\]]+)\]/i, '⚖ $1');
+    return clampText(lbl, 34);
+  }
   return clampText(node.label, 34);
 }
 function drawGraph() {
@@ -3015,6 +3042,37 @@ function drawGraph() {
   }
   ctx.restore();
   ctx.globalAlpha = 1;
+  if (g.hover) {
+    const hn = g.hover;
+    const sx = hn.x * g.view.z + g.view.x;
+    const sy = hn.y * g.view.z + g.view.y;
+    const line1 = (hn.subtype ? hn.kind + ' · ' + hn.subtype : hn.kind).toUpperCase() + '  ' + graphLabel(hn);
+    const proj = hn.project ? basename(hn.project) : 'global';
+    const line2 = 'Project: ' + proj + '  ·  ' + hn.degree + ' links  ·  click to inspect';
+    ctx.font = '600 11.5px "Segoe UI", ui-sans-serif, sans-serif';
+    const w1 = ctx.measureText(line1).width;
+    ctx.font = '400 10.5px "Segoe UI", ui-sans-serif, sans-serif';
+    const w2 = ctx.measureText(line2).width;
+    const boxW = Math.min(360, Math.max(w1, w2) + 22);
+    const boxH = 46;
+    const tx = clamp(sx + 14, 10, Math.max(10, w - boxW - 10));
+    const ty = sy - boxH - 12 < 10 ? Math.min(h - boxH - 10, sy + 16) : sy - boxH - 12;
+    ctx.fillStyle = 'rgba(11, 17, 27, 0.94)';
+    ctx.strokeStyle = kindColor(hn.kind);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(tx, ty, boxW, boxH, 8);
+    else ctx.rect(tx, ty, boxW, boxH);
+    ctx.fill();
+    ctx.stroke();
+    ctx.textAlign = 'left';
+    ctx.font = '600 11.5px "Segoe UI", ui-sans-serif, sans-serif';
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillText(clampText(line1, 46), tx + 11, ty + 18);
+    ctx.font = '400 10.5px "Segoe UI", ui-sans-serif, sans-serif';
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText(clampText(line2, 52), tx + 11, ty + 35);
+  }
 }
 function canvasPoint(event) {
   const canvas = $('graph-canvas');
@@ -3338,8 +3396,7 @@ function bindGraph() {
     if (preset === 'knowledge') state.graph.types = new Set(['project', 'note', 'memory', 'tag', 'agent']);
     else if (preset === 'code') state.graph.types = new Set(['project', 'file', 'symbol']);
     else state.graph.types = new Set(TYPE_ORDER.slice());
-    recomputeGraph(true);
-    startGraphLoop();
+    loadGraph(true);
   }));
   $$('#graph-mode-seg button').forEach((btn) => btn.addEventListener('click', () => setGraphMode(btn.dataset.mode)));
   $('graph-depth').addEventListener('change', () => {
