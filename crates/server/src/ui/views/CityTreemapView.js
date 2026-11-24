@@ -901,15 +901,6 @@
     city.districts.forEach(function (d) {
       var pts = [pr(d.x, d.y, 0), pr(d.x + d.w, d.y, 0), pr(d.x + d.w, d.y + d.h, 0), pr(d.x, d.y + d.h, 0)];
       drawQuad(g, pts, rgba(d.color, 0.1), rgba(d.color, 0.3), 1);
-      var p1 = pr(d.x, d.y, 0);
-      var p2 = pr(d.x + d.w, d.y, 0);
-      var width = Math.abs(p2.x - p1.x);
-      if (width > 66) {
-        g.fillStyle = rgba(lighten(d.color, 0.4), 0.9);
-        g.font = '700 12px ui-sans-serif,system-ui,sans-serif';
-        g.textBaseline = 'top';
-        g.fillText(clampText(d.name, Math.floor(width / 7)), p1.x + 6, p1.y + 4);
-      }
     });
 
     city.blocks.forEach(function (b) {
@@ -917,22 +908,31 @@
       drawQuad(g, pts, rgba(b.color, 0.12), rgba(b.color, 0.26), 1);
     });
 
-    var labelThreshold = 0.62;
+    var selId = S.selectedId;
+    var lit = null;
+    if (selId) {
+      lit = Object.create(null);
+      lit[selId] = true;
+      var nbs = S.adj[selId] || [];
+      for (var ni = 0; ni < nbs.length; ni++) lit[nbs[ni]] = true;
+    }
+
     city.buildings.forEach(function (b) {
       var x0 = b.x, y0 = b.y, x1 = b.x + b.w, y1 = b.y + b.d, z = b.h;
       var t1 = pr(x0, y0, z), t2 = pr(x1, y0, z), t3 = pr(x1, y1, z), t4 = pr(x0, y1, z);
-      var b1 = pr(x0, y0, 0), b2 = pr(x1, y0, 0), b3 = pr(x1, y1, 0), b4 = pr(x0, y1, 0);
+      var b2 = pr(x1, y0, 0), b3 = pr(x1, y1, 0), b4 = pr(x0, y1, 0);
       var id = idOf(b.leaf);
       var sel = id !== null && id === S.selectedId;
       var hov = id !== null && id === S.hoverId;
+      var dim = (lit && !lit[id]) ? 0.3 : 1;
 
       if (sel || hov) {
         g.save();
         g.shadowColor = b.color;
-        g.shadowBlur = sel ? 22 : 13;
+        g.shadowBlur = sel ? 24 : 13;
       }
-      drawQuad(g, [t2, t3, b3, b2], rgba(darken(b.color, 0.26), 0.94), 'rgba(2,6,12,.4)', 0.6);
-      drawQuad(g, [t4, t3, b3, b4], rgba(darken(b.color, 0.46), 0.95), 'rgba(2,6,12,.4)', 0.6);
+      drawQuad(g, [t2, t3, b3, b2], rgba(darken(b.color, 0.26), 0.94 * dim), 'rgba(2,6,12,.4)', 0.6);
+      drawQuad(g, [t4, t3, b3, b4], rgba(darken(b.color, 0.46), 0.95 * dim), 'rgba(2,6,12,.4)', 0.6);
       drawQuad(g, [t1, t2, t3, t4],
         sel ? lighten(b.color, 0.55) : (hov ? lighten(b.color, 0.28) : lighten(b.color, 0.1)),
         'rgba(2,6,12,.35)', 0.6);
@@ -948,18 +948,44 @@
         g.arc(mid.x, mid.y, 5 + 4 * pulse, 0, TAU);
         g.stroke();
         g.restore();
-      }
 
-      if (S.cam.k * city.fit > labelThreshold && b.w * city.fit * S.cam.k > 26) {
-        var lp = pr(x0 + b.w / 2, y0 + b.d / 2, z);
+        var lbl = clampText(labelOf(b.node || b.leaf, S.ctx.helpers), 26);
         g.save();
-        g.fillStyle = 'rgba(226,240,255,.72)';
-        g.font = '600 10px ui-sans-serif,system-ui,sans-serif';
+        g.font = '600 11px ui-sans-serif,system-ui,sans-serif';
+        var tw = g.measureText(lbl).width;
+        var lx = mid.x - tw / 2 - 8;
+        var ly = mid.y - 30;
+        g.fillStyle = 'rgba(5,10,18,.86)';
+        g.strokeStyle = rgba(b.color, 0.7);
+        g.lineWidth = 1;
+        pathRoundRect(g, lx, ly, tw + 16, 20, 6);
+        g.fill();
+        g.stroke();
+        g.fillStyle = '#eaf4ff';
         g.textAlign = 'center';
-        g.textBaseline = 'bottom';
-        g.fillText(clampText(labelOf(b.node || b.leaf, S.ctx.helpers), 18), lp.x, lp.y - 4);
+        g.textBaseline = 'middle';
+        g.fillText(lbl, mid.x, ly + 10.5);
         g.restore();
       }
+    });
+
+    city.districts.forEach(function (d) {
+      var pw = Math.abs(pr(d.x + d.w, d.y, 0).x - pr(d.x, d.y, 0).x);
+      if (pw < 64) return;
+      var p = pr(d.x + 4, d.y + 4, 0);
+      var text = clampText(d.name, Math.max(4, Math.floor(pw / 7)));
+      g.font = '600 11px ui-sans-serif,system-ui,sans-serif';
+      var tw = g.measureText(text).width;
+      g.fillStyle = 'rgba(5,10,18,.74)';
+      g.strokeStyle = rgba(d.color, 0.55);
+      g.lineWidth = 1;
+      pathRoundRect(g, p.x, p.y, tw + 14, 18, 6);
+      g.fill();
+      g.stroke();
+      g.fillStyle = rgba(lighten(d.color, 0.35), 0.95);
+      g.textAlign = 'left';
+      g.textBaseline = 'middle';
+      g.fillText(text, p.x + 7, p.y + 9.5);
     });
 
     drawArcs(g, pr, time);
@@ -982,12 +1008,12 @@
       var dist = Math.sqrt(dx * dx + dy * dy);
       if (dist < 2 || dist > 4000) return;
       var lift = 26 + Math.min(150, dist * 0.32);
-      var alpha = 0.5 + 0.28 * Math.sin(time * 3 + i * 0.9);
+      var alpha = 0.55 + 0.3 * Math.sin(time * 3 + i * 0.9);
       g.save();
-      g.strokeStyle = rgba(lighten(toB.color, 0.3), alpha);
-      g.lineWidth = 1.4;
+      g.strokeStyle = rgba(lighten(toB.color, 0.35), alpha);
+      g.lineWidth = 1.9;
       g.shadowColor = toB.color;
-      g.shadowBlur = 12;
+      g.shadowBlur = 15;
       g.beginPath();
       g.moveTo(from.x, from.y);
       g.quadraticCurveTo((from.x + to.x) / 2, (from.y + to.y) / 2 - lift, to.x, to.y);
